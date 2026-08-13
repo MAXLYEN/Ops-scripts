@@ -13,14 +13,14 @@ migrate/08-post-start-check     迁入机：端到端验收（含切换前预演
 migrate/09-restore-backup-stack 迁入机：重建备份体系
 
 # ── ops/ 日常运维 ──────────────────────────────────────────
-ops/save-fw                     改防火墙前保存现状          [待补]
-ops/restore-cron                恢复自有 cron               [待补]
-ops/preflight-backup            备份前置检查                [待补]
-ops/verify-backup-pass          验证云端包能否打开          [待补]
-ops/ssl-audit                   证书文件/引用/面板记录对账  [待补]
-ops/panel-cron-inspect          查明面板计划任务的真实身份  [待补]
-ops/bind-localhost              收紧容器端口绑定            [待补]
+ops/save-fw                     改防火墙前保存现状
+ops/restore-cron                从快照恢复自有 cron
+ops/preflight-backup            备份脚本的依赖与前置检查
+ops/verify-backup-pass          验证云端包能否用本地密码打开
+ops/ssl-audit                   证书文件/站点引用/续期记录三方对账
+ops/panel-cron-inspect          查明面板计划任务的真实身份（--run 可手动触发）
+ops/bind-localhost              把容器端口收到 127.0.0.1（--apply 执行）
 
 # ── db/ 数据库维护 ─────────────────────────────────────────
-db/rotate-db-pass               轮换库密码并同步下游配置    [待补]
-db/sqlite-dsn                   查改存在 SQLite 里的连接串  [待补]
+db/rotate-db-pass               轮换库密码，核对所有 host 记录（check / rotate）
+db/sqlite-dsn                   查改存在 SQLite 里的连接串（scan / sethost / setpass）
