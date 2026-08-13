@@ -1,6 +1,14 @@
 # ops-scripts 脚本清单
 # 用法: opsget <路径>   例如 opsget migrate/03-pre-migrate
 
+# ── init/ 新机初始化，按编号顺序 ───────────────────────────
+init/run                        阶段调度器：不带参数列出全部，带编号执行
+init/00-precheck                环境探测与更新（含网络形态判断）
+init/01-swap-memory             Swap 与内存参数
+init/02-system-network          UTC 时区、IPv4 优先、磁盘 udev、BBR、内核参数
+init/03-ssh-firewall            SSH 加固、ufw、fail2ban（含 5 分钟自动回滚）
+init/04-verify                  重启后持久性验证（只读）
+
 # ── migrate/ 整机迁移，按编号顺序 ──────────────────────────
 migrate/01-inventory            新旧机各跑一次，摸底对比
 migrate/02-nat-probe            入站可达性验证（listen / probe）
@@ -22,6 +30,8 @@ ops/panel-cron-inspect          查明面板计划任务的真实身份（--run 
 ops/bind-localhost              把容器端口收到 127.0.0.1（--apply 执行）
 ops/cleanup-tidy                清理冗余：历史输出、旧版备份、中间产物（--apply 执行）
 ops/cleanup-purge               彻底移除 ops-scripts 及其全部产物（--apply 执行）
+ops/script-inventory            盘点本机脚本：哪些来自云端、哪些只在本地
+ops/panel-backup-upload         把面板整机备份包加密上传到网盘（手动，--list/--raw/--prune）
 
 # ── db/ 数据库维护 ─────────────────────────────────────────
 db/rotate-db-pass               轮换库密码，核对所有 host 记录（check / rotate）

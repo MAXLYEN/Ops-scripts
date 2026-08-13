@@ -23,12 +23,17 @@ opsget -i ops/preflight-backup     # 只安装到 /usr/local/bin，不执行
 
 ```
 bin/opsget              引导器：拉取、安装、执行
-lib/common.sh           公共函数库，所有脚本 source 它
+lib/common.sh           公共函数库
 config/env.example.conf 配置模板
+init/                   新机初始化，按编号顺序执行
 migrate/                整机迁移流程，按编号顺序执行
 ops/                    日常运维
 db/                     数据库相关维护
 ```
+
+`init/` 与其它目录有一点不同：**它不依赖 `lib/common.sh`**。这些脚本要能在
+一台什么都没有的新机上单跑，少一个依赖就少一个失败点。它们也不强制要求
+`env.conf` —— 没有就用内置默认值，有就以配置为准。
 
 ## 配置文件
 
@@ -55,6 +60,27 @@ db/                     数据库相关维护
 | `09-post-start-check.sh` | 新机 | 端到端验收 |
 | `10-restore-backup-stack.sh` | 新机 | 重建备份体系 |
 
+### init/ — 新机初始化
+
+推荐顺序：`00` →(需要则重启)→ `01` → `02` → `03` →(重启)→ `04`
+
+```bash
+opsget init/run          # 列出阶段与当前状态
+opsget init/run 00       # 执行指定阶段
+```
+
+| 脚本 | 作用 |
+|---|---|
+| `run.sh` | 阶段调度器，03 之前会强制确认第二个 SSH 窗口已就绪 |
+| `00-precheck.sh` | 环境探测与系统更新，判断是否需重启 |
+| `01-swap-memory.sh` | 按内存分档创建 swapfile，内存参数 |
+| `02-system-network.sh` | UTC 时区、IPv4 优先、SUID、磁盘 udev、BBR、内核参数、日志上限 |
+| `03-ssh-firewall.sh` | SSH 加固、ufw、fail2ban，含 5 分钟自动回滚 |
+| `04-verify.sh` | 重启后持久性验证（只读） |
+
+**跑 03 之前务必确认带外控制台能进。** 脚本有自动回滚兜底，但那是最后一道
+保险，不是第一道。
+
 ### ops/ — 日常运维
 
 | 脚本 | 作用 |
@@ -68,6 +94,8 @@ db/                     数据库相关维护
 | `bind-localhost.sh` | 把容器端口从 0.0.0.0 收到 127.0.0.1 |
 | `cleanup-tidy.sh` | 清理冗余：历史输出、旧版备份、中间产物 |
 | `cleanup-purge.sh` | 彻底移除本套脚本及其全部产物 |
+| `script-inventory.sh` | 盘点本机脚本：哪些来自云端、哪些只在本地 |
+| `panel-backup-upload.sh` | 把面板整机备份包加密上传到网盘（手动执行） |
 
 ### db/ — 数据库维护
 
