@@ -104,6 +104,34 @@ opsget init/run 00       # 执行指定阶段
 | `rotate-db-pass.sh` | 轮换业务库密码并同步下游配置 |
 | `komari-dsn.sh` | 查看/修改存在 SQLite 里的连接串 |
 
+## 定时任务与云端的关系
+
+**cron 永远调用本地已安装的脚本，绝不调用 `opsget`。**
+
+```
+# 对
+30 3 * * * flock -w 3600 /var/lock/fullbackup.lock /usr/local/bin/vw-fullbackup.sh >> /var/log/vw-fullbackup-cron.log 2>&1
+
+# 错
+30 3 * * * opsget backup/vw-fullbackup
+```
+
+三个理由：
+
+1. **不能让备份依赖外网才能启动。** 凌晨三点半 GitHub 连不上，备份就静默不跑了 —— 而备份失败恰恰是最难发现的一类故障
+2. **不能让未经验证的代码在无人值守时自动生效。** 云端改一行，当晚就跑在生产备份上，没人看着
+3. opsget 每次更新都会留 `.bak`，cron 频率下会堆积
+
+所以云端是**分发源**，本地文件才是**运行的东西**，更新是一个显式动作：
+
+```bash
+opsget -i <路径>        # 只安装，不执行
+/usr/local/bin/<脚本>   # 手动跑一次验证
+                        # 确认没问题，下次 cron 自然用新版
+```
+
+安装路径与 cron 里写的路径一致，所以**更新脚本不需要动 crontab**。
+
 ## 清理
 
 两个脚本都**默认只列不删**，加 `--apply` 才执行。
