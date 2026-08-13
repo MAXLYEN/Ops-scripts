@@ -18,7 +18,7 @@
 
 set -o pipefail
 
-OPS_REPO="${OPS_REPO:-https://raw.githubusercontent.com/CHANGE-ME/ops-scripts}"
+OPS_REPO="${OPS_REPO:-https://raw.githubusercontent.com/MAXLYEN/ops-scripts}"
 OPS_REF="${OPS_REF:-main}"
 BASE="$OPS_REPO/$OPS_REF"
 BIN_DIR=/usr/local/bin
