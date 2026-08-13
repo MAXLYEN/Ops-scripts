@@ -6,7 +6,7 @@
 
 ```bash
 # 1. 装引导器
-curl -fsSL https://raw.githubusercontent.com/<用户名>/ops-scripts/main/bin/opsget \
+curl -fsSL https://raw.githubusercontent.com/MAXLYEN/ops-scripts/main/bin/opsget \
   -o /usr/local/bin/opsget && chmod +x /usr/local/bin/opsget
 
 # 2. 生成配置（首次）
