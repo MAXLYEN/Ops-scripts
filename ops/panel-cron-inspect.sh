@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/panel-cron-inspect.sh — 查明面板计划任务的真实身份
-# VERSION: 2.0.0
+# VERSION: 2.0.1
+# 2.0.1: 修正"没有日志文件"的措辞 —— 手动触发不会产生日志，日志重定向写在 crontab 行里
 #
 # 面板的计划任务在 crontab 里是一串 hash，看不出干什么。而且迁移后
 # hash 会被重新生成，不能靠 hash 匹配新旧机。必须打开脚本看内容。
@@ -45,7 +46,8 @@ crontab -l 2>/dev/null | grep -oE "${PANEL_CRON_DIR}/[a-f0-9]{32}" | sort -u | w
       echo "     最近日志尾部:"
       tail -4 "$f.log" 2>/dev/null | sed 's/^/       /'
     else
-      echo "     [注意] 没有日志文件 —— 这个任务可能一次都没跑过"
+      echo "     [注意] 没有日志文件 —— 可能一次都没被 cron 调度过。"
+      echo "            （手动触发不会产生日志：重定向写在 crontab 行里，不在脚本里）"
     fi
   else
     warn "脚本文件不存在: $f"

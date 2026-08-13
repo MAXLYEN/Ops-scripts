@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # opsget — ops-scripts 引导器
-# VERSION: 1.0.0
+# VERSION: 1.1.0
+# 1.1.0: 记录安装台账到 /var/lib/ops-scripts/installed.list，供清理脚本精确回收
 #
 # 从仓库拉取脚本，装到本地并执行。云端改完，这边重新拉一次就生效。
 #
@@ -25,6 +26,8 @@ BIN_DIR=/usr/local/bin
 LIB_DST=/usr/local/lib/ops-common.sh
 ENV_DIR=/etc/ops-scripts
 ENV_FILE="$ENV_DIR/env.conf"
+LEDGER_DIR=/var/lib/ops-scripts
+LEDGER="$LEDGER_DIR/installed.list"
 
 die() { printf '[致命] %s\n' "$*" >&2; exit 1; }
 log() { printf '%s\n' "$*"; }
@@ -51,6 +54,9 @@ fetch() {  # fetch <仓库内路径> <落盘路径>
     mv "$tmp" "$out"; log "[+] $out 已安装"
   fi
   chmod 755 "$out"
+  # 台账：记下装了什么，清理脚本据此精确回收，不会误删同目录下的其它脚本
+  mkdir -p "$LEDGER_DIR"
+  grep -qxF "$out" "$LEDGER" 2>/dev/null || printf '%s\n' "$out" >> "$LEDGER"
 }
 
 sync_lib() {
@@ -59,6 +65,8 @@ sync_lib() {
     if [ -f "$LIB_DST" ] && cmp -s "$tmp" "$LIB_DST"; then rm -f "$tmp"
     else mkdir -p "$(dirname "$LIB_DST")"; mv "$tmp" "$LIB_DST"; chmod 644 "$LIB_DST"
          log "[~] common.sh 已更新"; fi
+    mkdir -p "$LEDGER_DIR"
+    grep -qxF "$LIB_DST" "$LEDGER" 2>/dev/null || printf '%s\n' "$LIB_DST" >> "$LEDGER"
   else
     rm -f "$tmp"; [ -f "$LIB_DST" ] || die "common.sh 拉取失败且本地没有"
     log "[警告] common.sh 拉取失败，沿用本地版本"

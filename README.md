@@ -66,6 +66,8 @@ db/                     数据库相关维护
 | `ssl-audit.sh` | 证书文件、站点引用、面板记录三方对账 |
 | `bt-cron-inspect.sh` | 查明面板计划任务的真实身份 |
 | `bind-localhost.sh` | 把容器端口从 0.0.0.0 收到 127.0.0.1 |
+| `cleanup-tidy.sh` | 清理冗余：历史输出、旧版备份、中间产物 |
+| `cleanup-purge.sh` | 彻底移除本套脚本及其全部产物 |
 
 ### db/ — 数据库维护
 
@@ -73,6 +75,29 @@ db/                     数据库相关维护
 |---|---|
 | `rotate-db-pass.sh` | 轮换业务库密码并同步下游配置 |
 | `komari-dsn.sh` | 查看/修改存在 SQLite 里的连接串 |
+
+## 清理
+
+两个脚本都**默认只列不删**，加 `--apply` 才执行。
+
+```bash
+opsget ops/cleanup-tidy            # 预演：会删哪些冗余
+opsget ops/cleanup-tidy --apply    # 执行，每类保留最新 2 份
+KEEP=5 opsget ops/cleanup-tidy --apply
+
+opsget ops/cleanup-purge           # 预演：彻底移除会删什么
+opsget ops/cleanup-purge --apply   # 执行，还需输入 yes 二次确认
+KEEP_ENV=1 opsget ops/cleanup-purge --apply   # 保留 env.conf
+```
+
+`cleanup-purge` 按 `/var/lib/ops-scripts/installed.list` 台账精确回收，
+不会误删同目录下你自己的脚本。两个脚本都对以下路径做了硬拦截，任何情况下都不删：
+
+- `BACKUP_DIRS` 备份产物
+- `CONTAINER_DATA_DIRS` 容器数据
+- 凭据文件（`BACKUP_PASS_FILES`、`MYSQL_DEFAULTS_FILE`、rclone 配置、msmtprc）
+- `PANEL_ROOT` 面板目录
+- 云端的任何文件
 
 ## 约定
 

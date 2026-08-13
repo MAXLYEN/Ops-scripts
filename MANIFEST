@@ -20,6 +20,8 @@ ops/verify-backup-pass          验证云端包能否用本地密码打开
 ops/ssl-audit                   证书文件/站点引用/续期记录三方对账
 ops/panel-cron-inspect          查明面板计划任务的真实身份（--run 可手动触发）
 ops/bind-localhost              把容器端口收到 127.0.0.1（--apply 执行）
+ops/cleanup-tidy                清理冗余：历史输出、旧版备份、中间产物（--apply 执行）
+ops/cleanup-purge               彻底移除 ops-scripts 及其全部产物（--apply 执行）
 
 # ── db/ 数据库维护 ─────────────────────────────────────────
 db/rotate-db-pass               轮换库密码，核对所有 host 记录（check / rotate）
