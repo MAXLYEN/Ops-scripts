@@ -1,24 +1,26 @@
 # ops-scripts 脚本清单
 # 用法: opsget <路径>   例如 opsget migrate/03-pre-migrate
 
-migrate/01-inventory          新旧机各跑一次，摸底对比
-migrate/02-nat-probe          入站可达性验证（listen / probe）
-migrate/03-pre-migrate        迁出机：冷快照
-migrate/04-snapshot-extra     迁出机：补齐快照        [待补]
-migrate/05-verify-migration   新旧机各跑一次，逐项比对
-migrate/06-fix-db-grants      迁入机：修正账号 host   [待补]
-migrate/07-export-images      迁出机：导出容器镜像    [待补]
-migrate/08-restore-containers 迁入机：恢复容器        [待补]
-migrate/09-post-start-check   迁入机：端到端验收      [待补]
-migrate/10-restore-backup-stack 迁入机：重建备份体系  [待补]
+# ── migrate/ 整机迁移，按编号顺序 ──────────────────────────
+migrate/01-inventory            新旧机各跑一次，摸底对比
+migrate/02-nat-probe            入站可达性验证（listen / probe）
+migrate/03-pre-migrate          迁出机：冷快照（停服、全量导出、打包）
+migrate/04-verify-migration     新旧机各跑一次，逐项比对后 diff
+migrate/05-fix-db-grants        迁入机：修正被面板改掉的账号 host
+migrate/06-export-images        迁出机：导出容器镜像（不要重新 pull）
+migrate/07-restore-containers   迁入机：恢复数据目录，生成启动命令
+migrate/08-post-start-check     迁入机：端到端验收（含切换前预演）
+migrate/09-restore-backup-stack 迁入机：重建备份体系
 
-ops/save-fw                   改防火墙前保存现状      [待补]
-ops/restore-cron              恢复自有 cron           [待补]
-ops/preflight-backup          备份前置检查            [待补]
-ops/verify-backup-pass        验证云端包能否打开      [待补]
-ops/ssl-audit                 证书三方对账            [待补]
-ops/bt-cron-inspect           查明面板计划任务身份    [待补]
-ops/bind-localhost            收紧容器端口绑定        [待补]
+# ── ops/ 日常运维 ──────────────────────────────────────────
+ops/save-fw                     改防火墙前保存现状          [待补]
+ops/restore-cron                恢复自有 cron               [待补]
+ops/preflight-backup            备份前置检查                [待补]
+ops/verify-backup-pass          验证云端包能否打开          [待补]
+ops/ssl-audit                   证书文件/引用/面板记录对账  [待补]
+ops/panel-cron-inspect          查明面板计划任务的真实身份  [待补]
+ops/bind-localhost              收紧容器端口绑定            [待补]
 
-db/rotate-db-pass             轮换库密码并同步下游    [待补]
-db/komari-dsn                 查改 SQLite 里的连接串  [待补]
+# ── db/ 数据库维护 ─────────────────────────────────────────
+db/rotate-db-pass               轮换库密码并同步下游配置    [待补]
+db/sqlite-dsn                   查改存在 SQLite 里的连接串  [待补]
