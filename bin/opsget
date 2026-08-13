@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# opsget — ops-scripts 引导器
+# VERSION: 1.0.0
+#
+# 从仓库拉取脚本，装到本地并执行。云端改完，这边重新拉一次就生效。
+#
+#   opsget -l                      列出可用脚本
+#   opsget -c                      拉取配置模板到 /etc/ops-scripts/env.conf
+#   opsget -i <路径>               只安装，不执行
+#   opsget -u                      更新自身与 common.sh
+#   opsget <路径> [参数...]        拉取、安装并执行
+#
+# 路径写成 migrate/03-pre-migrate 或 migrate/03-pre-migrate.sh 都可以。
+#
+# 环境变量：
+#   OPS_REPO   仓库 raw 基地址（默认见下）
+#   OPS_REF    分支或 tag（默认 main）—— 生产环境建议锁 tag
+
+set -o pipefail
+
+OPS_REPO="${OPS_REPO:-https://raw.githubusercontent.com/CHANGE-ME/ops-scripts}"
+OPS_REF="${OPS_REF:-main}"
+BASE="$OPS_REPO/$OPS_REF"
+BIN_DIR=/usr/local/bin
+LIB_DST=/usr/local/lib/ops-common.sh
+ENV_DIR=/etc/ops-scripts
+ENV_FILE="$ENV_DIR/env.conf"
+
+die() { printf '[致命] %s\n' "$*" >&2; exit 1; }
+log() { printf '%s\n' "$*"; }
+
+[ "$(id -u)" -eq 0 ] || die "需要 root"
+command -v curl >/dev/null 2>&1 || die "缺少 curl"
+
+fetch() {  # fetch <仓库内路径> <落盘路径>
+  local url="$BASE/$1" out=$2 tmp
+  tmp=$(mktemp) || die "mktemp 失败"
+  if ! curl -fsSL --max-time 60 "$url" -o "$tmp"; then
+    rm -f "$tmp"; die "拉取失败: $url"
+  fi
+  [ -s "$tmp" ] || { rm -f "$tmp"; die "拉到空文件: $url"; }
+  # 幂等：内容相同就不动，不同则备份旧版
+  if [ -f "$out" ] && cmp -s "$tmp" "$out"; then
+    log "[=] $out 已是最新"
+    rm -f "$tmp"
+  elif [ -f "$out" ]; then
+    cp -a "$out" "$out.bak.$(date -u +%Y%m%d%H%M%S)"
+    mv "$tmp" "$out"; log "[~] $out 已更新（旧版已备份）"
+  else
+    mkdir -p "$(dirname "$out")"
+    mv "$tmp" "$out"; log "[+] $out 已安装"
+  fi
+  chmod 755 "$out"
+}
+
+sync_lib() {
+  local tmp; tmp=$(mktemp)
+  if curl -fsSL --max-time 60 "$BASE/lib/common.sh" -o "$tmp" && [ -s "$tmp" ]; then
+    if [ -f "$LIB_DST" ] && cmp -s "$tmp" "$LIB_DST"; then rm -f "$tmp"
+    else mkdir -p "$(dirname "$LIB_DST")"; mv "$tmp" "$LIB_DST"; chmod 644 "$LIB_DST"
+         log "[~] common.sh 已更新"; fi
+  else
+    rm -f "$tmp"; [ -f "$LIB_DST" ] || die "common.sh 拉取失败且本地没有"
+    log "[警告] common.sh 拉取失败，沿用本地版本"
+  fi
+}
+
+case "${1:-}" in
+  -l|--list)
+    log "从 $BASE 拉取清单…"
+    curl -fsSL --max-time 60 "$BASE/MANIFEST" 2>/dev/null \
+      || die "仓库里没有 MANIFEST，去 GitHub 页面直接看目录"
+    exit 0 ;;
+
+  -c|--config)
+    mkdir -p "$ENV_DIR"; chmod 700 "$ENV_DIR"
+    if [ -f "$ENV_FILE" ]; then
+      log "$ENV_FILE 已存在，不覆盖。模板另存为 $ENV_FILE.example"
+      curl -fsSL --max-time 60 "$BASE/config/env.example.conf" -o "$ENV_FILE.example" \
+        && chmod 600 "$ENV_FILE.example" && log "[+] $ENV_FILE.example"
+    else
+      curl -fsSL --max-time 60 "$BASE/config/env.example.conf" -o "$ENV_FILE" \
+        || die "拉取配置模板失败"
+      chmod 600 "$ENV_FILE"
+      log "[+] $ENV_FILE —— 现在去把它填完"
+    fi
+    exit 0 ;;
+
+  -u|--update)
+    fetch "bin/opsget" "$BIN_DIR/opsget"
+    sync_lib
+    log "已更新（ref: $OPS_REF）"
+    exit 0 ;;
+
+  -i|--install)
+    shift
+    [ -n "${1:-}" ] || die "用法: opsget -i <路径>"
+    P=${1%.sh}; NAME=$(basename "$P")
+    sync_lib
+    fetch "$P.sh" "$BIN_DIR/$NAME.sh"
+    log "已安装到 $BIN_DIR/$NAME.sh（未执行）"
+    exit 0 ;;
+
+  ""|-h|--help)
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0 ;;
+esac
+
+# ── 拉取并执行 ──────────────────────────────────────────────
+P=${1%.sh}; shift
+NAME=$(basename "$P")
+sync_lib
+fetch "$P.sh" "$BIN_DIR/$NAME.sh"
+
+[ -f "$ENV_FILE" ] || log "[警告] 还没有 $ENV_FILE，脚本可能会因缺配置退出（先跑 opsget -c）"
+
+log "──────── 执行 $NAME ────────"
+exec "$BIN_DIR/$NAME.sh" "$@"
