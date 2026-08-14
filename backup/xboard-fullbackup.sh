@@ -2,7 +2,9 @@
 #
 # xboard-fullbackup.sh —— Xboard 面板单包备份
 #
-# VERSION: 2.0.0
+# VERSION: 2.0.1
+# 2.0.1 变更：vhost 改为按 server_name 反查，不再假设文件名等于域名
+#            （实测漏了一个站点的 vhost —— 面板给它的文件名带了前缀）
 # 2.0.0 变更：环境相关的值全部外置到 /etc/ops-scripts/env.conf，**主体逻辑一行未动**。
 #            RESTORE.md 里的域名与 host 段改为按配置生成；补 sleep 10 再校验；
 #            7z 自检加 </dev/null（-mhe=on 的包缺密码会交互式等输入）。
@@ -192,10 +194,18 @@ log "--- 打包 nginx 配置与证书 ---"
 
 mkdir -p "$WORK/nginx/vhost" "$WORK/nginx/cert"
 for site in "${SITES[@]}"; do
-    [ -f "${PANEL_VHOST_DIR}/${site}.conf" ] \
-        && cp -a "${PANEL_VHOST_DIR}/${site}.conf" "$WORK/nginx/vhost/"
+    # vhost 的文件名不一定等于域名 —— 面板可能加前缀（如 html_<域名>.conf）。
+    # 按 server_name 反查才可靠：文件名可以随面板怎么起，server_name 骗不了人。
+    FOUND=0
+    while IFS= read -r f; do
+        [ -f "$f" ] || continue
+        cp -a "$f" "$WORK/nginx/vhost/" && FOUND=1
+    done < <(grep -lE "server_name[^;]*[[:space:]]${site//./\\.}[[:space:];]" \
+                  "${PANEL_VHOST_DIR}"/*.conf 2>/dev/null)
+    [ "$FOUND" -eq 1 ] || warn "没找到 $site 的 vhost（恢复时这个站要手工重建反代）"
     [ -d "${PANEL_CERT_DIR}/${site}" ] \
-        && cp -a "${PANEL_CERT_DIR}/${site}" "$WORK/nginx/cert/"
+        && cp -a "${PANEL_CERT_DIR}/${site}" "$WORK/nginx/cert/" \
+        || warn "没找到 $site 的证书目录"
 done
 [ -d "${WWWROOT}/${ASSETS_SITE}" ] \
     && cp -a "${WWWROOT}/${ASSETS_SITE}" "$WORK/nginx/assets-site"
