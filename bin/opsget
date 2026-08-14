@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # opsget — ops-scripts 引导器
-# VERSION: 1.1.0
+# VERSION: 1.2.0
+# 1.2.0: 拉取加重试 —— 实测遇到过 DNS 瞬时解析失败（Could not resolve host），
+#        一次失败就放弃会让「云端是唯一来源」这件事变得不可靠
 # 1.1.0: 记录安装台账到 /var/lib/ops-scripts/installed.list，供清理脚本精确回收
 #
 # 从仓库拉取脚本，装到本地并执行。云端改完，这边重新拉一次就生效。
@@ -35,11 +37,21 @@ log() { printf '%s\n' "$*"; }
 [ "$(id -u)" -eq 0 ] || die "需要 root"
 command -v curl >/dev/null 2>&1 || die "缺少 curl"
 
+# 瞬时的 DNS / 路由故障不该让整条命令失败 —— 重试三次，间隔 3 秒
+curl_retry() {  # curl_retry <url> <落盘路径>
+  local i
+  for i in 1 2 3; do
+    curl -fsSL --max-time 60 --retry 2 --retry-connrefused "$1" -o "$2" && return 0
+    [ "$i" -lt 3 ] && { log "[重试 $i/3] $1"; sleep 3; }
+  done
+  return 1
+}
+
 fetch() {  # fetch <仓库内路径> <落盘路径>
   local url="$BASE/$1" out=$2 tmp
   tmp=$(mktemp) || die "mktemp 失败"
-  if ! curl -fsSL --max-time 60 "$url" -o "$tmp"; then
-    rm -f "$tmp"; die "拉取失败: $url"
+  if ! curl_retry "$url" "$tmp"; then
+    rm -f "$tmp"; die "拉取失败（已重试 3 次）: $url"
   fi
   [ -s "$tmp" ] || { rm -f "$tmp"; die "拉到空文件: $url"; }
   # 幂等：内容相同就不动，不同则备份旧版
@@ -61,7 +73,7 @@ fetch() {  # fetch <仓库内路径> <落盘路径>
 
 sync_lib() {
   local tmp; tmp=$(mktemp)
-  if curl -fsSL --max-time 60 "$BASE/lib/common.sh" -o "$tmp" && [ -s "$tmp" ]; then
+  if curl_retry "$BASE/lib/common.sh" "$tmp" && [ -s "$tmp" ]; then
     if [ -f "$LIB_DST" ] && cmp -s "$tmp" "$LIB_DST"; then rm -f "$tmp"
     else mkdir -p "$(dirname "$LIB_DST")"; mv "$tmp" "$LIB_DST"; chmod 644 "$LIB_DST"
          log "[~] common.sh 已更新"; fi
