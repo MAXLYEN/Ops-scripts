@@ -109,6 +109,8 @@ opsget init/run 00       # 执行指定阶段
 | `panel-backup-upload.sh` | 把面板整机备份包加密上传到网盘（手动执行） |
 | `komari-metrics-check.sh` | 指标库的保留期与增速体检 |
 | `panel-data-locate.sh` | 在面板目录里定位某项数据的真实存储位置 |
+| `decommission-archive.sh` | 机器退役前的最终归档（**自包含**，不依赖 common.sh） |
+| `compare-backup-content.sh` | 比对两个备份包的内容清单 |
 
 ### db/ — 数据库维护
 
