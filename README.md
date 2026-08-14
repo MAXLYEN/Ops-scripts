@@ -110,6 +110,7 @@ opsget init/run 00       # 执行指定阶段
 | `komari-metrics-check.sh` | 指标库的保留期与增速体检 |
 | `panel-data-locate.sh` | 在面板目录里定位某项数据的真实存储位置 |
 | `decommission-archive.sh` | 机器退役前的最终归档（**自包含**，不依赖 common.sh） |
+| `mail-doctor.sh` | 告警邮件链路诊断，`--send` 实发测试 |
 | `compare-backup-content.sh` | 比对两个备份包的内容清单 |
 
 ### db/ — 数据库维护

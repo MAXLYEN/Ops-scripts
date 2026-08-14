@@ -38,6 +38,7 @@ ops/script-inventory            盘点本机脚本：哪些来自云端、哪些
 ops/komari-metrics-check        指标库的保留期与增速体检
 ops/panel-data-locate           在面板目录里定位某项数据的真实存储位置
 ops/decommission-archive        机器退役前的最终归档（自包含，不依赖 common.sh）
+ops/mail-doctor                 告警邮件链路诊断（--send 实发测试）
 ops/compare-backup-content      比对两个备份包的内容清单（改脚本后验等价性）
 ops/panel-backup-upload         把面板整机备份包加密上传到网盘（手动，--list/--raw/--prune）
 
