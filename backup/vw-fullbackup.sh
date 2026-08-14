@@ -3,7 +3,9 @@
 # 全服务备份：Vaultwarden + Komari + SubConverter + 系统配置
 # 打包 → 7z AES-256 加密 → 上传两个网盘
 #
-# VERSION: 2.0.0
+# VERSION: 2.1.0
+# 2.1.0 变更：告警发送加重试与落盘兜底 —— 实测遇到过一次瞬时 ENETUNREACH，
+#            单次网络抖动不该让告警丢掉（告警丢了 = 静默失效）
 # 2.0.0 变更：环境相关的值全部外置到 /etc/ops-scripts/env.conf，**主体逻辑一行未动**。
 #            RESTORE.md 里的账号 host 从写死的 '%' 改为按配置生成，并补了三处提醒。
 #
@@ -58,17 +60,31 @@ log()  { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"; }
 warn() { WARNINGS=$((WARNINGS+1)); echo "[$(date '+%F %T')] [WARN] $*" | tee -a "$LOG_FILE"; }
 die()  { echo "[$(date '+%F %T')] [FATAL] $*" | tee -a "$LOG_FILE"; notify "备份失败: $*"; rm -rf "$STAGE"; exit 1; }
 
-# 失败告警。填了 MAIL_TO 且装了 msmtp 就发邮件；webhook 见下方注释
+# 失败告警。三条路依次尝试，能通一条就算送达。
+# 为什么要重试：SMTP 的瞬时失败（DNS 拿到不可达的 AAAA、NAT 网关抖动）
+# 会让告警**直接消失**，而告警消失正是这套系统最怕的那类故障。
 notify() {
-    local msg="$1"
+    local msg="$1" i sent=0
     if [ -n "$MAIL_TO" ] && command -v msmtp >/dev/null 2>&1; then
-        printf 'To: %s\nSubject: [%s] 备份告警\nContent-Type: text/plain; charset=UTF-8\n\n%s\n\n主机: %s\n时间: %s\n日志: %s\n' \
-            "$MAIL_TO" "$(hostname)" "$msg" "$(hostname)" "$(date '+%F %T')" "$LOG_FILE" \
-            | msmtp -t >>"$LOG_FILE" 2>&1 \
-            || echo "[$(date '+%F %T')] [WARN] 告警邮件发送失败" >> "$LOG_FILE"
+        for i in 1 2 3; do
+            printf 'To: %s\nSubject: [%s] 备份告警\nContent-Type: text/plain; charset=UTF-8\n\n%s\n\n主机: %s\n时间: %s\n日志: %s\n' \
+                "$MAIL_TO" "$(hostname)" "$msg" "$(hostname)" "$(date '+%F %T')" "$LOG_FILE" \
+                | msmtp -t >>"$LOG_FILE" 2>&1 && { sent=1; break; }
+            echo "[$(date '+%F %T')] [WARN] 告警邮件第 $i 次发送失败" >> "$LOG_FILE"
+            [ "$i" -lt 3 ] && sleep 20
+        done
     fi
-    # webhook 备选（Server酱 / TG Bot 等）：
-    # curl -fsS -m 10 -X POST -d "text=[$(hostname)] $msg" "$ALERT_WEBHOOK" >/dev/null 2>&1
+    # webhook 兜底（Server酱 / TG Bot 等），配了才走
+    if [ "$sent" -eq 0 ] && [ -n "${ALERT_WEBHOOK:-}" ]; then
+        curl -fsS -m 10 -X POST --data-urlencode "text=[$(hostname)] $msg" \
+            "$ALERT_WEBHOOK" >/dev/null 2>&1 && sent=1
+    fi
+    # 落盘兜底：一封都发不出去时至少留痕，别让告警彻底消失
+    if [ "$sent" -eq 0 ]; then
+        printf '[%s] [未送达] %s\n' "$(date '+%F %T')" "$msg" \
+            >> "${ALERT_FALLBACK_FILE:-/var/log/backup-alerts.log}"
+        echo "[$(date '+%F %T')] [WARN] 告警三次均未送达，已写入 ${ALERT_FALLBACK_FILE:-/var/log/backup-alerts.log}" >> "$LOG_FILE"
+    fi
 }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "缺少依赖: $1"; }

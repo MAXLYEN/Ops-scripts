@@ -2,7 +2,8 @@
 #
 # xboard-fullbackup.sh —— Xboard 面板单包备份
 #
-# VERSION: 2.0.1
+# VERSION: 2.1.0
+# 2.1.0 变更：告警发送加重试与落盘兜底（同 vw-fullbackup，实测遇到过瞬时 ENETUNREACH）
 # 2.0.1 变更：vhost 改为按 server_name 反查，不再假设文件名等于域名
 #            （实测漏了一个站点的 vhost —— 面板给它的文件名带了前缀）
 # 2.0.0 变更：环境相关的值全部外置到 /etc/ops-scripts/env.conf，**主体逻辑一行未动**。
@@ -86,7 +87,21 @@ send_mail() {
     else
         return 0
     fi
-    printf 'Subject: %s\n\n%b\n' "$subject" "$body" | msmtp "$MAIL_TO"
+    # 重试三次：SMTP 的瞬时失败会让告警直接消失，而那正是最怕的故障
+    local i sent=0
+    for i in 1 2 3; do
+        printf 'Subject: %s\n\n%b\n' "$subject" "$body" | msmtp "$MAIL_TO" && { sent=1; break; }
+        printf '[%s] [WARN] 告警邮件第 %s 次发送失败\n' "$(date -u '+%F %T')" "$i" >&2
+        [ "$i" -lt 3 ] && sleep 20
+    done
+    if [ "$sent" -eq 0 ] && [ -n "${ALERT_WEBHOOK:-}" ]; then
+        curl -fsS -m 10 -X POST --data-urlencode "text=[$(hostname)] $subject" \
+            "$ALERT_WEBHOOK" >/dev/null 2>&1 && sent=1
+    fi
+    if [ "$sent" -eq 0 ]; then
+        printf '[%s] [未送达] %s\n%b\n' "$(date -u '+%F %T')" "$subject" "$body" \
+            >> "${ALERT_FALLBACK_FILE:-/var/log/backup-alerts.log}"
+    fi
 }
 
 need() { command -v "$1" >/dev/null 2>&1 || fail "缺少命令: $1"; }
