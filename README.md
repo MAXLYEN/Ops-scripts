@@ -27,6 +27,7 @@ lib/common.sh           公共函数库
 config/env.example.conf 配置模板
 init/                   新机初始化，按编号顺序执行
 migrate/                整机迁移流程，按编号顺序执行
+backup/                 生产备份（每天 cron 跑）
 ops/                    日常运维
 db/                     数据库相关维护
 ```
@@ -81,6 +82,16 @@ opsget init/run 00       # 执行指定阶段
 **跑 03 之前务必确认带外控制台能进。** 脚本有自动回滚兜底，但那是最后一道
 保险，不是第一道。
 
+### backup/ — 生产备份
+
+| 脚本 | 作用 |
+|---|---|
+| `vw-fullbackup.sh` | 全服务备份：密码库 + 监控 + 订阅转换 + 系统配置 |
+| `xboard-fullbackup.sh` | Xboard 单包备份 |
+
+两者共用同一个加密密码文件、同一把 `flock` 锁，云端目录分开。
+**由 cron 调用本地路径**，更新用 `opsget -i backup/<名字>` 显式安装后手动验证一次。
+
 ### ops/ — 日常运维
 
 | 脚本 | 作用 |
@@ -96,6 +107,8 @@ opsget init/run 00       # 执行指定阶段
 | `cleanup-purge.sh` | 彻底移除本套脚本及其全部产物 |
 | `script-inventory.sh` | 盘点本机脚本：哪些来自云端、哪些只在本地 |
 | `panel-backup-upload.sh` | 把面板整机备份包加密上传到网盘（手动执行） |
+| `komari-metrics-check.sh` | 指标库的保留期与增速体检 |
+| `panel-data-locate.sh` | 在面板目录里定位某项数据的真实存储位置 |
 
 ### db/ — 数据库维护
 

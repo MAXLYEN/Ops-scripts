@@ -20,6 +20,10 @@ migrate/07-restore-containers   迁入机：恢复数据目录，生成启动命
 migrate/08-post-start-check     迁入机：端到端验收（含切换前预演）
 migrate/09-restore-backup-stack 迁入机：重建备份体系
 
+# ── backup/ 生产备份（cron 调用本地路径，不要写 opsget）─────
+backup/vw-fullbackup            全服务备份：密码库+监控+订阅转换+系统配置
+backup/xboard-fullbackup        Xboard 单包备份
+
 # ── ops/ 日常运维 ──────────────────────────────────────────
 ops/save-fw                     改防火墙前保存现状
 ops/restore-cron                从快照恢复自有 cron
@@ -31,6 +35,8 @@ ops/bind-localhost              把容器端口收到 127.0.0.1（--apply 执行
 ops/cleanup-tidy                清理冗余：历史输出、旧版备份、中间产物（--apply 执行）
 ops/cleanup-purge               彻底移除 ops-scripts 及其全部产物（--apply 执行）
 ops/script-inventory            盘点本机脚本：哪些来自云端、哪些只在本地
+ops/komari-metrics-check        指标库的保留期与增速体检
+ops/panel-data-locate           在面板目录里定位某项数据的真实存储位置
 ops/panel-backup-upload         把面板整机备份包加密上传到网盘（手动，--list/--raw/--prune）
 
 # ── db/ 数据库维护 ─────────────────────────────────────────
