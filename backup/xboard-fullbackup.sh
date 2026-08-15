@@ -2,7 +2,8 @@
 #
 # xboard-fullbackup.sh —— Xboard 面板单包备份
 #
-# VERSION: 2.1.0
+# VERSION: 2.2.0
+# 2.2.0 变更：加反向监控心跳（同 vw-fullbackup）
 # 2.1.0 变更：告警发送加重试与落盘兜底（同 vw-fullbackup，实测遇到过瞬时 ENETUNREACH）
 # 2.0.1 变更：vhost 改为按 server_name 反查，不再假设文件名等于域名
 #            （实测漏了一个站点的 vhost —— 面板给它的文件名带了前缀）
@@ -71,7 +72,7 @@ trap cleanup EXIT
 
 log()  { printf '[%s] %s\n' "$(date -u '+%F %T')" "$*"; }
 warn() { WARNINGS+=("$*"); printf '[%s] [WARN] %s\n' "$(date -u '+%F %T')" "$*" >&2; }
-fail() { FATAL="$*"; printf '[%s] [FATAL] %s\n' "$(date -u '+%F %T')" "$*" >&2; send_mail; exit 1; }
+fail() { FATAL="$*"; printf '[%s] [FATAL] %s\n' "$(date -u '+%F %T')" "$*" >&2; hb /fail; send_mail; exit 1; }
 
 send_mail() {
     [ -n "$MAIL_TO" ] || return 0
@@ -106,8 +107,16 @@ send_mail() {
 
 need() { command -v "$1" >/dev/null 2>&1 || fail "缺少命令: $1"; }
 
+# 反向监控心跳，留空则跳过
+hb() {
+    [ -n "${XBOARD_HEARTBEAT_URL:-}" ] || return 0
+    curl -fsS -m 10 --retry 3 "${XBOARD_HEARTBEAT_URL}${1:-}" >/dev/null 2>&1 \
+        || printf '[%s] [WARN] 心跳上报失败%s\n' "$(date -u '+%F %T')" "${1:-}" >&2
+}
+
 # ==================== 前置检查 ====================
 log "=== Xboard 备份开始 ==="
+hb /start
 
 need mysqldump
 need 7z
@@ -446,8 +455,11 @@ log "本地备份份数: $LOCAL_COUNT"
 send_mail
 
 if [ ${#WARNINGS[@]} -gt 0 ]; then
+    # 有告警也报 fail：别让外部观察者把「部分失败」误判成健康
+    hb /fail
     log "=== 完成，但有 ${#WARNINGS[@]} 条告警 ==="
     exit 1
 fi
+hb
 log "=== 备份完成 ==="
 exit 0

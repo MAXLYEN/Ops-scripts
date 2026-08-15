@@ -3,7 +3,10 @@
 # 全服务备份：Vaultwarden + Komari + SubConverter + 系统配置
 # 打包 → 7z AES-256 加密 → 上传两个网盘
 #
-# VERSION: 2.1.0
+# VERSION: 2.2.0
+# 2.2.0 变更：加反向监控心跳（dead man's switch）。正向告警盖不住「脚本压根没跑」
+#            —— 宕机、cron 挂掉、crontab 被面板重写，这三种情况一封邮件都不会有。
+#            心跳由外部观察者盯着：约定时间没收到就由它告警。
 # 2.1.0 变更：告警发送加重试与落盘兜底 —— 实测遇到过一次瞬时 ENETUNREACH，
 #            单次网络抖动不该让告警丢掉（告警丢了 = 静默失效）
 # 2.0.0 变更：环境相关的值全部外置到 /etc/ops-scripts/env.conf，**主体逻辑一行未动**。
@@ -58,7 +61,7 @@ WARNINGS=0
 ########## 工具函数 ##########
 log()  { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"; }
 warn() { WARNINGS=$((WARNINGS+1)); echo "[$(date '+%F %T')] [WARN] $*" | tee -a "$LOG_FILE"; }
-die()  { echo "[$(date '+%F %T')] [FATAL] $*" | tee -a "$LOG_FILE"; notify "备份失败: $*"; rm -rf "$STAGE"; exit 1; }
+die()  { echo "[$(date '+%F %T')] [FATAL] $*" | tee -a "$LOG_FILE"; hb /fail; notify "备份失败: $*"; rm -rf "$STAGE"; exit 1; }
 
 # 失败告警。三条路依次尝试，能通一条就算送达。
 # 为什么要重试：SMTP 的瞬时失败（DNS 拿到不可达的 AAAA、NAT 网关抖动）
@@ -89,8 +92,18 @@ notify() {
 
 need() { command -v "$1" >/dev/null 2>&1 || die "缺少依赖: $1"; }
 
+# 反向监控心跳。留空则整个机制跳过，脚本行为不变。
+#   hb /start  开始    hb  成功    hb /fail  失败
+# 用 --retry：心跳本身也走出网，而出网正是可能抖动的那一环。
+hb() {
+    [ -n "${VW_HEARTBEAT_URL:-}" ] || return 0
+    curl -fsS -m 10 --retry 3 "${VW_HEARTBEAT_URL}${1:-}" >/dev/null 2>&1 \
+        || echo "[$(date '+%F %T')] [WARN] 心跳上报失败${1:-}" >> "$LOG_FILE"
+}
+
 ########## 前置检查 ##########
 log "========== 开始备份 ${NAME} =========="
+hb /start
 need tar; need 7z; need rclone; need sqlite3
 [ -r "$PASS_FILE" ] || die "密码文件不存在或不可读: $PASS_FILE"
 PASS="$(head -n1 "$PASS_FILE")"
@@ -389,12 +402,17 @@ done
 
 ########## 收尾 ##########
 if [ "$UPLOAD_FAIL" -ne 0 ]; then
+    hb /fail
     notify "备份已生成但上传失败，请检查 $LOG_FILE"
     log "========== 完成（有上传失败，共 ${WARNINGS} 条告警）=========="
     exit 2
 fi
 if [ "$WARNINGS" -gt 0 ]; then
+    # 有告警也报 fail：让外部观察者看到「部分失败」，不要等它误判成健康
+    hb /fail
     notify "备份完成但有 ${WARNINGS} 条告警，请检查 $LOG_FILE"
+else
+    hb
 fi
 log "========== 完成（${WARNINGS} 条告警）=========="
 exit 0
