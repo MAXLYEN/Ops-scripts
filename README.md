@@ -30,6 +30,7 @@ migrate/                整机迁移流程，按编号顺序执行
 backup/                 生产备份（每天 cron 跑）
 ops/                    日常运维
 db/                     数据库相关维护
+vpsscore/               VPS 质量评估：采集 + 打分
 ```
 
 `init/` 与其它目录有一点不同：**它不依赖 `lib/common.sh`**。这些脚本要能在
