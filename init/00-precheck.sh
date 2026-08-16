@@ -1,6 +1,9 @@
 #!/bin/bash
 # init/00-precheck.sh — 环境探测与更新
-# VERSION: 1.0.0
+# VERSION: 1.0.1
+# 1.0.1 修正：网络形态判断在 dual-stack 机器上误报 NAT ——
+#            `curl ifconfig.me` 优先走 IPv6 返回 v6 地址，却拿去和 IPv4 网卡列表比对，
+#            必然不匹配。现在分别探测两个协议族，各自和对应的地址列表比。
 #
 # 新机初始化的第一步。只探测和更新，不改任何配置。
 #
@@ -56,12 +59,30 @@ echo "[网络形态]"
 # 公网 IP 不在网卡上 = 机器在 NAT 后面。这会影响两件事：
 #   1. 入站可达性必须单独验证（出网通不代表能连进来）
 #   2. 容器内不能用宿主机公网 IP 访问宿主机服务 —— 包会发到网关再也回不来
-PUB=$(curl -s --max-time 10 https://ifconfig.me 2>/dev/null)
-printf '  %-14s %s\n' 网卡地址 "$(ip -4 -br addr | grep -v '^lo' | awk '{print $1"="$3}' | tr '\n' ' ')"
-printf '  %-14s %s\n' 公网出口 "${PUB:-取不到}"
-if [ -n "$PUB" ] && ! ip -4 -br addr | grep -q "$PUB"; then
-  echo "  ⚠️  公网 IP 不在网卡上，机器在 NAT 后面"
+#
+# ⚠️ 必须分协议族探测。dual-stack 机器上 curl 默认可能走 IPv6，
+#    拿回来的 v6 地址去和 IPv4 网卡列表比对必然不匹配，会误报成 NAT。
+PUB4=$(curl -s -4 --max-time 10 https://ifconfig.me 2>/dev/null)
+PUB6=$(curl -s -6 --max-time 10 https://ifconfig.me 2>/dev/null)
+printf '  %-16s %s\n' 网卡IPv4 "$(ip -4 -br addr | grep -v '^lo' | awk '{print $1"="$3}' | tr '\n' ' ')"
+printf '  %-16s %s\n' 网卡IPv6 "$(ip -6 -br addr | grep -v '^lo' | awk '{print $1"="$3}' | tr '\n' ' ')"
+printf '  %-16s %s\n' 公网出口IPv4 "${PUB4:-取不到}"
+printf '  %-16s %s\n' 公网出口IPv6 "${PUB6:-无}"
+if [ -z "$PUB4" ]; then
+  echo "  ⚠️  取不到 IPv4 出口地址（纯 IPv6 环境，或探测服务不可达）"
+elif ip -4 -br addr | grep -qF "$PUB4"; then
+  echo "  ✅ 公网 IPv4 直绑在网卡上"
+  echo "     注意：容器里仍然不要写宿主机公网 IP —— 这台能用，"
+  echo "     搬到 NAT 后面的机器就会突然不通。一律用网桥网关地址。"
+else
+  echo "  ⚠️  公网 IPv4 不在网卡上，机器在 NAT 后面"
   echo "      入站可达性请用 migrate/02-nat-probe 单独验证"
+  echo "      且容器内不能用公网 IP 访问宿主机服务"
+fi
+if [ -n "$PUB6" ]; then
+  ip -6 route show default | grep -q . \
+    && echo "  ℹ️  有可用的全局 IPv6 —— 阶段 02 的 IPv4-first 是取舍而非修复，见该阶段说明" \
+    || echo "  ⚠️  能取到 IPv6 出口但没有默认路由，解析到 AAAA 时会立刻 ENETUNREACH"
 fi
 
 echo
