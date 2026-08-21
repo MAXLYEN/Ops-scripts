@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # lib/common.sh — ops-scripts 公共函数库
-# VERSION: 1.0.0
+# VERSION: 1.1.0
+# 1.1.0: 新增 scan_vhost_domains / resolve_domains —— 手维护的域名清单会双向漂移
+#        （多出废域名 = 噪音，漏掉真站点 = 静默不检查），统一在这里处理
 #
 # 用法：每个脚本开头
 #   . "$(dirname "$0")/../lib/common.sh"   # 本地布局
@@ -9,7 +11,7 @@
 set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
-OPS_COMMON_VERSION="1.0.0"
+OPS_COMMON_VERSION="1.1.0"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
@@ -142,6 +144,45 @@ probe_domain_local() {
     --resolve "$1:443:127.0.0.1" "https://$1/" 2>/dev/null
 }
 http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$1" 2>/dev/null; }
+
+# ── 域名清单 ────────────────────────────────────────────────
+# 从 vhost 的 server_name 扫出真实域名集合（已排序去重）
+scan_vhost_domains() {
+  [ -d "${PANEL_VHOST_DIR:-}" ] || return 0
+  grep -h -E '^[[:space:]]*server_name' "$PANEL_VHOST_DIR"/*.conf 2>/dev/null \
+    | sed -e 's/;.*//' -e 's/^[[:space:]]*server_name[[:space:]]*//' \
+    | tr ' ' '\n' | grep -vE '^$|^_$|^0\.default$' | sort -u
+}
+
+# resolve_domains —— 决定本次要遍历哪些域名
+#   DOMAINS 留空 → 自动扫 vhost（推荐）
+#   DOMAINS 有值 → 用配置值，但与 vhost 实际情况双向比对后告警
+# 结果：数组 OPS_DOMAINS，来源 OPS_DOMAINS_MODE
+#
+# 为什么两个方向都要报：多出来的废域名只是噪音，漏掉的才致命 ——
+# 漏掉的站点压根不进循环，输出还是全绿，看起来像"检查过了"。
+resolve_domains() {
+  local scanned cfg stale fresh
+  scanned=$(scan_vhost_domains)
+
+  if [ -z "${DOMAINS:-}" ]; then
+    OPS_DOMAINS_MODE=auto
+    [ -n "$scanned" ] || die "DOMAINS 留空，且没能从 ${PANEL_VHOST_DIR:-未配置} 扫到任何 server_name"
+    mapfile -t OPS_DOMAINS <<< "$scanned"
+    return 0
+  fi
+
+  OPS_DOMAINS_MODE=explicit
+  read -r -a OPS_DOMAINS <<< "$DOMAINS"
+  [ -n "$scanned" ] || { warn "无法扫描 vhost，跳过域名清单比对"; return 0; }
+
+  cfg=$(printf '%s\n' "${OPS_DOMAINS[@]}" | grep -v '^$' | sort -u)
+  stale=$(comm -23 <(printf '%s\n' "$cfg") <(printf '%s\n' "$scanned") | tr '\n' ' ')
+  fresh=$(comm -13 <(printf '%s\n' "$cfg") <(printf '%s\n' "$scanned") | tr '\n' ' ')
+  [ -n "${stale// /}" ] && warn "DOMAINS 里有但 vhost 里没有: ${stale% } —— 站点已删就从配置移除"
+  [ -n "${fresh// /}" ] && warn "vhost 里有但 DOMAINS 没列: ${fresh% } —— 这些站点不会被检查"
+  return 0
+}
 
 # ── 其它 ────────────────────────────────────────────────────
 human() { du -sh "$1" 2>/dev/null | cut -f1; }
