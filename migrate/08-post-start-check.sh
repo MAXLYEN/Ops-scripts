@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # 08-post-start-check.sh — 容器启动后的端到端验收
-# VERSION: 2.0.0
+# VERSION: 2.1.0
+# 2.1.0: 第 3 节的域名来源改用 resolve_domains()。原来直接遍历 DOMAINS ——
+#        配置漏了哪个站点，那个站点就不会被探测，而输出仍然全绿。
+#        切换前的最后一道验收出这种假绿，代价太大。
 #
 # 第 3 节最有价值：用 --resolve 绕过 DNS 直接走本机 nginx，等于在切换前
 # 完整跑通了外部访问路径（nginx 配置 → 证书 → 反代 → 容器）。全绿就意味着
@@ -8,7 +11,7 @@
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env
-require_env DOMAINS
+resolve_domains
 mysql_ready
 
 section "1. 容器状态"
@@ -33,7 +36,8 @@ my -e "SELECT user,
 echo "  （空表说明此刻没有活跃连接，不一定是故障 —— 看第 5 节的日志扫描）"
 
 section "3. 经本机 nginx 访问各域名（绕过 DNS）"
-for d in $DOMAINS; do
+echo "  域名来源: $OPS_DOMAINS_MODE（${#OPS_DOMAINS[@]} 个）"
+for d in "${OPS_DOMAINS[@]}"; do
   code=$(probe_domain_local "$d")
   case "$code" in
     200|301|302|303|307|308) mark="[OK]  " ;;
