@@ -2,7 +2,10 @@
 #
 # xboard-fullbackup.sh —— Xboard 面板单包备份
 #
-# VERSION: 2.2.0
+# VERSION: 2.2.1
+# 2.2.1 变更：XBOARD_SITES 留空时改为**自动扫描 vhost 目录**收集全部站点与证书。
+#            写死列表的毛病是：每次在面板增删域名都要记得同步改配置，
+#            忘了就报假警（或更糟——静默漏备份一个站）。
 # 2.2.0 变更：加反向监控心跳（同 vw-fullbackup）
 # 2.1.0 变更：告警发送加重试与落盘兜底（同 vw-fullbackup，实测遇到过瞬时 ENETUNREACH）
 # 2.0.1 变更：vhost 改为按 server_name 反查，不再假设文件名等于域名
@@ -32,7 +35,7 @@ ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 req() { local m=""; for v in "$@"; do [ -n "${!v:-}" ] || m="$m $v"; done
         [ -z "$m" ] || { echo "[FATAL] 配置项未填:$m（见 $ENV_FILE）"; exit 1; }; }
 req SVC_XBOARD_DIR XBOARD_DB_NAME XBOARD_DB_USER XBOARD_DB_PASS_FILE \
-    XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH XBOARD_SITES RCLONE_REMOTES \
+    XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH RCLONE_REMOTES \
     VW_PASS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
 
 XBOARD_DIR="$SVC_XBOARD_DIR"
@@ -55,9 +58,24 @@ MAIL_SUBJECT_PREFIX="${XBOARD_MAIL_PREFIX:-[Xboard备份]}"
 
 # 体积过大时可在此排除表（只影响云端包，本地库仍是全量）
 read -r -a EXCLUDE_TABLES <<< "${XBOARD_EXCLUDE_TABLES:-}"
-# 静态资源站：留空则取站点列表的最后一个
-read -r -a SITES <<< "$XBOARD_SITES"
-ASSETS_SITE="${XBOARD_ASSETS_SITE:-${SITES[${#SITES[@]}-1]}}"
+# 站点列表。留空 = 自动模式：扫 vhost 目录，把所有站点都收进来。
+# 自动模式的好处是面板里增删域名不用回来改配置；代价是可能多收几个
+# 无关站点的 conf —— 那些文件才几 KB，比漏备份一个站划算得多。
+SITES_MODE=auto
+if [ -n "${XBOARD_SITES:-}" ]; then
+    SITES_MODE=explicit
+    read -r -a SITES <<< "$XBOARD_SITES"
+else
+    mapfile -t SITES < <(
+        for f in "${PANEL_VHOST_DIR}"/*.conf; do
+            [ -f "$f" ] || continue
+            # 从 server_name 取域名，排开 _ 和 IP
+            sed -nE 's/^[[:space:]]*server_name[[:space:]]+([^;]+);.*/\1/p' "$f" \
+              | tr ' ' '\n' | grep -E '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        done | sort -u
+    )
+fi
+ASSETS_SITE="${XBOARD_ASSETS_SITE:-}"
 
 # ==================== 内部 ====================
 STAMP=$(date -u +%Y%m%d_%H%M%S)
@@ -217,7 +235,9 @@ done
 log "--- 打包 nginx 配置与证书 ---"
 
 mkdir -p "$WORK/nginx/vhost" "$WORK/nginx/cert"
+log "站点来源: $SITES_MODE（${#SITES[@]} 个）"
 for site in "${SITES[@]}"; do
+    [ -n "$site" ] || continue
     # vhost 的文件名不一定等于域名 —— 面板可能加前缀（如 html_<域名>.conf）。
     # 按 server_name 反查才可靠：文件名可以随面板怎么起，server_name 骗不了人。
     FOUND=0
@@ -226,11 +246,20 @@ for site in "${SITES[@]}"; do
         cp -a "$f" "$WORK/nginx/vhost/" && FOUND=1
     done < <(grep -lE "server_name[^;]*[[:space:]]${site//./\\.}[[:space:];]" \
                   "${PANEL_VHOST_DIR}"/*.conf 2>/dev/null)
-    [ "$FOUND" -eq 1 ] || warn "没找到 $site 的 vhost（恢复时这个站要手工重建反代）"
-    [ -d "${PANEL_CERT_DIR}/${site}" ] \
-        && cp -a "${PANEL_CERT_DIR}/${site}" "$WORK/nginx/cert/" \
-        || warn "没找到 $site 的证书目录"
+    [ -d "${PANEL_CERT_DIR}/${site}" ] && cp -a "${PANEL_CERT_DIR}/${site}" "$WORK/nginx/cert/"
+    # 只在「配置里明确列了、实际却没有」时才告警。
+    # 自动模式下站点是从 vhost 扫出来的，不存在「找不到」这回事。
+    if [ "$SITES_MODE" = explicit ]; then
+        [ "$FOUND" -eq 1 ] || warn "配置里列了 $site 但找不到它的 vhost —— 站点已删就把它从 XBOARD_SITES 移除，或改为留空启用自动模式"
+        [ -d "${PANEL_CERT_DIR}/${site}" ] || warn "配置里列了 $site 但没有证书目录"
+    fi
 done
+# 静态资源站：没指定就挑一个 wwwroot 下真实存在的
+if [ -z "$ASSETS_SITE" ]; then
+    for s in "${SITES[@]}"; do
+        [ -d "${WWWROOT}/${s}" ] && { ASSETS_SITE="$s"; break; }
+    done
+fi
 [ -d "${WWWROOT}/${ASSETS_SITE}" ] \
     && cp -a "${WWWROOT}/${ASSETS_SITE}" "$WORK/nginx/assets-site"
 
@@ -251,6 +280,7 @@ Xboard 备份包
 时间      : $(date -u '+%F %T') UTC
 数据库    : $DB_NAME ($(numfmt --to=iec "$DUMP_SIZE"))
 排除表    : ${EXCLUDE_TABLES[*]:-无}
+站点来源  : $SITES_MODE
 Xboard 目录: $XBOARD_DIR
 站点      : ${SITES[*]}
 
