@@ -4,6 +4,7 @@
 #
 # 备份脚本通常有一串 need <命令> 的前置断言，缺一个就中途 die。
 # 与其跑到一半失败，不如先全查一遍。
+# ENV-REQUIRED: BACKUP_DIRS BACKUP_SCRIPTS
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root
