@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # opsget — ops-scripts 引导器
-# VERSION: 1.2.1
+# VERSION: 1.3.0
+# 1.3.0: 配置按需化。脚本头部用 `# ENV-REQUIRED: KEY1 KEY2` 声明自己必填的键，
+#        opsget 据此按需预检、按需生成 env.conf。不声明 = 声明「裸机能跑」。
+#        起因：无差别检查 env.conf 是否存在，会对 init/、vpsscore 这类刻意不依赖
+#        配置的脚本发假警告；而真正缺键时又只能等脚本自己跑到一半才报。
+#        顺带把 -h 改成 usage() 函数 —— 原来 sed 按行号切注释，改头部就会切歪。
 # 1.2.1: 拉取加 cache-buster —— raw.githubusercontent 有约 5 分钟 CDN 缓存，
 #        「云端改完这边重新拉一次就生效」在这段窗口里是假的。而改完立刻验证
 #        恰恰是最常见的场景，拿到旧版会让人误判成「改了没效果」去改代码。
@@ -9,14 +14,6 @@
 # 1.1.0: 记录安装台账到 /var/lib/ops-scripts/installed.list，供清理脚本精确回收
 #
 # 从仓库拉取脚本，装到本地并执行。云端改完，这边重新拉一次就生效。
-#
-#   opsget -l                      列出可用脚本
-#   opsget -c                      拉取配置模板到 /etc/ops-scripts/env.conf
-#   opsget -i <路径>               只安装，不执行
-#   opsget -u                      更新自身与 common.sh
-#   opsget <路径> [参数...]        拉取、安装并执行
-#
-# 路径写成 migrate/03-pre-migrate 或 migrate/03-pre-migrate.sh 都可以。
 #
 # 环境变量：
 #   OPS_REPO   仓库 raw 基地址（默认见下）
@@ -36,6 +33,28 @@ LEDGER="$LEDGER_DIR/installed.list"
 
 die() { printf '[致命] %s\n' "$*" >&2; exit 1; }
 log() { printf '%s\n' "$*"; }
+
+usage() {
+  cat <<'USAGE'
+opsget — ops-scripts 引导器
+
+  opsget -l                      列出可用脚本
+  opsget <路径> [参数...]        拉取、安装并执行
+  opsget -i <路径>               只安装，不执行
+  opsget -u                      更新自身与 common.sh
+
+配置（env.conf）：
+  opsget -c                      按已装脚本的实际需要，补齐 env.conf
+  opsget -c <路径>               只补这一个脚本要的键
+  opsget -c all                  写入完整模板（所有键）
+  opsget -e <路径>               看这个脚本需要哪些键、当前缺哪些
+
+  已有的键连值一起保留，只追加缺失项，动手前自动备份。
+  脚本头部没有 `# ENV-REQUIRED:` 声明的，表示它不需要配置，裸机可跑。
+
+路径写成 migrate/03-pre-migrate 或 migrate/03-pre-migrate.sh 都可以。
+USAGE
+}
 
 [ "$(id -u)" -eq 0 ] || die "需要 root"
 command -v curl >/dev/null 2>&1 || die "缺少 curl"
@@ -94,6 +113,115 @@ sync_lib() {
   fi
 }
 
+# ── 配置依赖（ENV-REQUIRED）──────────────────────────────────
+# 约定：脚本头部一行 `# ENV-REQUIRED: KEY1 KEY2 ...`，列出缺了就会 die 的键。
+# 有回落值、留空即跳过的键**不写进去** —— 写了等于把可选变必填，
+# 节点机会被逼着填一堆用不上的项，按需化就白做了。
+
+env_keys_of() {  # $1=脚本文件路径；输出键名，每行一个
+  [ -f "$1" ] || return 0
+  sed -n 's/^#[[:space:]]*ENV-REQUIRED:[[:space:]]*//p' "$1" \
+    | tr ' \t' '\n\n' | sed '/^$/d' | sort -u
+}
+
+env_missing() {  # $1=脚本文件路径；输出缺失的键，无输出=齐了
+  local keys k; keys=$(env_keys_of "$1")
+  [ -n "$keys" ] || return 0
+  [ -f "$ENV_FILE" ] || { printf '%s\n' $keys; return 0; }
+  # 子 shell 里 source，不污染 opsget 自身的变量
+  ( set +u
+    # shellcheck disable=SC1090
+    . "$ENV_FILE" 2>/dev/null
+    for k in $keys; do [ -n "${!k:-}" ] || printf '%s\n' "$k"; done )
+}
+
+tpl_keys() {  # $1=模板文件；输出模板里定义的所有键
+  grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Z_][A-Z0-9_]*=' "$1" \
+    | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/=$//' | sort -u
+}
+
+# 键的值可能引用别的键（PANEL_VHOST_DIR="${PANEL_ROOT}/vhost/nginx"）。
+# 只搬 PANEL_VHOST_DIR 而漏掉 PANEL_ROOT，值会展开成 /vhost/nginx —— 一个
+# 看起来像路径、实际指向根目录的值，比报错危险得多。所以要做依赖闭包。
+env_closure() {  # $1=模板 $2=键列表（空格或换行分隔）
+  local tpl=$1 want prev refs all
+  all=$(tpl_keys "$tpl")
+  want=$(printf '%s\n' $2 | sed '/^$/d' | sort -u)
+  while :; do
+    prev=$want
+    refs=$(for k in $want; do
+             sed -nE "s/^[[:space:]]*(export[[:space:]]+)?$k=//p" "$tpl" \
+               | grep -oE '\$\{?[A-Z_][A-Z0-9_]*\}?' | tr -d '${}'
+           done | sed '/^$/d' | sort -u)
+    want=$(printf '%s\n%s\n' "$want" "$refs" | sed '/^$/d' | sort -u \
+           | comm -12 - <(printf '%s\n' "$all"))
+    [ "$want" = "$prev" ] && break
+  done
+  printf '%s\n' "$want"
+}
+
+installed_keys() {  # 已装脚本（含台账）声明的键的并集
+  local f
+  { [ -f "$LEDGER" ] && cat "$LEDGER"
+    ls "$BIN_DIR"/*.sh 2>/dev/null
+  } | sort -u | while read -r f; do
+        [ -f "$f" ] && env_keys_of "$f"
+      done | sort -u
+}
+
+env_merge() {  # $1=模板 $2...=要写入的键
+  local tpl=$1; shift
+  local want=" $* " added=0 buf="" line k sec="" sec_done=""
+  mkdir -p "$ENV_DIR"; chmod 700 "$ENV_DIR"
+  if [ -f "$ENV_FILE" ]; then
+    cp -a "$ENV_FILE" "$ENV_FILE.bak.$(date -u +%Y%m%d%H%M%S)"
+  else
+    { echo "# ops-scripts env.conf —— 由 opsget -c 按需生成"
+      echo "# 只含本机已装脚本实际需要的项。装了新脚本后再跑一次 opsget -c 会自动补齐。"
+      echo "# 完整模板见 opsget -c all，或仓库 config/env.example.conf"
+      echo
+    } > "$ENV_FILE"
+  fi
+  chmod 600 "$ENV_FILE"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      # 分节标题要「粘住」：本节第一个被选中的键前面补上，否则挑着搬的键
+      # 会失去归属，文件看起来像一堆散装配置项
+      \#*──*) sec="$line"; sec_done=""; buf=""; continue ;;
+      ''|\#*)  buf="$buf$line"$'\n'; continue ;;
+    esac
+    k=${line%%=*}; k=${k#export }; k=${k//[[:space:]]/}
+    case "$k" in
+      [A-Z_]*) ;;
+      *) buf=""; continue ;;
+    esac
+    # 已有的键连值一起保留 —— 第二次跑 -c 不能把填好的密码冲掉
+    if [[ "$want" == *" $k "* ]] \
+       && ! grep -qE "^[[:space:]]*(export[[:space:]]+)?$k=" "$ENV_FILE"; then
+      if [ -n "$sec" ] && [ -z "$sec_done" ]; then
+        printf '\n%s\n' "$sec" >> "$ENV_FILE"; sec_done=1
+      fi
+      printf '%s%s\n' "$buf" "$line" >> "$ENV_FILE"
+      added=$((added+1))
+    fi
+    buf=""
+  done < "$tpl"
+  log "[+] $ENV_FILE：新增 $added 项（说明注释一并带过来），已有值未改动"
+}
+
+get_env_required() {  # $1=仓库内路径（不带 .sh）；本地有就读本地，否则拉一份临时的
+  local p=$1 name tmp keys
+  name=$(basename "$p")
+  if [ -f "$BIN_DIR/$name.sh" ]; then
+    env_keys_of "$BIN_DIR/$name.sh"; return 0
+  fi
+  tmp=$(mktemp)
+  if curl_retry "$BASE/$p.sh" "$tmp"; then keys=$(env_keys_of "$tmp"); else keys=""; fi
+  rm -f "$tmp"
+  [ -n "$keys" ] && printf '%s\n' "$keys"
+  return 0
+}
+
 case "${1:-}" in
   -l|--list)
     log "从 $BASE 拉取清单…"
@@ -102,17 +230,57 @@ case "${1:-}" in
     exit 0 ;;
 
   -c|--config)
-    mkdir -p "$ENV_DIR"; chmod 700 "$ENV_DIR"
-    if [ -f "$ENV_FILE" ]; then
-      log "$ENV_FILE 已存在，不覆盖。模板另存为 $ENV_FILE.example"
-      curl -fsSL --max-time 60 "$BASE/config/env.example.conf?_=$(date +%s)" -o "$ENV_FILE.example" \
-        && chmod 600 "$ENV_FILE.example" && log "[+] $ENV_FILE.example"
+    shift
+    TPL=$(mktemp)
+    curl_retry "$BASE/config/env.example.conf" "$TPL" || { rm -f "$TPL"; die "拉取配置模板失败"; }
+    case "${1:-}" in
+      all|--all)
+        WANT=$(tpl_keys "$TPL")
+        log "写入完整模板（所有键）" ;;
+      "")
+        WANT=$(installed_keys)
+        if [ -z "$WANT" ]; then
+          rm -f "$TPL"
+          log "本机已装的脚本都不需要配置 —— 不用建 env.conf。"
+          log "（想看完整模板：opsget -c all）"
+          exit 0
+        fi
+        log "按已装脚本的实际需要补齐" ;;
+      *)
+        WANT=$(get_env_required "${1%.sh}")
+        if [ -z "$WANT" ]; then
+          rm -f "$TPL"; log "$1 不需要任何配置，裸机可跑。"; exit 0
+        fi
+        log "只补 $1 需要的键" ;;
+    esac
+    WANT=$(env_closure "$TPL" "$WANT")
+    env_merge "$TPL" $WANT
+    rm -f "$TPL"
+    # 追加完还得告诉他哪些是空的 —— 键在文件里但没值，等于没配
+    STILL=$( set +u; . "$ENV_FILE" 2>/dev/null
+             for k in $WANT; do [ -n "${!k:-}" ] || printf '%s ' "$k"; done )
+    if [ -n "$STILL" ]; then
+      log "[!] 待填: $STILL"
+      log "    $ENV_FILE（600），填完即可执行"
     else
-      curl -fsSL --max-time 60 "$BASE/config/env.example.conf?_=$(date +%s)" -o "$ENV_FILE" \
-        || die "拉取配置模板失败"
-      chmod 600 "$ENV_FILE"
-      log "[+] $ENV_FILE —— 现在去把它填完"
+      log "[✓] 所需的键都已有值"
     fi
+    exit 0 ;;
+
+  -e|--env)
+    shift
+    [ -n "${1:-}" ] || die "用法: opsget -e <路径>"
+    KEYS=$(get_env_required "${1%.sh}")
+    if [ -z "$KEYS" ]; then log "$1 不需要任何配置，裸机可跑。"; exit 0; fi
+    log "$1 需要: $(echo $KEYS)"
+    if [ ! -f "$ENV_FILE" ]; then
+      log "[缺配置] 还没有 $ENV_FILE —— 跑 opsget -c $1"
+      exit 1
+    fi
+    MISS=$( set +u; . "$ENV_FILE" 2>/dev/null
+            for k in $KEYS; do [ -n "${!k:-}" ] || printf '%s ' "$k"; done )
+    if [ -n "$MISS" ]; then log "[缺配置] 待填: $MISS"; log "         补齐: opsget -c $1"; exit 1
+    else log "[✓] 都已有值"; fi
     exit 0 ;;
 
   -u|--update)
@@ -128,10 +296,13 @@ case "${1:-}" in
     sync_lib
     fetch "$P.sh" "$BIN_DIR/$NAME.sh"
     log "已安装到 $BIN_DIR/$NAME.sh（未执行）"
+    # 只提示不拦截：装完先看一眼要什么，等真执行时才强制
+    MISS=$(env_missing "$BIN_DIR/$NAME.sh")
+    [ -n "$MISS" ] && log "[提示] 执行前需补配置: $(echo $MISS)（opsget -c $P）"
     exit 0 ;;
 
   ""|-h|--help)
-    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+    usage
     exit 0 ;;
 esac
 
@@ -141,7 +312,14 @@ NAME=$(basename "$P")
 sync_lib
 fetch "$P.sh" "$BIN_DIR/$NAME.sh"
 
-[ -f "$ENV_FILE" ] || log "[警告] 还没有 $ENV_FILE，脚本可能会因缺配置退出（先跑 opsget -c）"
+# 按脚本自己的声明预检。没声明的（init/、vpsscore 等）静默放行 —— 不再假警告。
+# 注意这只是提前拦截，脚本运行时的 require_env 照样 die，铁律不变。
+MISS=$(env_missing "$BIN_DIR/$NAME.sh")
+if [ -n "$MISS" ]; then
+  log "[缺配置] $NAME 需要但未填: $(echo $MISS)"
+  log "         补齐: opsget -c $P"
+  die "配置未就绪，已停止执行（脚本已装好在 $BIN_DIR/$NAME.sh）"
+fi
 
 log "──────── 执行 $NAME ────────"
 exec "$BIN_DIR/$NAME.sh" "$@"
