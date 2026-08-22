@@ -2,7 +2,10 @@
 #
 # xboard-fullbackup.sh —— Xboard 面板单包备份
 #
-# VERSION: 2.2.2
+# VERSION: 2.3.0
+# 2.3.0: 备份加密密码改读 BACKUP_PASS_FILE，VW_PASS_FILE 作回落。这台机器可能
+#        根本没有 Vaultwarden，却被要求填一个名字里带 VW 的键 —— 报错时人会
+#        先去找 Vaultwarden 在哪。老机器的 env.conf 不用改。
 # 2.2.2: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
 # 2.2.1 变更：XBOARD_SITES 留空时改为**自动扫描 vhost 目录**收集全部站点与证书。
 #            写死列表的毛病是：每次在面板增删域名都要记得同步改配置，
@@ -24,7 +27,7 @@
 # ⚠️ cron 里调用本地路径 /usr/local/bin/xboard-fullbackup.sh，**不要写成 opsget**。
 #    更新用 `opsget -i backup/xboard-fullbackup` 显式安装。
 #
-# ENV-REQUIRED: SVC_XBOARD_DIR XBOARD_DB_NAME XBOARD_DB_USER XBOARD_DB_PASS_FILE XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH RCLONE_REMOTES VW_PASS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
+# ENV-REQUIRED: SVC_XBOARD_DIR XBOARD_DB_NAME XBOARD_DB_USER XBOARD_DB_PASS_FILE XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH RCLONE_REMOTES BACKUP_PASS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
 set -uo pipefail
 
 # ==================== 配置（全部来自 env.conf） ====================
@@ -37,7 +40,7 @@ req() { local m=""; for v in "$@"; do [ -n "${!v:-}" ] || m="$m $v"; done
         [ -z "$m" ] || { echo "[FATAL] 配置项未填:$m（见 $ENV_FILE）"; exit 1; }; }
 req SVC_XBOARD_DIR XBOARD_DB_NAME XBOARD_DB_USER XBOARD_DB_PASS_FILE \
     XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH RCLONE_REMOTES \
-    VW_PASS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
+    PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
 
 XBOARD_DIR="$SVC_XBOARD_DIR"
 DB_NAME="$XBOARD_DB_NAME"
@@ -47,7 +50,9 @@ DB_PORT="${XBOARD_DB_PORT:-3306}"
 
 DB_PASS_FILE="$XBOARD_DB_PASS_FILE"
 # 备份加密密码与 vw-fullbackup 共用同一个文件 —— 只记一个密码，少一处出错的地方
-BACKUP_PASS_FILE="$VW_PASS_FILE"
+# 新键优先、旧键回落 —— 现有机器的 env.conf 一个字不用动
+BACKUP_PASS_FILE="${BACKUP_PASS_FILE:-${VW_PASS_FILE:-}}"
+req BACKUP_PASS_FILE
 
 BACKUP_DIR="$XBOARD_BACKUP_DIR"
 LOCAL_KEEP_DAYS="${BACKUP_KEEP_LOCAL_DAYS:-180}"

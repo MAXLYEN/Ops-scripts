@@ -3,7 +3,11 @@
 # 全服务备份：Vaultwarden + Komari + SubConverter + 系统配置
 # 打包 → 7z AES-256 加密 → 上传两个网盘
 #
-# VERSION: 2.2.1
+# VERSION: 2.3.0
+# 2.3.0: 备份加密密码改读 BACKUP_PASS_FILE，VW_PASS_FILE 作回落。原来两个备份
+#        脚本共用 VW_PASS_FILE，一台只跑 Xboard、根本没有 Vaultwarden 的机器
+#        也被要求填一个名字里带 VW 的键，报错时人会先去找 Vaultwarden 在哪。
+#        老机器的 env.conf 不用改。
 # 2.2.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
 # 2.2.0 变更：加反向监控心跳（dead man's switch）。正向告警盖不住「脚本压根没跑」
 #            —— 宕机、cron 挂掉、crontab 被面板重写，这三种情况一封邮件都不会有。
@@ -18,7 +22,7 @@
 # ⚠️ cron 里调用本地路径 /usr/local/bin/vw-fullbackup.sh，**不要写成 opsget**。
 #    不能让备份依赖外网才能启动。更新用 `opsget -i backup/vw-fullbackup` 显式安装。
 #
-# ENV-REQUIRED: VW_BACKUP_DIR VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
+# ENV-REQUIRED: VW_BACKUP_DIR BACKUP_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
 set -o pipefail
 
 ########## 配置（全部来自 env.conf，本文件不含任何域名/路径硬编码） ##########
@@ -30,13 +34,16 @@ ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 # 缺配置直接退出，绝不回落到某个"看起来合理"的默认值 —— 用错的值静默跑完比报错危险
 req() { local m=""; for v in "$@"; do [ -n "${!v:-}" ] || m="$m $v"; done
         [ -z "$m" ] || { echo "[FATAL] 配置项未填:$m（见 $ENV_FILE）"; exit 1; }; }
-req VW_BACKUP_DIR VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES \
+req VW_BACKUP_DIR VW_REMOTE_PATH RCLONE_REMOTES \
     SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
 
 STAGE_ROOT="$VW_BACKUP_DIR"
 OUT_DIR="$STAGE_ROOT"
 LOG_FILE="${VW_LOG_FILE:-/var/log/vw-fullbackup.log}"
-PASS_FILE="$VW_PASS_FILE"
+# 新键优先、旧键回落 —— 现有机器的 env.conf 一个字不用动
+BACKUP_PASS_FILE="${BACKUP_PASS_FILE:-${VW_PASS_FILE:-}}"
+req BACKUP_PASS_FILE
+PASS_FILE="$BACKUP_PASS_FILE"
 KEEP_LOCAL_DAYS="${BACKUP_KEEP_LOCAL_DAYS:-180}"
 KEEP_CLOUD_DAYS="${BACKUP_KEEP_CLOUD_DAYS:-400}"
 # 远端由「远端名列表 × 目录名」组合，换云盘或改目录只动 env.conf
