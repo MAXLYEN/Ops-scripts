@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # opsget — ops-scripts 引导器
-# VERSION: 1.2.0
+# VERSION: 1.2.1
+# 1.2.1: 拉取加 cache-buster —— raw.githubusercontent 有约 5 分钟 CDN 缓存，
+#        「云端改完这边重新拉一次就生效」在这段窗口里是假的。而改完立刻验证
+#        恰恰是最常见的场景，拿到旧版会让人误判成「改了没效果」去改代码。
 # 1.2.0: 拉取加重试 —— 实测遇到过 DNS 瞬时解析失败（Could not resolve host），
 #        一次失败就放弃会让「云端是唯一来源」这件事变得不可靠
 # 1.1.0: 记录安装台账到 /var/lib/ops-scripts/installed.list，供清理脚本精确回收
@@ -38,10 +41,16 @@ log() { printf '%s\n' "$*"; }
 command -v curl >/dev/null 2>&1 || die "缺少 curl"
 
 # 瞬时的 DNS / 路由故障不该让整条命令失败 —— 重试三次，间隔 3 秒
+# 每次请求带唯一查询参数绕开 CDN 缓存（raw 会忽略未知参数）。
+# 代价是不吃缓存、每次真回源，这点流量换「拉到的一定是最新的」值得。
 curl_retry() {  # curl_retry <url> <落盘路径>
-  local i
+  local i url="$1"
+  case "$url" in
+    *\?*) url="$url&_=$(date +%s)" ;;
+    *)    url="$url?_=$(date +%s)" ;;
+  esac
   for i in 1 2 3; do
-    curl -fsSL --max-time 60 --retry 2 --retry-connrefused "$1" -o "$2" && return 0
+    curl -fsSL --max-time 60 --retry 2 --retry-connrefused "$url" -o "$2" && return 0
     [ "$i" -lt 3 ] && { log "[重试 $i/3] $1"; sleep 3; }
   done
   return 1
@@ -88,7 +97,7 @@ sync_lib() {
 case "${1:-}" in
   -l|--list)
     log "从 $BASE 拉取清单…"
-    curl -fsSL --max-time 60 "$BASE/MANIFEST" 2>/dev/null \
+    curl -fsSL --max-time 60 "$BASE/MANIFEST?_=$(date +%s)" 2>/dev/null \
       || die "仓库里没有 MANIFEST，去 GitHub 页面直接看目录"
     exit 0 ;;
 
@@ -96,10 +105,10 @@ case "${1:-}" in
     mkdir -p "$ENV_DIR"; chmod 700 "$ENV_DIR"
     if [ -f "$ENV_FILE" ]; then
       log "$ENV_FILE 已存在，不覆盖。模板另存为 $ENV_FILE.example"
-      curl -fsSL --max-time 60 "$BASE/config/env.example.conf" -o "$ENV_FILE.example" \
+      curl -fsSL --max-time 60 "$BASE/config/env.example.conf?_=$(date +%s)" -o "$ENV_FILE.example" \
         && chmod 600 "$ENV_FILE.example" && log "[+] $ENV_FILE.example"
     else
-      curl -fsSL --max-time 60 "$BASE/config/env.example.conf" -o "$ENV_FILE" \
+      curl -fsSL --max-time 60 "$BASE/config/env.example.conf?_=$(date +%s)" -o "$ENV_FILE" \
         || die "拉取配置模板失败"
       chmod 600 "$ENV_FILE"
       log "[+] $ENV_FILE —— 现在去把它填完"
@@ -122,7 +131,7 @@ case "${1:-}" in
     exit 0 ;;
 
   ""|-h|--help)
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 esac
 
