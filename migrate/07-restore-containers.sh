@@ -7,6 +7,7 @@
 #
 # 用法: 07-restore-containers.sh [快照目录]
 #       不给参数则取 SNAPSHOT_ROOT 下最新的 premigrate_*
+# ENV-REQUIRED: CONTAINER_DATA_DIRS SNAPSHOT_ROOT
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root
