@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 04-verify-migration.sh — 迁移后逐项比对
-# VERSION: 2.0.0
+# VERSION: 2.0.1
+# 2.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
 #
 # 在新旧机各跑一次，diff 两份输出。比对四项：
 #   1. 每张表的精确行数（不是 information_schema 的估算值）
