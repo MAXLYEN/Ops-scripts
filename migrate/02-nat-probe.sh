@@ -12,6 +12,7 @@
 #   全部可达且源 IP 是探测端的真实地址 → 全端口 1:1 DNAT，最理想
 #   只有个别端口可达                   → 端口映射型 NAT，去控制台补映射（别漏 UDP）
 #   全部超时                           → 先查安全组；仍不通说明没有独立入站 IP
+# ENV-REQUIRED: PROBE_PORTS
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env
