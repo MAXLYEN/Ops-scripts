@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/panel-backup-upload.sh — 把面板自带的整机备份包上传到网盘
-# VERSION: 1.0.0
+# VERSION: 1.0.1
+# 1.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
 #
 # 面板自带的备份功能会在本地产生一个 tar.gz，可以在**另一台面板**上直接恢复。
 # 它和 backup/ 那套按服务粒度的备份不是一回事：
