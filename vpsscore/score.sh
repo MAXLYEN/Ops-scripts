@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 # vpsscore/score.sh — 对 probe.sh 采集的 JSON 打分与横向对比
-# VERSION: 1.1.0
+# VERSION: 1.2.0
+# 1.2.0: 角色重构为 line / ip / web，并按地区分组对比。
+#        · relay 与 land 合并成 line —— 两者的权重差别只在延迟，
+#          分成两个榜看到的是同一批机器换个顺序，没有新增判断力。
+#        · 新增 ip 榜，用 probe.sh --ipq 采到的深度数据：原生/广播、
+#          原生解锁比例、风险评分、黑名单命中。原来 IP 质量只有
+#          dnsbl_hits 一个指标，测不出真正决定「IP 好不好」的东西。
+#        · web 榜只收 4C4G 以上的机器 —— 低配机在建站榜垫底是必然的，
+#          把它们列进去只是让榜单变长，掩盖真正该比较的那几台。
+#        · 同地区才放一起比：国内直连 400ms 对美西机正常、对香港机是灾难，
+#          混在一张榜上比延迟得出的顺序没有意义。
+#        风险评分取中位数而非最大值：实测有机器 Scamalytics 单独报 67 而
+#        其余五家都是个位数，取最大值会让一家库的口径主导整个排名。
 # 1.1.0: 榜单显示 IP 而非主机名 —— 商家给的 hostname（C202603031886344 之类）
 #        认不出是哪台机器，而排名的用处正是「决定哪台留哪台退」。
 #        IP 取自探针已采集的 ipv4 字段，不用重新采集。
@@ -97,16 +109,20 @@ ROLE = os.environ.get("ROLE") or ""
 AS_JSON = os.environ.get("AS_JSON") == "1"
 
 ROLES = {
-    "relay": ("中转/代理", {
-        "bw": 30, "loss": 25, "rtt": 10, "cpu": 5, "disk_seq": 5,
-        "disk_4k": 0, "mem": 5, "steal": 10, "virt": 5, "ipq": 5}),
-    "web": ("建站", {
-        "bw": 10, "loss": 10, "rtt": 5, "cpu": 20, "disk_seq": 15,
-        "disk_4k": 15, "mem": 15, "steal": 5, "virt": 5, "ipq": 0}),
-    "land": ("落地机", {
-        "bw": 20, "loss": 25, "rtt": 25, "cpu": 5, "disk_seq": 5,
-        "disk_4k": 0, "mem": 5, "steal": 5, "virt": 5, "ipq": 5}),
+    "line": ("线路质量", {
+        "bw": 30, "loss": 30, "rtt": 20, "steal": 10, "virt": 5, "cpu": 5}),
+    "ip": ("IP 质量", {
+        "ip_native": 25, "ip_media": 30, "ip_risk": 20,
+        "ip_blacklist": 15, "ip_flags": 5, "ip_residential": 5}),
+    "web": ("建站（4C4G+）", {
+        "cpu": 20, "mem": 15, "disk_4k": 20, "disk_seq": 15,
+        "bw": 10, "loss": 10, "steal": 5, "virt": 5}),
 }
+
+# web 榜的准入门槛。低配机在建站榜垫底是必然的，列进去只会让榜变长，
+# 把真正该比较的那几台淹没掉。
+WEB_MIN_CORES = 4
+WEB_MIN_MEM_MB = 3500          # 门槛按标称 4G；实际可用常在 3.7-3.9G，故取 3500
 if ROLE and ROLE not in ROLES:
     sys.exit(f"[致命] 未知角色: {ROLE}（可选: {', '.join(ROLES)}）")
 
@@ -189,9 +205,66 @@ def metrics(d):
                   conf_factor(d, "steal_confidence"))
     vc = d.get("virt_class")
     m["virt"] = ({"bare-metal": 100, "full": 90, "container": 55}.get(vc), 1.0)
-    hits = d.get("dnsbl_hits")
-    m["ipq"] = (None if hits is None else clamp(100 - 25 * float(hits)),
-                conf_factor(d, "dnsbl_confidence"))
+    m.update(ip_metrics(d))
+    return m
+
+
+def median(vals):
+    v = sorted(vals)
+    n = len(v)
+    if not n:
+        return None
+    return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
+
+
+def ip_metrics(d):
+    """IP 质量各项。数据来自 probe.sh --ipq；没跑过就整组缺失。"""
+    m = {}
+    ok = d.get("ipq_ok")
+    if not ok:
+        # 没有 --ipq 数据时全部留空，由归一化剔除 ——
+        # 不能拿 dnsbl_hits 凑数，那是完全不同量级的指标
+        for k in ("ip_native", "ip_media", "ip_risk",
+                  "ip_blacklist", "ip_flags", "ip_residential"):
+            m[k] = (None, 1.0)
+        return m
+
+    nat = d.get("ipq_native")
+    m["ip_native"] = (None if nat is None else (100.0 if nat else 35.0), 1.0)
+
+    tot = d.get("ipq_media_total") or 0
+    if tot:
+        # 原生解锁才算数，DNS 解锁随时会被封，折半计
+        native = d.get("ipq_media_native") or 0
+        dns = (d.get("ipq_media_unlocked") or 0) - native
+        m["ip_media"] = (clamp(100.0 * (native + 0.5 * dns) / tot), 1.0)
+    else:
+        m["ip_media"] = (None, 1.0)
+
+    # 中位数而非最大值：单一库的离群值不该主导排名（见 1.2.0 变更说明）
+    rd = d.get("ipq_risk_detail") or {}
+    vals = [float(v) for v in rd.values() if v is not None]
+    if vals:
+        med = median(vals)
+        m["ip_risk"] = (band(med, [(0, 100), (5, 85), (15, 60), (30, 35), (60, 10), (100, 0)]),
+                        1.0 if len(vals) >= 3 else 0.7)
+    else:
+        m["ip_risk"] = (None, 1.0)
+
+    listed = d.get("ipq_bl_listed")
+    marked = d.get("ipq_bl_marked")
+    if listed is None:
+        m["ip_blacklist"] = (None, 1.0)
+    else:
+        # 命中（Blacklisted）比被标记（Marked）严重得多，权重差一个量级
+        v = 100.0 - 20.0 * float(listed) - 1.0 * float(marked or 0)
+        m["ip_blacklist"] = (clamp(v), 1.0)
+
+    fr = d.get("ipq_flag_ratio")
+    m["ip_flags"] = (None if fr is None else clamp(100.0 - 300.0 * float(fr)), 1.0)
+
+    rr = d.get("ipq_residential_ratio")
+    m["ip_residential"] = (None if rr is None else clamp(40.0 + 60.0 * float(rr)), 1.0)
     return m
 
 
@@ -258,14 +331,45 @@ if not hosts:
 roles = {ROLE: ROLES[ROLE]} if ROLE else ROLES
 LABEL = {"bw": "带宽", "loss": "丢包", "rtt": "延迟", "cpu": "CPU",
          "disk_seq": "磁盘顺序", "disk_4k": "磁盘4K", "mem": "内存",
-         "steal": "steal", "virt": "虚拟化", "ipq": "IP质量"}
+         "steal": "steal", "virt": "虚拟化",
+         "ip_native": "原生IP", "ip_media": "流媒体", "ip_risk": "风险评分",
+         "ip_blacklist": "黑名单", "ip_flags": "风险标记", "ip_residential": "住宅属性"}
+
+# 组内少于这个数量时，「第几名」没有参考价值，只报绝对分
+MIN_GROUP = 3
+
+
+def region_of(d):
+    """分组用的地区。以 CDN 实测落地优先，IP 库次之 ——
+    实测的是流量实际走到哪，IP 库是登记信息，两者冲突时前者更可信。"""
+    loc = (d.get("cdn_loc") or "").strip()
+    if loc:
+        return loc
+    c = (d.get("geo_country") or "").strip()
+    return c or "未知"
+
+
+def web_eligible(d):
+    cores = d.get("cpu_cores")
+    mem = d.get("mem_mb")
+    if cores is None or mem is None:
+        return None            # 数据不全，不判定
+    return cores >= WEB_MIN_CORES and mem >= WEB_MIN_MEM_MB
 
 result = {}
+skipped_web = []
 for rk, (rname, w) in roles.items():
     rows = []
     for k, (p, d) in hosts.items():
+        if rk == "web":
+            elig = web_eligible(d)
+            if elig is False:
+                skipped_web.append((display_name(d, p), d.get("cpu_cores"), d.get("mem_mb")))
+                continue
         s, cov, miss = score_role(d, w)
         rows.append({"host": display_name(d, p), "hostname": d.get("host"),
+                     "region": region_of(d),
+                     "cores": d.get("cpu_cores"), "mem_mb": d.get("mem_mb"),
                      "score": s, "coverage": cov,
                      "missing": miss, "file": p, "probed_at": d.get("probed_at")})
     # 低覆盖率的排到后面：它们的高分是「没测到的都不算」换来的，
@@ -285,29 +389,70 @@ if n == 1:
     print("  只有一台机器，相对排名无意义；下面是绝对分。")
     print("  横向对比需要在多台机器上都跑 probe.sh 后把 JSON 收到一处。")
 
-for rk, blk in result.items():
-    print(f"\n▸ {blk['role_name']}（{rk}）")
-    print(f"  {'IP':<20}{'绝对分':>7}{'覆盖率':>8}   缺失项")
-    for i, r in enumerate(blk["rows"], 1):
-        miss = "、".join(LABEL.get(k, k) for k in r["missing"]) or "无"
-        rank = f"{i}." if n > 1 else " "
-        if r["score"] is None:
-            print(f"  {rank:>3} {r['host']:<16}{'—':>7}{'0%':>8}   全部缺失")
-        elif r["coverage"] < MIN_COVERAGE:
-            print(f"  {rank:>3} {r['host']:<16}{'数据不足':>6}{r['coverage']*100:>7.0f}%   {miss}")
-        else:
-            print(f"  {rank:>3} {r['host']:<16}{r['score']:>6.1f}{r['coverage']*100:>7.0f}%   {miss}")
-    # 覆盖率不足时，分数的可比性本身就存疑，必须说出来
-    thin = [r for r in blk["rows"]
+def fmt_row(rank, r):
+    miss = "、".join(LABEL.get(k, k) for k in r["missing"]) or "无"
+    if r["score"] is None:
+        return f"  {rank:>3} {r['host']:<16}{'—':>7}{'0%':>8}   全部缺失"
+    if r["coverage"] < MIN_COVERAGE:
+        return f"  {rank:>3} {r['host']:<16}{'数据不足':>6}{r['coverage']*100:>7.0f}%   {miss}"
+    return f"  {rank:>3} {r['host']:<16}{r['score']:>6.1f}{r['coverage']*100:>7.0f}%   {miss}"
+
+
+def warn_coverage(rows, indent="  "):
+    thin = [r for r in rows
             if r["score"] is not None and MIN_COVERAGE <= r["coverage"] < 0.8]
-    none_ = [r for r in blk["rows"]
+    none_ = [r for r in rows
              if r["score"] is not None and r["coverage"] < MIN_COVERAGE]
     if thin:
-        print(f"  ⚠ {'、'.join(r['host'] for r in thin)} 覆盖率偏低，"
+        print(f"{indent}⚠ {'、'.join(r['host'] for r in thin)} 覆盖率偏低，"
               f"该分数只代表已测到的部分，与其它机器不完全可比")
     if none_:
-        print(f"  ⚠ {'、'.join(r['host'] for r in none_)} 覆盖率不足 "
+        print(f"{indent}⚠ {'、'.join(r['host'] for r in none_)} 覆盖率不足 "
               f"{MIN_COVERAGE*100:.0f}%，不给分 —— 补测缺失项后再比")
+
+
+for rk, blk in result.items():
+    rows = blk["rows"]
+    print(f"\n▸ {blk['role_name']}（{rk}）")
+    if not rows:
+        print("  没有符合条件的机器")
+        continue
+
+    # 按地区分组：国内直连 400ms 对美西机正常、对香港机是灾难，
+    # 混在一张榜上比出的顺序没有意义
+    groups = {}
+    for r in rows:
+        groups.setdefault(r["region"], []).append(r)
+
+    big = {g: v for g, v in groups.items() if len(v) >= MIN_GROUP}
+    small = [r for g, v in groups.items() if len(v) < MIN_GROUP for r in v]
+
+    for g in sorted(big, key=lambda x: -len(big[x])):
+        print(f"\n  ── {g}（{len(big[g])} 台）")
+        print(f"  {'IP':<20}{'绝对分':>7}{'覆盖率':>8}   缺失项")
+        for i, r in enumerate(big[g], 1):
+            print(fmt_row(f"{i}.", r))
+        warn_coverage(big[g], "  ")
+
+    if small:
+        # 同地区不足 MIN_GROUP 台时排名无参考价值，只报绝对分
+        print(f"\n  ── 其它地区（各地不足 {MIN_GROUP} 台，仅列绝对分，不排名）")
+        print(f"  {'IP':<20}{'绝对分':>7}{'覆盖率':>8}   地区")
+        for r in sorted(small, key=lambda x: (x["score"] is None, -(x["score"] or 0))):
+            sc = "—" if r["score"] is None else (
+                "数据不足" if r["coverage"] < MIN_COVERAGE else f"{r['score']:.1f}")
+            print(f"      {r['host']:<16}{sc:>7}{r['coverage']*100:>7.0f}%   {r['region']}")
+        warn_coverage(small, "  ")
+
+    if rk == "web" and skipped_web:
+        uniq = {h: (c, m) for h, c, m in skipped_web}
+        # 门槛写标称值（4G），不要用 MIN_MEM_MB//1024 —— 3500 会算成 3G，
+        # 让人以为门槛比实际低
+        print(f"\n  未列入（低于 {WEB_MIN_CORES}C4G）：{len(uniq)} 台")
+        shown = sorted(uniq.items(),
+                       key=lambda x: (-(x[1][0] or 0), -(x[1][1] or 0)))[:8]
+        print("  " + "、".join(f"{h}({c}C/{(m or 0) / 1024:.1f}G)" for h, (c, m) in shown)
+              + ("…" if len(uniq) > 8 else ""))
 
 print("\n  绝对分：0-100，按角色权重加权，缺失项剔除后归一化")
 print("  覆盖率：参与计分的权重占该角色总权重的比例")
