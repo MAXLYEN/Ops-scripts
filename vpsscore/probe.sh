@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # vpsscore/probe.sh — VPS 质量采集探针（服务端）
-# VERSION: 1.0.2
+# VERSION: 1.0.3
+# 1.0.3: 三处修正，都是「把无数据伪装成有结论」的同一类错误。
+#        ① 取不到公网 IP 时 ipv4_on_nic / ipv6_usable 写 null，不再写 false ——
+#           原来 curl 一超时就报告「IP 没绑在网卡上」，而事实是这项没测出来。
+#           公网 IP 改为最多重试 3 次、换备用端点。
+#        ② cdn_connect_ms 扣掉 DNS 解析时间（time_connect - time_namelookup），
+#           原来把首次解析的耗时算进了 RTT，26ms 里分不出哪些是 DNS。
+#        ③ ping 采样 10 → 30 包。10 包的丢包率分辨率只有 10%，
+#           会把「丢 1 个」呈现成「丢包 10%」，两轮采集能得出相反结论。
 # 1.0.2: 带宽从「成/败」改成可诊断：同时记录已传字节、耗时、curl 退出码。
 #        「跑慢了被 30 秒掐断」和「连接压根没起来」原来都写 null，
 #        但前者是有数据的（均速有效），后者才是真没数据。
@@ -101,7 +109,7 @@ VIRT=$(systemd-detect-virt 2>/dev/null || echo unknown)
 say "系统 ${PRETTY_NAME:-?} | 内核 $(uname -r) | 虚拟化 $VIRT"
 add host        "$(str "$HOST")"
 add probed_at   "$(str "$(date -u +%FT%TZ)")"
-add probe_ver   "$(str '1.0.2')"
+add probe_ver   "$(str '1.0.3')"
 add os          "$(str "${PRETTY_NAME:-unknown}")"
 add kernel      "$(str "$(uname -r)")"
 add virt        "$(str "$VIRT")"
@@ -183,14 +191,36 @@ fi
 
 # ==================== 3. 网络形态 ====================
 step "3/6 网络形态"
-PUB4=$(curl -s -4 --max-time 10 https://api.ipify.org 2>/dev/null)
-PUB6=$(curl -s -6 --max-time 10 https://api64.ipify.org 2>/dev/null)
+# 单点单次取公网 IP 太脆：一次超时就会让下面的判断全部失真。
+# 换两个端点、各试一轮。
+pubip() {  # $1=4 或 6
+  local v=$1 u r
+  for u in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
+    r=$(curl -s "-$v" --max-time 8 "$u" 2>/dev/null | tr -d '[:space:]')
+    case "$r" in
+      ''|*[!0-9a-fA-F.:]*) continue ;;
+      *) printf '%s' "$r"; return 0 ;;
+    esac
+  done
+  return 1
+}
+PUB4=$(pubip 4) || PUB4=""
+PUB6=$(pubip 6) || PUB6=""
 NIC4=$(ip -4 -br addr | grep -v '^lo' | awk '{print $3}' | tr '\n' ' ')
-DIRECT4=false
-[ -n "$PUB4" ] && ip -4 -br addr | grep -qF "$PUB4" && DIRECT4=true
-HAS_V6=false
-[ -n "$PUB6" ] && ip -6 route show default 2>/dev/null | grep -q . && HAS_V6=true
-say "IPv4 ${PUB4:-无}（直绑网卡: $DIRECT4） | IPv6 ${PUB6:-无}（可用: $HAS_V6）"
+
+# 取不到公网 IP 时这两项是「没测出来」，不是「否」。写 false 等于凭空
+# 给出一个结论 —— 打分时会当成 NAT 机器扣分，而它可能是直绑的。
+if [ -n "$PUB4" ]; then
+  if ip -4 -br addr | grep -qF "$PUB4"; then DIRECT4=true; else DIRECT4=false; fi
+else
+  DIRECT4=null
+fi
+if [ -n "$PUB6" ]; then
+  if ip -6 route show default 2>/dev/null | grep -q .; then HAS_V6=true; else HAS_V6=false; fi
+else
+  HAS_V6=null
+fi
+say "IPv4 ${PUB4:-取不到}（直绑网卡: $DIRECT4） | IPv6 ${PUB6:-无}（可用: $HAS_V6）"
 add ipv4 "$(str "${PUB4:-}")"
 add ipv6 "$(str "${PUB6:-}")"
 add ipv4_on_nic "$DIRECT4"
@@ -202,7 +232,9 @@ step "4/6 线路质量"
 PING_JSON=""
 for kv in $PING_TARGETS; do
   label="${kv%%=*}"; ip="${kv##*=}"
-  out=$(ping -c 10 -i 0.3 -W 2 "$ip" 2>/dev/null | tail -3)
+  # 30 包：10 包的丢包率分辨率只有 10%，丢 1 个就报 10%，
+  # 噪声会被当成结论（实测同一条线两轮能得出 0% 和 10% 两种答案）
+  out=$(ping -c 30 -i 0.3 -W 2 "$ip" 2>/dev/null | tail -3)
   loss=$(printf '%s' "$out" | grep -oE '[0-9.]+% packet loss' | grep -oE '^[0-9.]+')
   # RTT 汇总行在丢包/高延迟时末尾会多一截 ", pipe N"（RTT > 发包间隔就会出现，
   # 这里 -i 0.3 意味着 >300ms 的线路必然触发）。先按「= 之后、第一个空格之前」
@@ -228,7 +260,8 @@ EOF
   PING_JSON="${PING_JSON}${PING_JSON:+,}$(str "$label"):{\"ip\":$(str "$ip"),\"rtt_ms\":$(num "$rtt"),\"jitter_ms\":$(num "$jit"),\"loss_pct\":$(num "$loss"),\"icmp_filtered\":$icmp_only,\"tcp53_ms\":$(num "$tcpms")}"
 done
 add ping "{$PING_JSON}"
-add ping_confidence "$(str 'medium')"   # 单次 10 包，受时段影响
+add ping_samples "30"
+add ping_confidence "$(str 'medium')"   # 单次 30 包，受时段影响
 
 # 带宽：受测速点与时段影响极大，单次结果只能当参考
 if [ "$QUICK" -eq 0 ]; then
@@ -267,12 +300,15 @@ fi
 # CDN 边缘：一次轻量请求换两个硬指标 —— 就近 colo 和建连 RTT。
 # 用途是交叉验证 IP 库：IP 库说在 A 地、Cloudflare 却把你路由到 B 地，
 # 且建连 RTT 高得离谱时，可信的是后者（它是实测，IP 库是登记信息）。
-TR=$(curl -s --max-time 10 -w '\n__T %{time_connect} %{time_appconnect}' "$TRACE_URL" 2>/dev/null)
+TR=$(curl -s --max-time 10 -w '\n__T %{time_connect} %{time_namelookup}' "$TRACE_URL" 2>/dev/null)
 CDN_COLO=$(printf '%s' "$TR" | sed -n 's/^colo=//p' | head -1)
 CDN_LOC=$(printf '%s'  "$TR" | sed -n 's/^loc=//p'  | head -1)
-CDN_MS=$(printf '%s'   "$TR" | awk '/^__T/{printf "%.0f", $2*1000}')
+# 扣掉 DNS 解析：time_connect 从发起算起，含首次解析耗时。
+# 不扣的话，一次慢 DNS 会被记成「线路 RTT 高」，方向完全错。
+CDN_MS=$(printf '%s' "$TR" | awk '/^__T/{v=($2-$3)*1000; if(v<0)v=0; printf "%.0f", v}')
+CDN_DNS_MS=$(printf '%s' "$TR" | awk '/^__T/{printf "%.0f", $3*1000}')
 if [ -n "$CDN_COLO" ]; then
-  say "CDN 边缘 ${CDN_COLO}（${CDN_LOC:-?}）建连 ${CDN_MS:-?}ms"
+  say "CDN 边缘 ${CDN_COLO}（${CDN_LOC:-?}）建连 ${CDN_MS:-?}ms（DNS ${CDN_DNS_MS:-?}ms 已扣除）"
   # 建连约等于一个 RTT。同城 colo 该是个位数毫秒；三位数说明路径极长或极拥塞
   if [ -n "$CDN_MS" ] && [ "$CDN_MS" -gt 200 ] 2>/dev/null; then
     say "  ⚠ 到最近边缘就要 ${CDN_MS}ms —— 这不是正常线路的底噪，本机位置存疑"
@@ -280,8 +316,10 @@ if [ -n "$CDN_COLO" ]; then
   add cdn_colo "$(str "$CDN_COLO")"
   add cdn_loc  "$(str "${CDN_LOC:-}")"
   add cdn_connect_ms "$(num "${CDN_MS:-}")"
+  add cdn_dns_ms "$(num "${CDN_DNS_MS:-}")"
 else
-  add cdn_colo "$(nul)"; add cdn_loc "$(nul)"; add cdn_connect_ms "$(nul)"
+  add cdn_colo "$(nul)"; add cdn_loc "$(nul)"
+  add cdn_connect_ms "$(nul)"; add cdn_dns_ms "$(nul)"
   say "CDN 边缘探测失败"
 fi
 
