@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 03-pre-migrate.sh — 迁移前冷快照
-# VERSION: 2.0.0
+# VERSION: 2.0.1
+# 2.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
 #
 # 在迁出机运行。停服 → 全量导出（不排除任何表）→ 打包关键路径。
 #
