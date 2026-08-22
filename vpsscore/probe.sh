@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # vpsscore/probe.sh — VPS 质量采集探针（服务端）
-# VERSION: 1.0.4
+# VERSION: 1.1.0
+# 1.1.0: ① 新增 --ipq：调用 IPQuality（IP.Check.Place）做深度 IP 质量检测。
+#           原来只查 4 个 DNSBL zone，测不出真正决定「IP 好不好」的东西 ——
+#           原生/广播、机房/住宅、六家风险评分、九库代理标记、流媒体原生解锁。
+#           默认不跑：它要查十几个第三方 API，24 台并发会被限流，
+#           而被限流得出的「IP 质量差」是假结论，比没有数据更糟。
+#        ② 缺工具不再静默留空。ping 没装会让丢包全测不出来，而探针只是
+#           留了个 null —— 打分时该项被剔除并归一化，反而拉高了排名。
+#           现在统一记进 missing_tools 并在摘要里明说。
 # 1.0.4: 修 `set -o pipefail` + `grep -q` 的竞态（三处）。grep -q 一匹配上就
 #        退出并关闭管道，上游进程吃到 SIGPIPE 退出码 141，pipefail 把整条管道
 #        判成失败 —— 于是「匹配成功」变成了「没匹配上」。是否触发取决于上游
@@ -47,6 +55,7 @@
 #   probe.sh                  跑标准采集（约 2~4 分钟）
 #   probe.sh --quick          跳过带宽与磁盘测试（约 30 秒）
 #   probe.sh --with-ecs       额外跑一遍 ecs.sh 并留存原始输出用于交叉验证
+#   probe.sh --ipq            额外做深度 IP 质量检测（约 +1~2 分钟，查第三方 API）
 #   probe.sh --out <目录>     指定输出目录（默认 /var/lib/vpsscore）
 #
 # ⚠️ 关于可信度：每个指标都带 confidence 字段
@@ -58,11 +67,12 @@
 set -o pipefail
 [ "$(id -u)" -eq 0 ] || { echo "❌ 需要 root"; exit 1; }
 
-QUICK=0; WITH_ECS=0; OUTDIR=/var/lib/vpsscore
+QUICK=0; WITH_ECS=0; DO_IPQ=0; OUTDIR=/var/lib/vpsscore
 while [ $# -gt 0 ]; do
   case "$1" in
     --quick) QUICK=1 ;;
     --with-ecs) WITH_ECS=1 ;;
+    --ipq) DO_IPQ=1 ;;
     --out) shift; OUTDIR="${1:?--out 后面要跟目录}" ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
@@ -85,6 +95,15 @@ SPEED_URL="${VPSSCORE_SPEED_URL:-https://speed.cloudflare.com/__down?bytes=26214
 TRACE_URL="${VPSSCORE_TRACE_URL:-https://speed.cloudflare.com/cdn-cgi/trace}"
 
 say()  { printf '  %s\n' "$*" >&2; }
+
+# 缺了工具就有指标测不出来，而「测不出来」在打分时会被剔除并归一化 ——
+# 结果是缺工具的机器反而排得更靠前。必须如实记下来。
+MISSING_TOOLS=""
+have() {
+  if command -v "$1" >/dev/null 2>&1; then return 0; fi
+  case " $MISSING_TOOLS " in *" $1 "*) ;; *) MISSING_TOOLS="$MISSING_TOOLS $1" ;; esac
+  return 1
+}
 step() { printf '\n▸ %s\n' "$*" >&2; }
 
 # JSON 拼装：值已按类型处理，字符串调用方自己加引号
@@ -120,7 +139,7 @@ VIRT=$(systemd-detect-virt 2>/dev/null || echo unknown)
 say "系统 ${PRETTY_NAME:-?} | 内核 $(uname -r) | 虚拟化 $VIRT"
 add host        "$(str "$HOST")"
 add probed_at   "$(str "$(date -u +%FT%TZ)")"
-add probe_ver   "$(str '1.0.4')"
+add probe_ver   "$(str '1.1.0')"
 add os          "$(str "${PRETTY_NAME:-unknown}")"
 add kernel      "$(str "$(uname -r)")"
 add virt        "$(str "$VIRT")"
@@ -186,7 +205,7 @@ if [ "$QUICK" -eq 0 ]; then
   add disk_seq_write_mbs "$(num "$(to_mbs "${DISK_W:-}")")"
   add disk_seq_read_mbs  "$(num "$(to_mbs "${DISK_R:-}")")"
   # 4K 随机要 fio，没装就如实标注缺失，不用顺序读写去糊弄
-  if command -v fio >/dev/null 2>&1; then
+  if have fio; then
     FIO=$(fio --name=r --rw=randread --bs=4k --size=64M --numjobs=1 --runtime=8 \
               --time_based --direct=1 --group_reporting --minimal 2>/dev/null | cut -d';' -f8)
     add disk_4k_read_iops "${FIO:-null}"
@@ -248,6 +267,9 @@ add nic_addrs "$(str "$NIC4")"
 
 # ==================== 4. 线路质量 ====================
 step "4/6 线路质量"
+if ! have ping; then
+  say "⚠ 未装 ping —— 三网丢包与延迟整节无法测量（apt install iputils-ping）"
+fi
 PING_JSON=""
 for kv in $PING_TARGETS; do
   label="${kv%%=*}"; ip="${kv##*=}"
@@ -345,12 +367,12 @@ else
 fi
 
 # 回程路由：国内 VPS 圈最看重的指标，但需要 mtr/traceroute
-if command -v mtr >/dev/null 2>&1; then
+if have mtr; then
   T=$(echo "$PING_TARGETS" | awk '{print $1}'); T="${T##*=}"
   mtr -r -c 5 -n "$T" > "$TMP/mtr.txt" 2>/dev/null
   add route_probe "$(str 'mtr')"
   say "回程路由已采样（原始输出随 JSON 一并保存）"
-elif command -v traceroute >/dev/null 2>&1; then
+elif have traceroute; then
   T=$(echo "$PING_TARGETS" | awk '{print $1}'); T="${T##*=}"
   traceroute -n -m 20 -w 2 "$T" > "$TMP/mtr.txt" 2>/dev/null
   add route_probe "$(str 'traceroute')"
@@ -397,7 +419,7 @@ if [ -n "$PUB4" ]; then
 
   # DNSBL：注意 Spamhaus 已拒绝公共解析器查询，会返回 127.255.255.x
   # ——那是「查询被拒」不是「被列入」，必须区分，否则误判成脏 IP
-  if command -v dig >/dev/null 2>&1; then
+  if have dig; then
     REV=$(printf '%s' "$PUB4" | awk -F. '{print $4"."$3"."$2"."$1}')
     BL_JSON=""; BL_HIT=0
     for z in zen.spamhaus.org bl.spamcop.net b.barracudacentral.org dnsbl.sorbs.net; do
@@ -419,7 +441,143 @@ if [ -n "$PUB4" ]; then
     say "未装 dig，跳过黑名单（apt install dnsutils）"
   fi
 fi
+# ── 深度 IP 质量（可选，--ipq）───────────────────────────────
+# 借 IPQuality（github.com/xykt/IPQuality）而不是自己重造：它整合了十来个
+# 商业风险库和流媒体探测，这些数据源自己接一遍既不现实也维护不动。
+# 只取其 JSON 输出里可量化的部分，原始报告不留（含完整 IP，且体积大）。
+if [ "$DO_IPQ" -eq 1 ]; then
+  step "IP 质量深度检测（IPQuality，查第三方 API，约 1-2 分钟）"
+  IPQ_SH=$(mktemp); IPQ_OUT="$TMP/ipq.json"
+  if ! have curl || ! have python3; then
+    say "缺 curl 或 python3，跳过"
+    add ipq_ok "false"; add ipq_note "$(str '缺 curl/python3')"
+  elif ! curl -fsSL --max-time 60 https://IP.Check.Place -o "$IPQ_SH" 2>/dev/null || [ ! -s "$IPQ_SH" ]; then
+    say "IPQuality 脚本拉取失败，跳过"
+    add ipq_ok "false"; add ipq_note "$(str '脚本拉取失败')"
+  else
+    # -4 只测 IPv4；-n 跳过它自己的依赖安装（我们已经装好）；
+    # -p 隐私模式，不生成在线报告（否则每台机器的完整 IP 会被上传生成分享页）
+    bash "$IPQ_SH" -4 -n -p -o "$IPQ_OUT" >/dev/null 2>&1
+    if [ -s "$IPQ_OUT" ] && python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$IPQ_OUT" 2>/dev/null; then
+      IPQ_FIELDS=$(python3 - "$IPQ_OUT" <<'IPQPY'
+import json, sys, collections
+
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+out = {}
+
+# 原生 IP 与否。IPQuality 用 Info.Type 表达：Geo-consistent = 归属地与使用地一致
+# （通常即原生 IP），Broadcast/Geo-inconsistent = 广播 IP。
+out["ipq_type"] = (d.get("Info") or {}).get("Type") or None
+
+# 使用类型：五个库各报一个（ISP/家宽/商业/机房），取众数。
+# 机房 IP 做代理容易被风控，家宽/ISP 则相反 —— 这是「IP 好不好」的核心之一。
+usage = [v for v in ((d.get("Type") or {}).get("Usage") or {}).values()
+         if v and v.lower() != "null"]
+out["ipq_usage"] = collections.Counter(usage).most_common(1)[0][0] if usage else None
+out["ipq_usage_isp_ratio"] = (
+    round(sum(1 for u in usage if "isp" in u.lower() or "home" in u.lower()
+              or "家宽" in u or "住宅" in u) / len(usage), 2) if usage else None)
+
+
+def pct(v):
+    """把各库口径不一的风险分统一成 0-100（越大越差）。"""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s.lower() == "null":
+        return None
+    try:
+        if s.endswith("%"):
+            return float(s[:-1])
+        return float(s)
+    except ValueError:
+        return None
+
+
+# 六家风险评分。口径不同但都是「越大越差」，取最大值做保守判断 ——
+# 只要有一家把这个 IP 标红，实际使用中就可能被那家的客户挡下来。
+scores = {k: pct(v) for k, v in (d.get("Score") or {}).items()}
+vals = [v for v in scores.values() if v is not None]
+out["ipq_risk_max"] = round(max(vals), 1) if vals else None
+out["ipq_risk_avg"] = round(sum(vals) / len(vals), 1) if vals else None
+out["ipq_risk_sources"] = len(vals)
+
+# 风险因子：九个库分别判断是否代理/VPN/Tor/滥用/机器人。
+# 记「被标记的库数 / 有效判断数」，比单看某一家稳。Server(机房) 单列 ——
+# 它是事实描述不是风险，混进来会把正常 VPS 全判成高风险。
+factor = d.get("Factor") or {}
+flag_n = flag_d = 0
+for key in ("Proxy", "VPN", "Tor", "Abuser", "Robot"):
+    for v in (factor.get(key) or {}).values():
+        if v is None:
+            continue
+        flag_d += 1
+        if v is True:
+            flag_n += 1
+out["ipq_flags_hit"] = flag_n if flag_d else None
+out["ipq_flags_total"] = flag_d or None
+out["ipq_flag_ratio"] = round(flag_n / flag_d, 3) if flag_d else None
+
+srv = [v for v in (factor.get("Server") or {}).values() if v is not None]
+out["ipq_is_datacenter"] = (sum(1 for v in srv if v) > len(srv) / 2) if srv else None
+
+# 流媒体/AI 解锁：Status=Yes 才算解锁，Type=Native 才是原生解锁
+# （DNS 解锁随时会被封，价值远低于原生）
+media = d.get("Media") or {}
+unlocked = native = 0
+detail = {}
+for name, m in media.items():
+    st = (m or {}).get("Status", "")
+    ok = str(st).lower() in ("yes", "true", "unlocked")
+    nat = ok and str((m or {}).get("Type", "")).lower() == "native"
+    unlocked += ok
+    native += nat
+    detail[name] = "native" if nat else ("dns" if ok else "no")
+out["ipq_media_total"] = len(media) or None
+out["ipq_media_unlocked"] = unlocked if media else None
+out["ipq_media_native"] = native if media else None
+out["ipq_media"] = detail or None
+
+# 439 个黑名单库的统计，比我原来查 4 个 zone 靠谱得多
+bl = ((d.get("Mail") or {}).get("DNSBlacklist") or {})
+out["ipq_bl_total"] = bl.get("Total")
+out["ipq_bl_marked"] = bl.get("Marked")
+out["ipq_bl_listed"] = bl.get("Blacklisted")
+
+out["ipq_ok"] = True
+json.dump(out, sys.stdout, ensure_ascii=False)
+IPQPY
+)
+      if [ -n "$IPQ_FIELDS" ]; then
+        # 解析结果是一个 JSON 对象，去掉外层大括号并入主 JSON
+        J="${J}${J:+,}$(printf '%s' "$IPQ_FIELDS" | sed 's/^{//; s/}$//')"
+        say "$(printf '%s' "$IPQ_FIELDS" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("类型 %s / %s | 风险 max %s | 标记 %s/%s | 原生解锁 %s/%s | 黑名单 %s" % (
+  d.get("ipq_type") or "?", d.get("ipq_usage") or "?",
+  d.get("ipq_risk_max"), d.get("ipq_flags_hit"), d.get("ipq_flags_total"),
+  d.get("ipq_media_native"), d.get("ipq_media_total"), d.get("ipq_bl_listed")))')"
+      else
+        say "解析失败"; add ipq_ok "false"; add ipq_note "$(str '解析失败')"
+      fi
+    else
+      say "IPQuality 未产出有效 JSON（可能被限流或网络不通）"
+      add ipq_ok "false"; add ipq_note "$(str '无有效输出')"
+    fi
+  fi
+  rm -f "$IPQ_SH"
+else
+  add ipq_ok "$(nul)"
+  add ipq_note "$(str '未启用，加 --ipq 开启')"
+fi
+
 # 「是否被墙」在本机测不出来 —— 需要国内探测点，属客户端探针的范畴
+MISSING_TOOLS=$(echo $MISSING_TOOLS)
+if [ -n "$MISSING_TOOLS" ]; then
+  say "⚠ 缺少工具: $MISSING_TOOLS —— 相关指标为 null，打分时会剔除"
+fi
+add missing_tools "$(str "$MISSING_TOOLS")"
 add gfw_status "$(nul)"
 add gfw_note "$(str '需从国内探测点测试，服务端无法判定')"
 
