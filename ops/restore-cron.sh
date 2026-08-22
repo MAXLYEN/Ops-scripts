@@ -8,6 +8,7 @@
 # 建议在切换完成、服务观察正常之后再跑 —— 观察期里备份一个还没验完的状态没意义。
 #
 # 用法: restore-cron.sh [快照目录]
+# ENV-REQUIRED: BACKUP_SCRIPTS SNAPSHOT_ROOT
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root
