@@ -17,6 +17,7 @@
 #   panel-backup-upload.sh --prune N    上传后云端只保留最新 N 个
 #
 # 默认会用备份密码把包再套一层 7z 加密后上传，理由见脚本内说明。
+# ENV-REQUIRED: RCLONE_REMOTES
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root
