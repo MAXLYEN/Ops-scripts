@@ -1,18 +1,51 @@
 #!/usr/bin/env bash
 # ops/compare-backup-content.sh — 比对两个备份包的内容清单
-# VERSION: 1.0.0
+# VERSION: 1.0.1
+# 1.0.1: ① 密码键跟上 backup/*.sh 2.3.x：BACKUP_PASS_FILE 优先，VW_PASS_FILE 回落。
+#           原来只认 VW_PASS_FILE，旧键一旦清掉就会掉到 BACKUP_PASS_FILES（复数，
+#           是另一个键——密码文件**列表**）取第一项，多半是别的密码文件，
+#           于是报「解包失败」，人会以为是备份包坏了，而不是脚本取错了密码。
+#        ② 补 -h/--help；原来给任何非法参数都只吐一行 die，看不到用法。
 #
 # 改动备份脚本后验证等价性用：文件路径列表必须一致，只允许你预期的那几项差异。
 # 自动识别两种结构：包内直接铺开、或内容在 payload.tar.gz 里。
 #
-# 用法: compare-backup-content.sh <旧包> <新包>
-#       compare-backup-content.sh <目录>        取该目录下最新的两个包比
+# 用法: compare-backup-content.sh <旧包> <新包>    顺序是旧在前、新在后
+#       compare-backup-content.sh <目录>          取该目录下最新的两个包比
+#       compare-backup-content.sh -h
+#
+# ENV-REQUIRED: BACKUP_PASS_FILE|VW_PASS_FILE
+
+usage() {
+  cat <<'USAGE'
+compare-backup-content.sh — 比对两个备份包的内容清单
+
+  compare-backup-content.sh <旧包> <新包>    顺序是旧在前、新在后
+  compare-backup-content.sh <目录>          取该目录下最新的两个包比
+
+改动备份脚本后验证等价性用：文件路径列表必须一致，只允许你预期的那几项差异。
+自动识别两种结构：包内直接铺开、或内容在 payload.tar.gz 里。
+密码取自 env.conf 的 BACKUP_PASS_FILE（旧机器回落到 VW_PASS_FILE）。
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env
 require_cmd 7z
 
-PASS_FILE="${VW_PASS_FILE:-$(echo $BACKUP_PASS_FILES | awk '{print $1}')}"
+# 与 backup/vw-fullbackup.sh、backup/xboard-fullbackup.sh 2.3.x 保持同一套取值顺序。
+# 三者必须一致 —— 比对工具用错密码，得到的结论是「包坏了」，方向完全反了。
+PASS_FILE="${BACKUP_PASS_FILE:-${VW_PASS_FILE:-}}"
+# 最后才回落到复数的列表键，并且明说取的是哪一项，免得静默取错
+if [ -z "$PASS_FILE" ] && [ -n "${BACKUP_PASS_FILES:-}" ]; then
+  PASS_FILE=$(echo $BACKUP_PASS_FILES | awk '{print $1}')
+  warn "BACKUP_PASS_FILE / VW_PASS_FILE 都为空，回落到 BACKUP_PASS_FILES 的第一项: $PASS_FILE"
+fi
+[ -n "$PASS_FILE" ] || die "没有可用的密码文件：请在 env.conf 填 BACKUP_PASS_FILE"
 [ -r "$PASS_FILE" ] || die "读不到密码文件: $PASS_FILE"
 PASS=$(head -1 "$PASS_FILE")
 
@@ -23,7 +56,7 @@ if [ $# -eq 1 ] && [ -d "$1" ]; then
 elif [ $# -eq 2 ]; then
   A=$1; B=$2
 else
-  die "用法: $(basename "$0") <旧包> <新包> | <目录>"
+  usage; die "参数不对：需要两个包，或一个目录"
 fi
 
 TD=$(mktemp -d); trap 'rm -rf "$TD"' EXIT
