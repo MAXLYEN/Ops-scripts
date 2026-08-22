@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 02-nat-probe.sh — 入站可达性验证
-# VERSION: 2.0.0
+# VERSION: 2.0.1
+# 2.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
 #
 # curl ifconfig.me 只证明出网 SNAT 通，不证明外面能连进来。这一步验的是入站。
 #
