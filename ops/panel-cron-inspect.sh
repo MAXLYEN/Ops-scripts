@@ -9,6 +9,7 @@
 # 典型误判：以为两个任务都是数据库备份，实际一个是证书续期。
 #
 # 用法: panel-cron-inspect.sh [--run <hash>]   带 --run 则手动触发一次
+# ENV-REQUIRED: PANEL_CRON_DIR
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root
