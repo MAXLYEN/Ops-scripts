@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # vpsscore/probe.sh — VPS 质量采集探针（服务端）
-# VERSION: 1.0.1
+# VERSION: 1.0.2
+# 1.0.2: 带宽从「成/败」改成可诊断：同时记录已传字节、耗时、curl 退出码。
+#        「跑慢了被 30 秒掐断」和「连接压根没起来」原来都写 null，
+#        但前者是有数据的（均速有效），后者才是真没数据。
+#        默认负载 100MB → 25MB，慢线路也能跑完。
+#        新增 CDN 边缘探测（colo / 建连 RTT）—— 一次轻量请求就能暴露
+#        「宣称在 A 地、实际被路由到 B 地」以及异常的 RTT 底噪，
+#        这正是 IP 库三处自相矛盾时唯一能自己测出来的硬证据。
 # 1.0.1: 修 JSON 产出损坏 —— ping 汇总行末尾的 ", pipe N"（RTT 超过发包间隔就会
 #        出现，-i 0.3 意味着 >300ms 的线路必然触发）被 tr -d ' ms' 压成
 #        "4.634,pipe2" 原样写进 JSON，整份文件解析不了。顺带四处：
@@ -53,7 +60,10 @@ TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 # 可用 VPSSCORE_PING_TARGETS 覆盖，格式: "标签=IP 标签=IP"
 PING_TARGETS="${VPSSCORE_PING_TARGETS:-电信=219.141.136.10 联通=202.106.50.1 移动=221.179.155.161}"
 # 带宽测试端点（Cloudflare，全球任播，无需注册）
-SPEED_URL="${VPSSCORE_SPEED_URL:-https://speed.cloudflare.com/__down?bytes=104857600}"
+# 25MB：100MB 在 20Mbps 以下的线路跑不完 30 秒，会被掐成「失败」
+SPEED_URL="${VPSSCORE_SPEED_URL:-https://speed.cloudflare.com/__down?bytes=26214400}"
+# CDN 边缘探测端点（极轻量，返回 colo/loc 等）
+TRACE_URL="${VPSSCORE_TRACE_URL:-https://speed.cloudflare.com/cdn-cgi/trace}"
 
 say()  { printf '  %s\n' "$*" >&2; }
 step() { printf '\n▸ %s\n' "$*" >&2; }
@@ -91,7 +101,7 @@ VIRT=$(systemd-detect-virt 2>/dev/null || echo unknown)
 say "系统 ${PRETTY_NAME:-?} | 内核 $(uname -r) | 虚拟化 $VIRT"
 add host        "$(str "$HOST")"
 add probed_at   "$(str "$(date -u +%FT%TZ)")"
-add probe_ver   "$(str '1.0.1')"
+add probe_ver   "$(str '1.0.2')"
 add os          "$(str "${PRETTY_NAME:-unknown}")"
 add kernel      "$(str "$(uname -r)")"
 add virt        "$(str "$VIRT")"
@@ -222,21 +232,57 @@ add ping_confidence "$(str 'medium')"   # 单次 10 包，受时段影响
 
 # 带宽：受测速点与时段影响极大，单次结果只能当参考
 if [ "$QUICK" -eq 0 ]; then
-  BW=$(curl -s -o /dev/null -w '%{speed_download}' --max-time 30 "$SPEED_URL" 2>/dev/null)
-  BW_MBPS=$(awk -v b="${BW:-0}" 'BEGIN{v=b*8/1000000; if(v<0.05){print ""; exit} printf "%.1f", v}')
-  # 测速失败写 0 是错的：0 和「没测出来」在打分时含义完全相反
-  # —— 前者是「这机器带宽极差」，后者是「这项没有数据，别参与计算」
-  if [ -n "$BW_MBPS" ]; then
-    say "下行带宽 ${BW_MBPS} Mbps（单点单次，仅供参考）"
+  BW_RAW=$(curl -s -o /dev/null -w '%{speed_download} %{size_download} %{time_total}' \
+           --max-time 30 "$SPEED_URL" 2>/dev/null)
+  BW_RC=$?
+  read -r _sp _sz _tt <<EOF
+${BW_RAW:-0 0 0}
+EOF
+  BW_MBPS=$(awk -v b="${_sp:-0}" 'BEGIN{v=b*8/1000000; if(v<0.05){print ""; exit} printf "%.1f", v}')
+  # 超时(28)不等于失败：已传够多字节时均速依然有效，只是把置信度降一级。
+  # 原来两种情况都写 null —— 但「跑慢了被掐」是有数据的，「连不上」才是真没有。
+  if [ -n "$BW_MBPS" ] && [ "${_sz:-0}" -ge 1048576 ] 2>/dev/null; then
+    if [ "$BW_RC" -eq 28 ]; then
+      say "下行带宽 ${BW_MBPS} Mbps（30 秒内未传完，取已传部分均速）"
+      add bandwidth_confidence "$(str 'low')"
+    else
+      say "下行带宽 ${BW_MBPS} Mbps（单点单次，仅供参考）"
+      add bandwidth_confidence "$(str 'medium')"
+    fi
     add down_mbps "$(num "$BW_MBPS")"
-    add bandwidth_confidence "$(str 'medium')"
   else
-    say "下行带宽测试失败（测速点不可达或被限速），该项留空"
+    say "下行带宽测试失败（curl 退出码 $BW_RC，已传 ${_sz:-0} 字节），该项留空"
     add down_mbps "$(nul)"
     add bandwidth_confidence "$(str 'failed')"
   fi
+  # 原始量一并留下：只看一个 Mbps 分不出「慢」和「没测成」
+  add down_bytes "$(num "${_sz:-}")"
+  add down_secs  "$(num "${_tt:-}")"
+  add down_curl_exit "$BW_RC"
 else
   add down_mbps "$(nul)"; add bandwidth_confidence "$(str 'skipped')"
+  add down_bytes "$(nul)"; add down_secs "$(nul)"; add down_curl_exit "$(nul)"
+fi
+
+# CDN 边缘：一次轻量请求换两个硬指标 —— 就近 colo 和建连 RTT。
+# 用途是交叉验证 IP 库：IP 库说在 A 地、Cloudflare 却把你路由到 B 地，
+# 且建连 RTT 高得离谱时，可信的是后者（它是实测，IP 库是登记信息）。
+TR=$(curl -s --max-time 10 -w '\n__T %{time_connect} %{time_appconnect}' "$TRACE_URL" 2>/dev/null)
+CDN_COLO=$(printf '%s' "$TR" | sed -n 's/^colo=//p' | head -1)
+CDN_LOC=$(printf '%s'  "$TR" | sed -n 's/^loc=//p'  | head -1)
+CDN_MS=$(printf '%s'   "$TR" | awk '/^__T/{printf "%.0f", $2*1000}')
+if [ -n "$CDN_COLO" ]; then
+  say "CDN 边缘 ${CDN_COLO}（${CDN_LOC:-?}）建连 ${CDN_MS:-?}ms"
+  # 建连约等于一个 RTT。同城 colo 该是个位数毫秒；三位数说明路径极长或极拥塞
+  if [ -n "$CDN_MS" ] && [ "$CDN_MS" -gt 200 ] 2>/dev/null; then
+    say "  ⚠ 到最近边缘就要 ${CDN_MS}ms —— 这不是正常线路的底噪，本机位置存疑"
+  fi
+  add cdn_colo "$(str "$CDN_COLO")"
+  add cdn_loc  "$(str "${CDN_LOC:-}")"
+  add cdn_connect_ms "$(num "${CDN_MS:-}")"
+else
+  add cdn_colo "$(nul)"; add cdn_loc "$(nul)"; add cdn_connect_ms "$(nul)"
+  say "CDN 边缘探测失败"
 fi
 
 # 回程路由：国内 VPS 圈最看重的指标，但需要 mtr/traceroute
@@ -257,7 +303,7 @@ fi
 # ==================== 5. IP 质量 ====================
 step "5/6 IP 质量"
 if [ -n "$PUB4" ]; then
-  GEO=$(curl -s --max-time 10 "http://ip-api.com/json/${PUB4}?fields=status,country,regionName,isp,org,as,mobile,proxy,hosting" 2>/dev/null)
+  GEO=$(curl -s --max-time 10 "http://ip-api.com/json/${PUB4}?fields=status,country,countryCode,regionName,isp,org,as,mobile,proxy,hosting" 2>/dev/null)
   if printf '%s' "$GEO" | grep -q '"status":"success"'; then
     g() { printf '%s' "$GEO" | grep -oE "\"$1\":\"[^\"]*\"" | cut -d'"' -f4; }
     b() { printf '%s' "$GEO" | grep -oE "\"$1\":(true|false)" | cut -d: -f2; }
@@ -269,6 +315,16 @@ if [ -n "$PUB4" ]; then
     add ip_proxy    "$(b proxy)"
     # 第三方判定，口径不透明，只能当参考
     add geo_confidence "$(str 'low')"
+    # 与 CDN 实测的落地位置对账。IP 库是登记信息，CDN 路由是实测 ——
+    # 两者不一致时，不替你下结论，但必须把矛盾记进 JSON，否则打分时
+    # 会拿一个「香港」的标签去算延迟预期，而机器实际在别处。
+    if [ -n "${CDN_LOC:-}" ] && [ -n "$(g countryCode)" ] \
+       && [ "$CDN_LOC" != "$(g countryCode)" ]; then
+      say "⚠ IP 库称 $(g country)（$(g countryCode)），CDN 实际落地 ${CDN_LOC} —— 两者不一致"
+      add geo_mismatch "true"
+    else
+      add geo_mismatch "false"
+    fi
   else
     add geo_confidence "$(str 'failed')"
     say "ip-api 查询失败（可能限流）"
