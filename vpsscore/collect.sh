@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # vpsscore/collect.sh — 把多台机器的 probe JSON 收到一处并打分
-# VERSION: 1.0.0
+# VERSION: 1.1.0
+# 1.1.0: 远程采集不再吞掉错误。原来整段 >/dev/null 2>&1，失败只能在下一步
+#        以「取不到」的形式间接暴露，而真正的原因（没装 opsget、不是 root、
+#        磁盘满、探针报错）一个都看不见 —— 手工跑同一条命令却是成功的，
+#        这种「脚本里失败、手工能成」最耗排查时间。现在按台保留输出，
+#        失败时打印最后几行，并在采集阶段就统计成败。
+#        另修两处：① 探测 opsget 的 ssh 补 </dev/null，它会抢走 stdin，
+#        把后面要喂给 probe.sh 的内容吃掉；② 非 root 用户自动尝试 sudo -n，
+#        探针要写 /var/lib/vpsscore、读 /proc/stat，普通用户跑不了。
 #
 # 主机清单**自动发现**，优先级从高到低：
 #   1. 命令行指定的清单文件
@@ -146,25 +154,59 @@ FAILED=""
 # ── 可选：先在每台上重新采集 ────────────────────────────────
 if [ "$DO_PROBE" -eq 1 ] && [ -n "$HOSTS" ]; then
   log "▸ 远程采集（并发 $JOBS，每台约 1-2 分钟）"
+  PLOG=$(mktemp -d) || die "mktemp 失败"
   running=0
   for h in $HOSTS; do
     (
-      # 优先用远程自己的 opsget，保证拿到的是云端最新版探针；
-      # 没有 opsget 就把本机的 probe.sh 推过去跑，不强求对方装过东西
-      if ssh $SSH_OPTS $(ssh_args "$h") 'command -v opsget >/dev/null 2>&1' 2>/dev/null; then
-        ssh $SSH_OPTS $(ssh_args "$h") 'opsget vpsscore/probe' >/dev/null 2>&1
+      out="$PLOG/$(printf '%s' "$h" | tr -c 'A-Za-z0-9._-' '_')"
+      # 探针要写 /var/lib/vpsscore、读 /proc/stat，普通用户跑不了。
+      # 有免密 sudo 就用，没有就如实报错，不要静默产出半份数据。
+      pfx=''
+      if ! ssh $SSH_OPTS $(ssh_args "$h") '[ "$(id -u)" -eq 0 ]' </dev/null 2>/dev/null; then
+        if ssh $SSH_OPTS $(ssh_args "$h") 'sudo -n true' </dev/null 2>/dev/null; then
+          pfx='sudo -n '
+        else
+          echo "不是 root 且无免密 sudo —— 探针需要 root 权限" > "$out"
+          exit 1
+        fi
+      fi
+      # 注意 </dev/null：不加的话这条会抢走 stdin，
+      # 把下面本该喂给 probe.sh 的脚本内容吃掉
+      if ssh $SSH_OPTS $(ssh_args "$h") 'command -v opsget >/dev/null 2>&1' </dev/null 2>/dev/null; then
+        ssh $SSH_OPTS $(ssh_args "$h") "${pfx}opsget vpsscore/probe" </dev/null > "$out" 2>&1
       elif [ -r /usr/local/bin/probe.sh ]; then
-        ssh $SSH_OPTS $(ssh_args "$h") 'cat > /tmp/.probe.sh && bash /tmp/.probe.sh; rm -f /tmp/.probe.sh' \
-          < /usr/local/bin/probe.sh >/dev/null 2>&1
+        ssh $SSH_OPTS $(ssh_args "$h") "cat > /tmp/.probe.sh && ${pfx}bash /tmp/.probe.sh; rc=\$?; rm -f /tmp/.probe.sh; exit \$rc" \
+          < /usr/local/bin/probe.sh > "$out" 2>&1
       else
-        exit 3
+        echo "对方没有 opsget，本机也没有 /usr/local/bin/probe.sh 可推送" > "$out"
+        exit 1
       fi
     ) &
     running=$((running + 1))
-    if [ "$running" -ge "$JOBS" ]; then wait -n 2>/dev/null || wait; running=$((running - 1)); fi
+    if [ "$running" -ge "$JOBS" ]; then
+      if wait -n 2>/dev/null; then running=$((running - 1)); else wait; running=0; fi
+    fi
   done
   wait
-  log "  采集完成（失败的机器会在下一步收集时暴露）"
+
+  pok=0; pbad=""
+  for h in $HOSTS; do
+    out="$PLOG/$(printf '%s' "$h" | tr -c 'A-Za-z0-9._-' '_')"
+    if [ -f "$out" ] && grep -q '════ 完成 ════' "$out" 2>/dev/null; then
+      pok=$((pok + 1))
+    else
+      pbad="$pbad $h"
+      log "  [采集失败] $h"
+      if [ -s "$out" ]; then
+        sed -e 's/^/      /' "$out" | tail -6 >&2
+      else
+        log "      （没有任何输出，多半是连接就断了）"
+      fi
+    fi
+  done
+  log "  采集成功 $pok 台"
+  [ -n "$pbad" ] && log "  采集失败:$pbad"
+  rm -rf "$PLOG"
 fi
 
 # ── 收集 ────────────────────────────────────────────────────
