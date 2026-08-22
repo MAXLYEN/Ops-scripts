@@ -8,6 +8,7 @@
 # 而迁移恰恰要把大表带走。
 #
 # 执行后服务处于停止状态，恢复方式见脚本末尾提示。
+# ENV-REQUIRED: CONTAINER_DATA_DIRS DB_NAMES SNAPSHOT_ROOT
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root
