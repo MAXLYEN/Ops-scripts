@@ -9,6 +9,7 @@
 #
 # 注意：命令行改绕过了面板，面板自己的记录还是旧值。以后**别在面板的数据库
 # 管理里点这几个库的「权限」设置**，一点就会重置回去。
+# ENV-REQUIRED: DB_CLIENT_HOST DB_NAMES DOCKER_CIDR
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root
