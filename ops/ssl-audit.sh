@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/ssl-audit.sh — 证书三方对账
-# VERSION: 2.1.0
+# VERSION: 2.1.1
+# 2.1.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
 # 2.1.0 变更：
 #   · 第 5 节的域名来源改用 resolve_domains() —— 原来直接 for dom in $DOMAINS，
 #     配置漂移时既会对废域名误报，也会静默漏掉没列进配置的真站点
