@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/restore-cron.sh — 从快照恢复自有 cron
-# VERSION: 2.0.0
+# VERSION: 2.0.1
+# 2.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
 #
 # 面板的计划任务会跟着迁移走，但**直接写在 root crontab 里的原始条目不会**。
 # 这个脚本把它们从快照的 crontab.txt 抄回来，并补上迁移后常缺的 PATH。
