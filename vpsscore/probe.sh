@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # vpsscore/probe.sh — VPS 质量采集探针（服务端）
-# VERSION: 1.1.0
+# VERSION: 1.1.1
+# 1.1.1: 修 IPQuality 解析的语言依赖。中文环境下它返回「解锁」「原生」「机房」
+#        「原生IP」，而解析只认英文，于是把七家流媒体全判成未解锁 ——
+#        这种错误不报错、不留空，给出的是一个看起来正常的假结论，
+#        比崩溃危险得多（实测该机 YouTube 可正常观看，官方报告也显示原生解锁）。
+#        改法：调用加 -l en 固定语言，解析再做一层中英兼容兜底。
+#        同时：风险评分改为每家单独留存（单一库的离群值不该主导结论，
+#        实测有机器 Scamalytics 报 67 而其余都是个位数）；记录哪些库整列
+#        无数据（分母静默变小会让「没查到」看起来像「没问题」）；
+#        新增 25 端口出站检测；摘要里显示 IP 质量结果。
 # 1.1.0: ① 新增 --ipq：调用 IPQuality（IP.Check.Place）做深度 IP 质量检测。
 #           原来只查 4 个 DNSBL zone，测不出真正决定「IP 好不好」的东西 ——
 #           原生/广播、机房/住宅、六家风险评分、九库代理标记、流媒体原生解锁。
@@ -139,7 +148,7 @@ VIRT=$(systemd-detect-virt 2>/dev/null || echo unknown)
 say "系统 ${PRETTY_NAME:-?} | 内核 $(uname -r) | 虚拟化 $VIRT"
 add host        "$(str "$HOST")"
 add probed_at   "$(str "$(date -u +%FT%TZ)")"
-add probe_ver   "$(str '1.1.0')"
+add probe_ver   "$(str '1.1.1')"
 add os          "$(str "${PRETTY_NAME:-unknown}")"
 add kernel      "$(str "$(uname -r)")"
 add virt        "$(str "$VIRT")"
@@ -457,7 +466,8 @@ if [ "$DO_IPQ" -eq 1 ]; then
   else
     # -4 只测 IPv4；-n 跳过它自己的依赖安装（我们已经装好）；
     # -p 隐私模式，不生成在线报告（否则每台机器的完整 IP 会被上传生成分享页）
-    bash "$IPQ_SH" -4 -n -p -o "$IPQ_OUT" >/dev/null 2>&1
+    # -l en 固定英文：值随语言变会让字符串匹配静默失效（见 1.1.1 变更说明）
+    bash "$IPQ_SH" -4 -n -p -l en -o "$IPQ_OUT" >/dev/null 2>&1
     if [ -s "$IPQ_OUT" ] && python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$IPQ_OUT" 2>/dev/null; then
       IPQ_FIELDS=$(python3 - "$IPQ_OUT" <<'IPQPY'
 import json, sys, collections
@@ -465,46 +475,61 @@ import json, sys, collections
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 out = {}
 
-# 原生 IP 与否。IPQuality 用 Info.Type 表达：Geo-consistent = 归属地与使用地一致
-# （通常即原生 IP），Broadcast/Geo-inconsistent = 广播 IP。
-out["ipq_type"] = (d.get("Info") or {}).get("Type") or None
 
-# 使用类型：五个库各报一个（ISP/家宽/商业/机房），取众数。
-# 机房 IP 做代理容易被风控，家宽/ISP 则相反 —— 这是「IP 好不好」的核心之一。
+def norm(v):
+    return str(v).strip().lower() if v is not None else ""
+
+
+# IPQuality 的值会跟着报告语言变（中文环境返回「原生IP」「机房」「解锁」）。
+# 调用时已加 -l en，这里再做一层中英兼容兜底 —— 只认单一语言的代价是：
+# 匹配不上不会报错，而是静默得出「全部未解锁」这种看起来正常的假结论。
+YES = ("yes", "true", "unlocked", "解锁", "支持", "是")
+NATIVE = ("native", "原生")
+DC = ("data center", "datacenter", "hosting", "server", "机房", "数据中心")
+RES = ("isp", "residential", "home", "line isp", "家宽", "住宅", "民宅")
+
+info = d.get("Info") or {}
+t = norm(info.get("Type"))
+out["ipq_type_raw"] = info.get("Type")
+out["ipq_native"] = (("geo-consistent" in t) or ("原生" in t) or ("native" in t)) if t else None
+
 usage = [v for v in ((d.get("Type") or {}).get("Usage") or {}).values()
-         if v and v.lower() != "null"]
+         if v and norm(v) != "null"]
 out["ipq_usage"] = collections.Counter(usage).most_common(1)[0][0] if usage else None
-out["ipq_usage_isp_ratio"] = (
-    round(sum(1 for u in usage if "isp" in u.lower() or "home" in u.lower()
-              or "家宽" in u or "住宅" in u) / len(usage), 2) if usage else None)
+if usage:
+    res = sum(1 for u in usage if any(k in norm(u) for k in RES))
+    dc = sum(1 for u in usage if any(k in norm(u) for k in DC))
+    out["ipq_residential_ratio"] = round(res / len(usage), 2)
+    out["ipq_is_datacenter"] = dc > len(usage) / 2
+else:
+    out["ipq_residential_ratio"] = None
+    out["ipq_is_datacenter"] = None
 
 
 def pct(v):
-    """把各库口径不一的风险分统一成 0-100（越大越差）。"""
+    """各库口径不一，统一成 0-100（越大越差）。"""
     if v is None:
         return None
     s = str(v).strip()
     if not s or s.lower() == "null":
         return None
     try:
-        if s.endswith("%"):
-            return float(s[:-1])
-        return float(s)
+        return float(s[:-1]) if s.endswith("%") else float(s)
     except ValueError:
         return None
 
 
-# 六家风险评分。口径不同但都是「越大越差」，取最大值做保守判断 ——
-# 只要有一家把这个 IP 标红，实际使用中就可能被那家的客户挡下来。
+# 每家单独留一份。这台机器 Scamalytics 给 67、其余都是个位数 ——
+# 只看 max 会判「高风险」，只看 avg 会判「低风险」，两个都不足以下结论，
+# 必须看得见是哪一家在报警，才能判断该不该信。
 scores = {k: pct(v) for k, v in (d.get("Score") or {}).items()}
-vals = [v for v in scores.values() if v is not None]
+detail = {k: v for k, v in scores.items() if v is not None}
+vals = list(detail.values())
+out["ipq_risk_detail"] = detail or None
 out["ipq_risk_max"] = round(max(vals), 1) if vals else None
 out["ipq_risk_avg"] = round(sum(vals) / len(vals), 1) if vals else None
 out["ipq_risk_sources"] = len(vals)
 
-# 风险因子：九个库分别判断是否代理/VPN/Tor/滥用/机器人。
-# 记「被标记的库数 / 有效判断数」，比单看某一家稳。Server(机房) 单列 ——
-# 它是事实描述不是风险，混进来会把正常 VPS 全判成高风险。
 factor = d.get("Factor") or {}
 flag_n = flag_d = 0
 for key in ("Proxy", "VPN", "Tor", "Abuser", "Robot"):
@@ -512,34 +537,48 @@ for key in ("Proxy", "VPN", "Tor", "Abuser", "Robot"):
         if v is None:
             continue
         flag_d += 1
-        if v is True:
-            flag_n += 1
+        flag_n += 1 if v is True else 0
 out["ipq_flags_hit"] = flag_n if flag_d else None
 out["ipq_flags_total"] = flag_d or None
 out["ipq_flag_ratio"] = round(flag_n / flag_d, 3) if flag_d else None
 
-srv = [v for v in (factor.get("Server") or {}).values() if v is not None]
-out["ipq_is_datacenter"] = (sum(1 for v in srv if v) > len(srv) / 2) if srv else None
+# 哪些库整列无数据。分母静默变小会让「没查到」看起来像「没问题」，
+# 记下来才能判断这次检测的覆盖面够不够。
+all_src, alive = set(), set()
+for key in ("Proxy", "VPN", "Tor", "Abuser", "Robot", "Server"):
+    for src, v in (factor.get(key) or {}).items():
+        all_src.add(src)
+        if v is not None:
+            alive.add(src)
+out["ipq_sources_total"] = len(all_src) or None
+out["ipq_sources_dead"] = sorted(all_src - alive) or None
 
-# 流媒体/AI 解锁：Status=Yes 才算解锁，Type=Native 才是原生解锁
-# （DNS 解锁随时会被封，价值远低于原生）
+srv = [v for v in (factor.get("Server") or {}).values() if v is not None]
+if out["ipq_is_datacenter"] is None and srv:
+    out["ipq_is_datacenter"] = sum(1 for v in srv if v) > len(srv) / 2
+
+# 解锁分原生与 DNS：DNS 解锁随时会被封，价值远低于原生
 media = d.get("Media") or {}
 unlocked = native = 0
-detail = {}
+mdetail = {}
 for name, m in media.items():
-    st = (m or {}).get("Status", "")
-    ok = str(st).lower() in ("yes", "true", "unlocked")
-    nat = ok and str((m or {}).get("Type", "")).lower() == "native"
+    st = norm((m or {}).get("Status"))
+    ok = any(k in st for k in YES)
+    nat = ok and any(k in norm((m or {}).get("Type")) for k in NATIVE)
     unlocked += ok
     native += nat
-    detail[name] = "native" if nat else ("dns" if ok else "no")
+    mdetail[name] = "native" if nat else ("dns" if ok else "no")
 out["ipq_media_total"] = len(media) or None
 out["ipq_media_unlocked"] = unlocked if media else None
 out["ipq_media_native"] = native if media else None
-out["ipq_media"] = detail or None
+out["ipq_media"] = mdetail or None
 
-# 439 个黑名单库的统计，比我原来查 4 个 zone 靠谱得多
-bl = ((d.get("Mail") or {}).get("DNSBlacklist") or {})
+mail = d.get("Mail") or {}
+# 25 端口出站被阻断则这台发不了邮件，建站与告警场景要用到
+p25 = mail.get("Port25")
+out["ipq_port25"] = bool(p25) if p25 is not None else None
+
+bl = mail.get("DNSBlacklist") or {}
 out["ipq_bl_total"] = bl.get("Total")
 out["ipq_bl_marked"] = bl.get("Marked")
 out["ipq_bl_listed"] = bl.get("Blacklisted")
@@ -551,13 +590,25 @@ IPQPY
       if [ -n "$IPQ_FIELDS" ]; then
         # 解析结果是一个 JSON 对象，去掉外层大括号并入主 JSON
         J="${J}${J:+,}$(printf '%s' "$IPQ_FIELDS" | sed 's/^{//; s/}$//')"
-        say "$(printf '%s' "$IPQ_FIELDS" | python3 -c '
+        printf '%s' "$IPQ_FIELDS" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
-print("类型 %s / %s | 风险 max %s | 标记 %s/%s | 原生解锁 %s/%s | 黑名单 %s" % (
-  d.get("ipq_type") or "?", d.get("ipq_usage") or "?",
-  d.get("ipq_risk_max"), d.get("ipq_flags_hit"), d.get("ipq_flags_total"),
-  d.get("ipq_media_native"), d.get("ipq_media_total"), d.get("ipq_bl_listed")))')"
+p=lambda s: print("  "+s, file=sys.stderr)
+p("%s / %s" % ("原生IP" if d.get("ipq_native") else "非原生",
+               d.get("ipq_usage") or "?"))
+rd=d.get("ipq_risk_detail") or {}
+p("风险 max %s / avg %s  %s" % (d.get("ipq_risk_max"), d.get("ipq_risk_avg"),
+  " ".join("%s=%g" % (k,v) for k,v in sorted(rd.items(), key=lambda x:-x[1]))))
+p("风险标记 %s/%s 库次" % (d.get("ipq_flags_hit"), d.get("ipq_flags_total")))
+dead=d.get("ipq_sources_dead")
+if dead: p("⚠ 无数据的库: %s（分母已相应缩小）" % ", ".join(dead))
+m=d.get("ipq_media") or {}
+p("流媒体 原生 %s / 解锁 %s / 共 %s  未解锁: %s" % (
+  d.get("ipq_media_native"), d.get("ipq_media_unlocked"), d.get("ipq_media_total"),
+  ", ".join(k for k,v in m.items() if v=="no") or "无"))
+p("黑名单 %s 库中命中 %s（标记 %s） | 25 端口出站 %s" % (
+  d.get("ipq_bl_total"), d.get("ipq_bl_listed"), d.get("ipq_bl_marked"),
+  "通" if d.get("ipq_port25") else "阻断"))'
       else
         say "解析失败"; add ipq_ok "false"; add ipq_note "$(str '解析失败')"
       fi
