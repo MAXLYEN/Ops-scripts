@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # lib/common.sh — ops-scripts 公共函数库
-# VERSION: 1.1.0
+# VERSION: 1.1.1
+# 1.1.1: server_name 里的 IP 字面量、localhost、通配符不再被当成域名 ——
+#        面板会给站点的 server_name 带上 127.0.0.1，它进不了 wwwroot 也申不了证书。
+#        这类跳过项会列出来但不计告警：它是正常配置，不该污染告警计数。
 # 1.1.0: 新增 scan_vhost_domains / resolve_domains —— 手维护的域名清单会双向漂移
 #        （多出废域名 = 噪音，漏掉真站点 = 静默不检查），统一在这里处理
 #
@@ -11,7 +14,7 @@
 set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
-OPS_COMMON_VERSION="1.1.0"
+OPS_COMMON_VERSION="1.1.1"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
@@ -146,12 +149,44 @@ probe_domain_local() {
 http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$1" 2>/dev/null; }
 
 # ── 域名清单 ────────────────────────────────────────────────
-# 从 vhost 的 server_name 扫出真实域名集合（已排序去重）
-scan_vhost_domains() {
+# vhost 里所有 server_name 的原始 token（未过滤）
+_vhost_server_name_tokens() {
   [ -d "${PANEL_VHOST_DIR:-}" ] || return 0
   grep -h -E '^[[:space:]]*server_name' "$PANEL_VHOST_DIR"/*.conf 2>/dev/null \
     | sed -e 's/;.*//' -e 's/^[[:space:]]*server_name[[:space:]]*//' \
-    | tr ' ' '\n' | grep -vE '^$|^_$|^0\.default$' | sort -u
+    | tr ' ' '\n' | grep -vE '^[[:space:]]*$' | sort -u
+}
+
+# 能不能拿来做域名探测 / 申请证书。
+# 排除：catch-all（_）、默认站、localhost、IP 字面量、含通配符或非法字符的。
+# 这些在 server_name 里都合法，但 --resolve 探测、wwwroot 目录、ACME 申请
+# 对它们都没有意义 —— 混进域名列表只会产生假告警。
+_is_probe_domain() {
+  case "$1" in
+    _|0.default|localhost) return 1 ;;
+    *[!A-Za-z0-9._-]*)     return 1 ;;
+  esac
+  printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' && return 1
+  printf '%s' "$1" | grep -qE '^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$'
+}
+
+# 从 vhost 的 server_name 扫出真实域名集合（已排序去重、已过滤）
+scan_vhost_domains() {
+  local t
+  while read -r t; do
+    [ -n "$t" ] || continue
+    _is_probe_domain "$t" && printf '%s\n' "$t"
+  done < <(_vhost_server_name_tokens)
+}
+
+# 被过滤掉的那些（catch-all 与默认站不算，它们是纯噪音）
+scan_vhost_nondomains() {
+  local t
+  while read -r t; do
+    [ -n "$t" ] || continue
+    case "$t" in _|0.default) continue ;; esac
+    _is_probe_domain "$t" || printf '%s\n' "$t"
+  done < <(_vhost_server_name_tokens)
 }
 
 # resolve_domains —— 决定本次要遍历哪些域名
@@ -162,12 +197,17 @@ scan_vhost_domains() {
 # 为什么两个方向都要报：多出来的废域名只是噪音，漏掉的才致命 ——
 # 漏掉的站点压根不进循环，输出还是全绿，看起来像"检查过了"。
 resolve_domains() {
-  local scanned cfg stale fresh
+  local scanned skipped cfg stale fresh
   scanned=$(scan_vhost_domains)
+  skipped=$(scan_vhost_nondomains | tr '\n' ' ')
+
+  # 跳过项用 log 不用 warn：IP 出现在 server_name 里是正常配置，
+  # 计进告警会让"0 告警"永远达不到，久了整个告警计数就没人看了。
+  [ -n "${skipped// /}" ] && log "非域名的 server_name 已跳过: ${skipped% }"
 
   if [ -z "${DOMAINS:-}" ]; then
     OPS_DOMAINS_MODE=auto
-    [ -n "$scanned" ] || die "DOMAINS 留空，且没能从 ${PANEL_VHOST_DIR:-未配置} 扫到任何 server_name"
+    [ -n "$scanned" ] || die "DOMAINS 留空，且没能从 ${PANEL_VHOST_DIR:-未配置} 扫到任何域名"
     mapfile -t OPS_DOMAINS <<< "$scanned"
     return 0
   fi
