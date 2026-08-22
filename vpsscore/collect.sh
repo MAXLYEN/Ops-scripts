@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # vpsscore/collect.sh — 把多台机器的 probe JSON 收到一处并打分
-# VERSION: 1.1.0
+# VERSION: 1.2.0
+# 1.2.0: 新增 --ipq，透传给远程探针做深度 IP 质量检测。
+#        它每台要跑 1-2 分钟（查十几个第三方库），所以启用时默认并发降到 4；
+#        显式给了 -j 则以你给的为准。
 # 1.1.0: 远程采集不再吞掉错误。原来整段 >/dev/null 2>&1，失败只能在下一步
 #        以「取不到」的形式间接暴露，而真正的原因（没装 opsget、不是 root、
 #        磁盘满、探针报错）一个都看不见 —— 手工跑同一条命令却是成功的，
@@ -27,6 +30,7 @@
 #   collect.sh                    自动发现主机，收集已有 JSON 并打分
 #   collect.sh <清单文件>         用指定清单
 #   collect.sh -p                 先在每台上重新采集，再收集打分
+#   collect.sh -p --ipq           采集时额外做深度 IP 质量检测（每台 +1~2 分钟）
 #   collect.sh -n                 只列出将要连接的主机，不动手（先看再跑）
 #   collect.sh -o <目录>          指定汇总目录，默认 ~/vpsscore-baseline
 #   collect.sh -j 4               并发数，默认 4（仅 -p 时有意义）
@@ -37,7 +41,8 @@
 set -o pipefail
 
 OUTDIR="${HOME}/vpsscore-baseline"
-DO_PROBE=0; DRY=0; JOBS=4; LIST=""
+DO_PROBE=0; DRY=0; JOBS=4; JOBS_SET=0; DO_IPQ=0; LIST=""
+PROBE_ARGS=""
 REMOTE_DIR=/var/lib/vpsscore
 
 usage() {
@@ -47,6 +52,7 @@ collect.sh — 汇总多台机器的 VPS 质量采集结果并打分
   collect.sh                  自动发现主机，收集已有 JSON 并打分
   collect.sh <清单文件>       用指定清单
   collect.sh -p               先在每台上重新采集（耗时约 1-2 分钟/台）
+  collect.sh -p --ipq         额外做深度 IP 质量检测（每台再加 1-2 分钟）
   collect.sh -n               只列出将要连接的主机，不实际连接
   collect.sh -o <目录>        汇总目录，默认 ~/vpsscore-baseline
   collect.sh -j <并发数>      默认 4，仅 -p 时有意义
@@ -69,9 +75,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)  usage; exit 0 ;;
     -p|--probe) DO_PROBE=1; shift ;;
+    --ipq)      DO_IPQ=1; shift ;;
     -n|--dry-run) DRY=1; shift ;;
     -o|--out)   [ -n "${2:-}" ] || die "-o 需要一个目录"; OUTDIR="$2"; shift 2 ;;
-    -j|--jobs)  [ -n "${2:-}" ] || die "-j 需要一个数字"; JOBS="$2"; shift 2 ;;
+    -j|--jobs)  [ -n "${2:-}" ] || die "-j 需要一个数字"; JOBS="$2"; JOBS_SET=1; shift 2 ;;
     --) shift; break ;;
     -*) log "未知参数: $1"; usage; exit 1 ;;
     *)  LIST="$1"; shift ;;
@@ -79,6 +86,13 @@ while [ $# -gt 0 ]; do
 done
 
 command -v ssh >/dev/null 2>&1 || die "缺少 ssh"
+
+if [ "$DO_IPQ" -eq 1 ]; then
+  PROBE_ARGS="--ipq"
+  # IPQ 每台多花 1-2 分钟，且都在等第三方 API 返回。并发开太高时汇总机
+  # 自己的出口会成为瓶颈，反而拖慢每一台；没显式指定就降到 4
+  [ "$JOBS_SET" -eq 1 ] || JOBS=4
+fi
 case "$JOBS" in ''|*[!0-9]*) die "-j 必须是数字: $JOBS" ;; esac
 [ "$JOBS" -ge 1 ] || JOBS=1
 
@@ -143,7 +157,11 @@ if [ "$DRY" -eq 1 ]; then
   if [ -n "$HOSTS" ]; then printf '  %s\n' $HOSTS >&2; else log "  （无）"; fi
   [ -d "$REMOTE_DIR" ] && log "  （本机 $REMOTE_DIR 也会一并纳入）"
   log "汇总目录: $OUTDIR"
-  [ "$DO_PROBE" -eq 1 ] && log "模式: 先远程采集再收集（并发 $JOBS）" || log "模式: 只收集已有 JSON"
+  if [ "$DO_PROBE" -eq 1 ]; then
+    log "模式: 先远程采集再收集（并发 $JOBS）${PROBE_ARGS:+ 探针参数: $PROBE_ARGS}"
+  else
+    log "模式: 只收集已有 JSON"
+  fi
   exit 0
 fi
 
@@ -153,7 +171,11 @@ FAILED=""
 
 # ── 可选：先在每台上重新采集 ────────────────────────────────
 if [ "$DO_PROBE" -eq 1 ] && [ -n "$HOSTS" ]; then
-  log "▸ 远程采集（并发 $JOBS，每台约 1-2 分钟）"
+  if [ "$DO_IPQ" -eq 1 ]; then
+    log "▸ 远程采集 + 深度 IP 质量（并发 $JOBS，每台约 2-4 分钟）"
+  else
+    log "▸ 远程采集（并发 $JOBS，每台约 1-2 分钟）"
+  fi
   PLOG=$(mktemp -d) || die "mktemp 失败"
   running=0
   for h in $HOSTS; do
@@ -173,9 +195,9 @@ if [ "$DO_PROBE" -eq 1 ] && [ -n "$HOSTS" ]; then
       # 注意 </dev/null：不加的话这条会抢走 stdin，
       # 把下面本该喂给 probe.sh 的脚本内容吃掉
       if ssh $SSH_OPTS $(ssh_args "$h") 'command -v opsget >/dev/null 2>&1' </dev/null 2>/dev/null; then
-        ssh $SSH_OPTS $(ssh_args "$h") "${pfx}opsget vpsscore/probe" </dev/null > "$out" 2>&1
+        ssh $SSH_OPTS $(ssh_args "$h") "${pfx}opsget vpsscore/probe $PROBE_ARGS" </dev/null > "$out" 2>&1
       elif [ -r /usr/local/bin/probe.sh ]; then
-        ssh $SSH_OPTS $(ssh_args "$h") "cat > /tmp/.probe.sh && ${pfx}bash /tmp/.probe.sh; rc=\$?; rm -f /tmp/.probe.sh; exit \$rc" \
+        ssh $SSH_OPTS $(ssh_args "$h") "cat > /tmp/.probe.sh && ${pfx}bash /tmp/.probe.sh $PROBE_ARGS; rc=\$?; rm -f /tmp/.probe.sh; exit \$rc" \
           < /usr/local/bin/probe.sh > "$out" 2>&1
       else
         echo "对方没有 opsget，本机也没有 /usr/local/bin/probe.sh 可推送" > "$out"
@@ -205,6 +227,28 @@ if [ "$DO_PROBE" -eq 1 ] && [ -n "$HOSTS" ]; then
     fi
   done
   log "  采集成功 $pok 台"
+  if [ "$DO_IPQ" -eq 1 ]; then
+    iok=0; ibad=""
+    for h in $HOSTS; do
+      out="$PLOG/$(printf '%s' "$h" | tr -c 'A-Za-z0-9._-' '_')"
+      [ -f "$out" ] || continue
+      # 探针在 IPQ 成功时会打印「风险 max」，失败/降级时不会
+      if grep -q '风险 max' "$out" 2>/dev/null; then
+        iok=$((iok + 1))
+      elif grep -q 'IP 质量深度' "$out" 2>/dev/null; then
+        ibad="$ibad $h"
+      fi
+    done
+    log "  IP 质量成功 $iok 台"
+    [ -n "$ibad" ] && {
+      log "  IP 质量未取到:$ibad"
+      for h in $ibad; do
+        out="$PLOG/$(printf '%s' "$h" | tr -c 'A-Za-z0-9._-' '_')"
+        grep -A2 'IP 质量深度' "$out" 2>/dev/null \
+          | grep -vE 'IP 质量深度|════' | head -1 | sed "s|^ *|      $h: |" >&2
+      done
+    }
+  fi
   [ -n "$pbad" ] && log "  采集失败:$pbad"
   rm -rf "$PLOG"
 fi
