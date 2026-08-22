@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # vpsscore/score.sh — 对 probe.sh 采集的 JSON 打分与横向对比
-# VERSION: 1.0.0
+# VERSION: 1.1.0
+# 1.1.0: 榜单显示 IP 而非主机名 —— 商家给的 hostname（C202603031886344 之类）
+#        认不出是哪台机器，而排名的用处正是「决定哪台留哪台退」。
+#        IP 取自探针已采集的 ipv4 字段，不用重新采集。
+#        同一主机多份采集的去重键也改用 IP：重装系统会换 hostname，
+#        按 hostname 去重会把同一台机器算成两台。
 #
+
 # 读一批 probe.sh 产出的 JSON，按角色权重给出绝对分（0-100）和同批相对排名。
 #
 # 两条贯穿全脚本的原则：
@@ -210,6 +216,26 @@ def score_role(d, weights):
     return acc / used_w, total_w and (used_w / total_w) or 0.0, missing
 
 
+def display_name(d, path):
+    """榜单上怎么称呼这台机器。
+
+    优先 IP：商家给的 hostname 认不出是谁，而这份排名的用处正是
+    「决定哪台留、哪台退」—— 认不出来就没法决定。
+    """
+    ip = (d.get("ipv4") or "").strip()
+    if ip:
+        return ip
+    h = (d.get("host") or "").strip()
+    return h or os.path.basename(path)
+
+
+def dedup_key(d, path):
+    # 用 IP 而非 hostname 去重：重装系统会换 hostname，
+    # 按 hostname 会把同一台机器算成两台，排名里出现两条
+    ip = (d.get("ipv4") or "").strip()
+    return ip or (d.get("host") or "").strip() or os.path.basename(path)
+
+
 def newest_per_host(paths):
     best = {}
     for p in paths:
@@ -219,9 +245,9 @@ def newest_per_host(paths):
         except Exception as e:
             print(f"[警告] 跳过无法解析的文件 {p}: {e}", file=sys.stderr)
             continue
-        h = d.get("host") or os.path.basename(p)
-        if h not in best or (d.get("probed_at") or "") > (best[h][1].get("probed_at") or ""):
-            best[h] = (p, d)
+        k = dedup_key(d, p)
+        if k not in best or (d.get("probed_at") or "") > (best[k][1].get("probed_at") or ""):
+            best[k] = (p, d)
     return best
 
 
@@ -237,9 +263,10 @@ LABEL = {"bw": "带宽", "loss": "丢包", "rtt": "延迟", "cpu": "CPU",
 result = {}
 for rk, (rname, w) in roles.items():
     rows = []
-    for h, (p, d) in hosts.items():
+    for k, (p, d) in hosts.items():
         s, cov, miss = score_role(d, w)
-        rows.append({"host": h, "score": s, "coverage": cov,
+        rows.append({"host": display_name(d, p), "hostname": d.get("host"),
+                     "score": s, "coverage": cov,
                      "missing": miss, "file": p, "probed_at": d.get("probed_at")})
     # 低覆盖率的排到后面：它们的高分是「没测到的都不算」换来的，
     # 让它们占榜首会误导
@@ -260,16 +287,16 @@ if n == 1:
 
 for rk, blk in result.items():
     print(f"\n▸ {blk['role_name']}（{rk}）")
-    print(f"  {'主机':<22}{'绝对分':>7}{'覆盖率':>8}   缺失项")
+    print(f"  {'IP':<20}{'绝对分':>7}{'覆盖率':>8}   缺失项")
     for i, r in enumerate(blk["rows"], 1):
         miss = "、".join(LABEL.get(k, k) for k in r["missing"]) or "无"
         rank = f"{i}." if n > 1 else " "
         if r["score"] is None:
-            print(f"  {rank} {r['host']:<19}{'—':>7}{'0%':>8}   全部缺失")
+            print(f"  {rank:>3} {r['host']:<16}{'—':>7}{'0%':>8}   全部缺失")
         elif r["coverage"] < MIN_COVERAGE:
-            print(f"  {rank} {r['host']:<19}{'数据不足':>6}{r['coverage']*100:>7.0f}%   {miss}")
+            print(f"  {rank:>3} {r['host']:<16}{'数据不足':>6}{r['coverage']*100:>7.0f}%   {miss}")
         else:
-            print(f"  {rank} {r['host']:<19}{r['score']:>6.1f}{r['coverage']*100:>7.0f}%   {miss}")
+            print(f"  {rank:>3} {r['host']:<16}{r['score']:>6.1f}{r['coverage']*100:>7.0f}%   {miss}")
     # 覆盖率不足时，分数的可比性本身就存疑，必须说出来
     thin = [r for r in blk["rows"]
             if r["score"] is not None and MIN_COVERAGE <= r["coverage"] < 0.8]
