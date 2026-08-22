@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # vpsscore/probe.sh — VPS 质量采集探针（服务端）
-# VERSION: 1.1.1
+# VERSION: 1.1.2
+# 1.1.2: 去掉调用 IPQuality 时的 -n。-n 是「跳过依赖检查与安装」，而它的依赖
+#        （ip.sh:401）是 jq curl bc netcat dnsutils —— 缺 jq 时 db_maxmind 里
+#        `jq . || RESPONSE=""` 会置空，进而 mode_lite=1，脚本降级成 Lite：
+#        风险评分、IP 类型、五个数据库整节失效。实测机群 23 台里 19 台缺 jq，
+#        所以绝大多数机器拿到的都是残缺数据。改为 -y（自动装依赖、不交互）。
+#        同时：解析器识别 Lite（Info.ASN 为空即是，那正是 mode_lite 的触发条件）
+#        并直接判失败 —— 半残数据拿去打分只会得出错误结论；
+#        失败时 ipq_note 记录 IPQuality 的真实输出，不再由脚本编造原因。
 # 1.1.1: 修 IPQuality 解析的语言依赖。中文环境下它返回「解锁」「原生」「机房」
 #        「原生IP」，而解析只认英文，于是把七家流媒体全判成未解锁 ——
 #        这种错误不报错、不留空，给出的是一个看起来正常的假结论，
@@ -148,7 +156,7 @@ VIRT=$(systemd-detect-virt 2>/dev/null || echo unknown)
 say "系统 ${PRETTY_NAME:-?} | 内核 $(uname -r) | 虚拟化 $VIRT"
 add host        "$(str "$HOST")"
 add probed_at   "$(str "$(date -u +%FT%TZ)")"
-add probe_ver   "$(str '1.1.1')"
+add probe_ver   "$(str '1.1.2')"
 add os          "$(str "${PRETTY_NAME:-unknown}")"
 add kernel      "$(str "$(uname -r)")"
 add virt        "$(str "$VIRT")"
@@ -457,9 +465,13 @@ fi
 if [ "$DO_IPQ" -eq 1 ]; then
   step "IP 质量深度检测（IPQuality，查第三方 API，约 1-2 分钟）"
   IPQ_SH=$(mktemp); IPQ_OUT="$TMP/ipq.json"
-  if ! have curl || ! have python3; then
-    say "缺 curl 或 python3，跳过"
-    add ipq_ok "false"; add ipq_note "$(str '缺 curl/python3')"
+  # IPQuality 自己的依赖见 ip.sh:401，缺 jq 会静默降级成 Lite 而不是报错
+  IPQ_MISS=""
+  for c in curl python3 jq bc dig; do have "$c" || IPQ_MISS="$IPQ_MISS $c"; done
+  command -v nc >/dev/null 2>&1 || IPQ_MISS="$IPQ_MISS netcat"
+  if [ -n "$IPQ_MISS" ]; then
+    say "缺依赖:$IPQ_MISS —— IPQuality 会降级成 Lite，跳过（-y 会尝试自动安装）"
+    add ipq_ok "false"; add ipq_note "$(str "缺依赖:$IPQ_MISS")"
   elif ! curl -fsSL --max-time 60 https://IP.Check.Place -o "$IPQ_SH" 2>/dev/null || [ ! -s "$IPQ_SH" ]; then
     say "IPQuality 脚本拉取失败，跳过"
     add ipq_ok "false"; add ipq_note "$(str '脚本拉取失败')"
@@ -467,7 +479,8 @@ if [ "$DO_IPQ" -eq 1 ]; then
     # -4 只测 IPv4；-n 跳过它自己的依赖安装（我们已经装好）；
     # -p 隐私模式，不生成在线报告（否则每台机器的完整 IP 会被上传生成分享页）
     # -l en 固定英文：值随语言变会让字符串匹配静默失效（见 1.1.1 变更说明）
-    bash "$IPQ_SH" -4 -n -p -l en -o "$IPQ_OUT" >/dev/null 2>&1
+    # -y 而非 -n：-n 跳过依赖检查，缺 jq 时会静默降级 Lite（见 1.1.2 变更说明）
+    bash "$IPQ_SH" -4 -y -p -l en -o "$IPQ_OUT" >"$TMP/ipq.log" 2>&1
     if [ -s "$IPQ_OUT" ] && python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$IPQ_OUT" 2>/dev/null; then
       IPQ_FIELDS=$(python3 - "$IPQ_OUT" <<'IPQPY'
 import json, sys, collections
@@ -488,7 +501,19 @@ NATIVE = ("native", "原生")
 DC = ("data center", "datacenter", "hosting", "server", "机房", "数据中心")
 RES = ("isp", "residential", "home", "line isp", "家宽", "住宅", "民宅")
 
+# Lite 模式判定：ip.sh 在 db_maxmind 拿不到数据时置 mode_lite=1，
+# 随后跳过 scamalytics/abuseipdb/ip2location/ipdata/ipqs 五个库，
+# 风险评分与 IP 类型整节失效。这种半残数据用来打分只会得出错误结论，
+# 直接判失败，不要它。
 info = d.get("Info") or {}
+_asn = str(info.get("ASN") or "").strip().lower()
+if not _asn or _asn in ("null", "not assigned"):
+    json.dump({"ipq_ok": False,
+               "ipq_note": "IPQuality 降级为 Lite 模式（maxmind 数据源不可达，"
+                           "风险评分与 IP 类型不可用），已丢弃"},
+              sys.stdout, ensure_ascii=False)
+    sys.exit(0)
+
 t = norm(info.get("Type"))
 out["ipq_type_raw"] = info.get("Type")
 out["ipq_native"] = (("geo-consistent" in t) or ("原生" in t) or ("native" in t)) if t else None
@@ -587,7 +612,10 @@ out["ipq_ok"] = True
 json.dump(out, sys.stdout, ensure_ascii=False)
 IPQPY
 )
-      if [ -n "$IPQ_FIELDS" ]; then
+      if [ -n "$IPQ_FIELDS" ] && printf '%s' "$IPQ_FIELDS" | grep -q '"ipq_ok": *false'; then
+        J="${J}${J:+,}$(printf '%s' "$IPQ_FIELDS" | sed 's/^{//; s/}$//')"
+        say "$(printf '%s' "$IPQ_FIELDS" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("ipq_note",""))')"
+      elif [ -n "$IPQ_FIELDS" ]; then
         # 解析结果是一个 JSON 对象，去掉外层大括号并入主 JSON
         J="${J}${J:+,}$(printf '%s' "$IPQ_FIELDS" | sed 's/^{//; s/}$//')"
         printf '%s' "$IPQ_FIELDS" | python3 -c '
@@ -613,8 +641,11 @@ p("黑名单 %s 库中命中 %s（标记 %s） | 25 端口出站 %s" % (
         say "解析失败"; add ipq_ok "false"; add ipq_note "$(str '解析失败')"
       fi
     else
-      say "IPQuality 未产出有效 JSON（可能被限流或网络不通）"
-      add ipq_ok "false"; add ipq_note "$(str '无有效输出')"
+      # 记 IPQuality 自己说了什么，不要由这里编一个原因 ——
+      # 编出来的原因会把排查方向直接带偏
+      IPQ_ERR=$(tail -3 "$TMP/ipq.log" 2>/dev/null | tr -d '\r' | tr '\n' ' ' | cut -c1-200)
+      say "IPQuality 未产出有效 JSON: ${IPQ_ERR:-（无输出）}"
+      add ipq_ok "false"; add ipq_note "$(str "无有效输出: ${IPQ_ERR:-无}")"
     fi
   fi
   rm -f "$IPQ_SH"
