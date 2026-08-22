@@ -16,6 +16,7 @@
 # 迁移后这是最典型的"静默失效"，本脚本把三方摆到一起看。
 #
 # 依赖 lib/common.sh >= 1.1.0（resolve_domains）
+# ENV-REQUIRED: PANEL_CERT_DIR WWWROOT
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env
