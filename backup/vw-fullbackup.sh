@@ -3,7 +3,9 @@
 # 全服务备份：Vaultwarden + Komari + SubConverter + 系统配置
 # 打包 → 7z AES-256 加密 → 上传两个网盘
 #
-# VERSION: 2.3.0
+# VERSION: 2.3.1
+# 2.3.1: ENV-REQUIRED 里的密码键改写成 BACKUP_PASS_FILE|VW_PASS_FILE 二选一 ——
+#        脚本内部本就有回落，声明按字面写会让 opsget 把能跑的机器拦下来。
 # 2.3.0: 备份加密密码改读 BACKUP_PASS_FILE，VW_PASS_FILE 作回落。原来两个备份
 #        脚本共用 VW_PASS_FILE，一台只跑 Xboard、根本没有 Vaultwarden 的机器
 #        也被要求填一个名字里带 VW 的键，报错时人会先去找 Vaultwarden 在哪。
@@ -22,7 +24,7 @@
 # ⚠️ cron 里调用本地路径 /usr/local/bin/vw-fullbackup.sh，**不要写成 opsget**。
 #    不能让备份依赖外网才能启动。更新用 `opsget -i backup/vw-fullbackup` 显式安装。
 #
-# ENV-REQUIRED: VW_BACKUP_DIR BACKUP_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
+# ENV-REQUIRED: VW_BACKUP_DIR BACKUP_PASS_FILE|VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
 set -o pipefail
 
 ########## 配置（全部来自 env.conf，本文件不含任何域名/路径硬编码） ##########

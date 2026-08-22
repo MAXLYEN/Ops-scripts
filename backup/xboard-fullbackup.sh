@@ -2,7 +2,9 @@
 #
 # xboard-fullbackup.sh —— Xboard 面板单包备份
 #
-# VERSION: 2.3.0
+# VERSION: 2.3.1
+# 2.3.1: ENV-REQUIRED 里的密码键改写成 BACKUP_PASS_FILE|VW_PASS_FILE 二选一 ——
+#        脚本内部本就有回落，声明按字面写会让 opsget 把能跑的机器拦下来。
 # 2.3.0: 备份加密密码改读 BACKUP_PASS_FILE，VW_PASS_FILE 作回落。这台机器可能
 #        根本没有 Vaultwarden，却被要求填一个名字里带 VW 的键 —— 报错时人会
 #        先去找 Vaultwarden 在哪。老机器的 env.conf 不用改。
@@ -27,7 +29,7 @@
 # ⚠️ cron 里调用本地路径 /usr/local/bin/xboard-fullbackup.sh，**不要写成 opsget**。
 #    更新用 `opsget -i backup/xboard-fullbackup` 显式安装。
 #
-# ENV-REQUIRED: SVC_XBOARD_DIR XBOARD_DB_NAME XBOARD_DB_USER XBOARD_DB_PASS_FILE XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH RCLONE_REMOTES BACKUP_PASS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
+# ENV-REQUIRED: SVC_XBOARD_DIR XBOARD_DB_NAME XBOARD_DB_USER XBOARD_DB_PASS_FILE XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH RCLONE_REMOTES BACKUP_PASS_FILE|VW_PASS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
 set -uo pipefail
 
 # ==================== 配置（全部来自 env.conf） ====================
