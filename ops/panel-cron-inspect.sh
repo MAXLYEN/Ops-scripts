@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/panel-cron-inspect.sh — 查明面板计划任务的真实身份
-# VERSION: 2.0.1
+# VERSION: 2.0.2
+# 2.0.2: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
 # 2.0.1: 修正"没有日志文件"的措辞 —— 手动触发不会产生日志，日志重定向写在 crontab 行里
 #
 # 面板的计划任务在 crontab 里是一串 hash，看不出干什么。而且迁移后
