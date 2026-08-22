@@ -6,6 +6,7 @@
 # 如果哪天真要靠云端的包重建，密码必须是对的 —— 现在验比那时候验强得多。
 #
 # 建议每季度跑一次，配合还原演练。
+# ENV-REQUIRED: BACKUP_PASS_FILES RCLONE_PATHS RCLONE_REMOTES
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env
