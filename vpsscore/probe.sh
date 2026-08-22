@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # vpsscore/probe.sh — VPS 质量采集探针（服务端）
-# VERSION: 1.0.3
+# VERSION: 1.0.4
+# 1.0.4: 修 `set -o pipefail` + `grep -q` 的竞态（三处）。grep -q 一匹配上就
+#        退出并关闭管道，上游进程吃到 SIGPIPE 退出码 141，pipefail 把整条管道
+#        判成失败 —— 于是「匹配成功」变成了「没匹配上」。是否触发取决于上游
+#        写完没写完，纯看调度：同一台机器连续采集会随机给出相反结论。
+#        实测 300 次里误判 5 次。受影响的判断：
+#          · ipv4_on_nic  —— 直绑网卡的机器被随机报成 NAT
+#          · ipv6_usable
+#          · IP 质量整节 —— 被随机跳过，日志却说「ip-api 查询失败（可能限流）」，
+#            排查方向会被带偏
+#        改法：先把输出收进变量，再对变量做匹配，不在管道里判断。
+#        顺带：丢包率/延迟收敛到 1 位小数（ping 会给出 16.6667% 这种值）。
 # 1.0.3: 三处修正，都是「把无数据伪装成有结论」的同一类错误。
 #        ① 取不到公网 IP 时 ipv4_on_nic / ipv6_usable 写 null，不再写 false ——
 #           原来 curl 一超时就报告「IP 没绑在网卡上」，而事实是这项没测出来。
@@ -109,7 +120,7 @@ VIRT=$(systemd-detect-virt 2>/dev/null || echo unknown)
 say "系统 ${PRETTY_NAME:-?} | 内核 $(uname -r) | 虚拟化 $VIRT"
 add host        "$(str "$HOST")"
 add probed_at   "$(str "$(date -u +%FT%TZ)")"
-add probe_ver   "$(str '1.0.3')"
+add probe_ver   "$(str '1.0.4')"
 add os          "$(str "${PRETTY_NAME:-unknown}")"
 add kernel      "$(str "$(uname -r)")"
 add virt        "$(str "$VIRT")"
@@ -210,13 +221,21 @@ NIC4=$(ip -4 -br addr | grep -v '^lo' | awk '{print $3}' | tr '\n' ' ')
 
 # 取不到公网 IP 时这两项是「没测出来」，不是「否」。写 false 等于凭空
 # 给出一个结论 —— 打分时会当成 NAT 机器扣分，而它可能是直绑的。
+# 注意：不要写成 `ip ... | grep -q`。grep -q 匹配到就退出、关闭管道，
+# ip 吃到 SIGPIPE 退出 141，pipefail 会把整条管道判成失败 —— 匹配成功反被
+# 当作没匹配。先落变量再比对，顺带按地址字段精确匹配而非子串。
+NIC_ADDRS=$(ip -4 -br addr 2>/dev/null | awk '{print $3}' | cut -d/ -f1)
+V6_DEFAULT=$(ip -6 route show default 2>/dev/null)
 if [ -n "$PUB4" ]; then
-  if ip -4 -br addr | grep -qF "$PUB4"; then DIRECT4=true; else DIRECT4=false; fi
+  case " $(printf '%s ' $NIC_ADDRS)" in
+    *" $PUB4 "*) DIRECT4=true ;;
+    *)           DIRECT4=false ;;
+  esac
 else
   DIRECT4=null
 fi
 if [ -n "$PUB6" ]; then
-  if ip -6 route show default 2>/dev/null | grep -q .; then HAS_V6=true; else HAS_V6=false; fi
+  if [ -n "$V6_DEFAULT" ]; then HAS_V6=true; else HAS_V6=false; fi
 else
   HAS_V6=null
 fi
@@ -236,6 +255,8 @@ for kv in $PING_TARGETS; do
   # 噪声会被当成结论（实测同一条线两轮能得出 0% 和 10% 两种答案）
   out=$(ping -c 30 -i 0.3 -W 2 "$ip" 2>/dev/null | tail -3)
   loss=$(printf '%s' "$out" | grep -oE '[0-9.]+% packet loss' | grep -oE '^[0-9.]+')
+  # ping 在丢包数除不尽时会给出 16.6667% 这种值，收敛到 1 位小数
+  [ -n "$loss" ] && loss=$(awk -v x="$loss" 'BEGIN{printf "%.1f", x}')
   # RTT 汇总行在丢包/高延迟时末尾会多一截 ", pipe N"（RTT > 发包间隔就会出现，
   # 这里 -i 0.3 意味着 >300ms 的线路必然触发）。先按「= 之后、第一个空格之前」
   # 截出纯数字段，再拆 —— 原来用 tr -d ' ms' 会把它压成 "4.634,pipe2"，
@@ -342,7 +363,13 @@ fi
 step "5/6 IP 质量"
 if [ -n "$PUB4" ]; then
   GEO=$(curl -s --max-time 10 "http://ip-api.com/json/${PUB4}?fields=status,country,countryCode,regionName,isp,org,as,mobile,proxy,hosting" 2>/dev/null)
-  if printf '%s' "$GEO" | grep -q '"status":"success"'; then
+  # 同样避开 pipefail + grep -q 的竞态：这里踩中的话，IP 质量整节会被
+  # 随机跳过，而日志只说「查询失败（可能限流）」，排查方向会被带偏
+  case "$GEO" in
+    *'"status":"success"'*) GEO_OK=1 ;;
+    *) GEO_OK=0 ;;
+  esac
+  if [ "$GEO_OK" -eq 1 ]; then
     g() { printf '%s' "$GEO" | grep -oE "\"$1\":\"[^\"]*\"" | cut -d'"' -f4; }
     b() { printf '%s' "$GEO" | grep -oE "\"$1\":(true|false)" | cut -d: -f2; }
     say "$(g country) / $(g isp) / $(g as)"
