@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # opsget — ops-scripts 引导器
-# VERSION: 1.3.0
+# VERSION: 1.3.1
+# 1.3.1: 两处修正。① -e / -c <路径> 改为**云端优先**读声明 —— 原来优先读本地已装
+#        副本，而本地可能是旧版；旧版少一行声明会得出「不需要配置」，这个方向的
+#        错答比误报缺配置危险得多。② 声明支持 `A|B` 二选一，任一有值即通过，
+#        用于「新键 + 旧键回落」（如 BACKUP_PASS_FILE|VW_PASS_FILE）——
+#        否则脚本内部明明有回落，opsget 却会按字面拦下来。
 # 1.3.0: 配置按需化。脚本头部用 `# ENV-REQUIRED: KEY1 KEY2` 声明自己必填的键，
 #        opsget 据此按需预检、按需生成 env.conf。不声明 = 声明「裸机能跑」。
 #        起因：无差别检查 env.conf 是否存在，会对 init/、vpsscore 这类刻意不依赖
@@ -51,6 +56,7 @@ opsget — ops-scripts 引导器
 
   已有的键连值一起保留，只追加缺失项，动手前自动备份。
   脚本头部没有 `# ENV-REQUIRED:` 声明的，表示它不需要配置，裸机可跑。
+  声明里写成 `A|B` 表示二选一，任一有值即可（新键与旧键回落共存时用）。
 
 路径写成 migrate/03-pre-migrate 或 migrate/03-pre-migrate.sh 都可以。
 USAGE
@@ -124,15 +130,24 @@ env_keys_of() {  # $1=脚本文件路径；输出键名，每行一个
     | tr ' \t' '\n\n' | sed '/^$/d' | sort -u
 }
 
-env_missing() {  # $1=脚本文件路径；输出缺失的键，无输出=齐了
-  local keys k; keys=$(env_keys_of "$1")
-  [ -n "$keys" ] || return 0
-  [ -f "$ENV_FILE" ] || { printf '%s\n' $keys; return 0; }
-  # 子 shell 里 source，不污染 opsget 自身的变量
+# 声明 token 可写成 `A|B`：任一有值即算满足，报缺时报首选（第一个）。
+# 这是给「新键 + 旧键回落」用的 —— 脚本内部有回落，预检就不该按字面拦。
+env_missing_keys() {  # $@=声明 token；输出缺失项的首选键名
+  local k a ok
   ( set +u
     # shellcheck disable=SC1090
-    . "$ENV_FILE" 2>/dev/null
-    for k in $keys; do [ -n "${!k:-}" ] || printf '%s\n' "$k"; done )
+    [ -f "$ENV_FILE" ] && . "$ENV_FILE" 2>/dev/null
+    for k in "$@"; do
+      ok=""
+      for a in ${k//|/ }; do [ -n "${!a:-}" ] && { ok=1; break; }; done
+      [ -n "$ok" ] || printf '%s\n' "${k%%|*}"
+    done )
+}
+
+env_missing() {  # $1=脚本文件路径；输出缺失的键，无输出=齐了
+  local keys; keys=$(env_keys_of "$1")
+  [ -n "$keys" ] || return 0
+  env_missing_keys $keys
 }
 
 tpl_keys() {  # $1=模板文件；输出模板里定义的所有键
@@ -143,10 +158,11 @@ tpl_keys() {  # $1=模板文件；输出模板里定义的所有键
 # 键的值可能引用别的键（PANEL_VHOST_DIR="${PANEL_ROOT}/vhost/nginx"）。
 # 只搬 PANEL_VHOST_DIR 而漏掉 PANEL_ROOT，值会展开成 /vhost/nginx —— 一个
 # 看起来像路径、实际指向根目录的值，比报错危险得多。所以要做依赖闭包。
-env_closure() {  # $1=模板 $2=键列表（空格或换行分隔）
+env_closure() {  # $1=模板 $2=键列表（空格或换行分隔，可含 A|B）
   local tpl=$1 want prev refs all
   all=$(tpl_keys "$tpl")
-  want=$(printf '%s\n' $2 | sed '/^$/d' | sort -u)
+  # A|B 只生成首选键 —— 回落键是给老机器用的，新写的 env.conf 不该再引导人去填它
+  want=$(printf '%s\n' $2 | sed '/^$/d; s/|.*//' | sort -u)
   while :; do
     prev=$want
     refs=$(for k in $want; do
@@ -209,14 +225,21 @@ env_merge() {  # $1=模板 $2...=要写入的键
   log "[+] $ENV_FILE：新增 $added 项（说明注释一并带过来），已有值未改动"
 }
 
-get_env_required() {  # $1=仓库内路径（不带 .sh）；本地有就读本地，否则拉一份临时的
-  local p=$1 name tmp keys
+# 云端优先：-e / -c 回答的是「即将拉下来执行的那份脚本要什么」。
+# 本地已装副本可能是旧版，旧版少一行声明就会得出「不需要配置」——
+# 而这个方向的错答（该拦没拦）比误报缺配置危险得多。
+get_env_required() {  # $1=仓库内路径（不带 .sh）
+  local p=$1 name tmp keys=""
   name=$(basename "$p")
-  if [ -f "$BIN_DIR/$name.sh" ]; then
-    env_keys_of "$BIN_DIR/$name.sh"; return 0
-  fi
   tmp=$(mktemp)
-  if curl_retry "$BASE/$p.sh" "$tmp"; then keys=$(env_keys_of "$tmp"); else keys=""; fi
+  if curl_retry "$BASE/$p.sh" "$tmp" >/dev/null 2>&1 && [ -s "$tmp" ]; then
+    keys=$(env_keys_of "$tmp")
+  elif [ -f "$BIN_DIR/$name.sh" ]; then
+    log "[警告] 拉取失败，改读本地已装版本 —— 它可能是旧版，声明未必是最新的"
+    keys=$(env_keys_of "$BIN_DIR/$name.sh")
+  else
+    die "拉取失败且本地没有: $p.sh"
+  fi
   rm -f "$tmp"
   [ -n "$keys" ] && printf '%s\n' "$keys"
   return 0
@@ -257,8 +280,7 @@ case "${1:-}" in
     env_merge "$TPL" $WANT
     rm -f "$TPL"
     # 追加完还得告诉他哪些是空的 —— 键在文件里但没值，等于没配
-    STILL=$( set +u; . "$ENV_FILE" 2>/dev/null
-             for k in $WANT; do [ -n "${!k:-}" ] || printf '%s ' "$k"; done )
+    STILL=$(env_missing_keys $WANT | tr '\n' ' ')
     if [ -n "$STILL" ]; then
       log "[!] 待填: $STILL"
       log "    $ENV_FILE（600），填完即可执行"
@@ -277,8 +299,7 @@ case "${1:-}" in
       log "[缺配置] 还没有 $ENV_FILE —— 跑 opsget -c $1"
       exit 1
     fi
-    MISS=$( set +u; . "$ENV_FILE" 2>/dev/null
-            for k in $KEYS; do [ -n "${!k:-}" ] || printf '%s ' "$k"; done )
+    MISS=$(env_missing_keys $KEYS | tr '\n' ' ')
     if [ -n "$MISS" ]; then log "[缺配置] 待填: $MISS"; log "         补齐: opsget -c $1"; exit 1
     else log "[✓] 都已有值"; fi
     exit 0 ;;
