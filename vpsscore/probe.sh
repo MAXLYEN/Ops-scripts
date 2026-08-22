@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # vpsscore/probe.sh — VPS 质量采集探针（服务端）
-# VERSION: 1.0.0
+# VERSION: 1.0.1
+# 1.0.1: 修 JSON 产出损坏 —— ping 汇总行末尾的 ", pipe N"（RTT 超过发包间隔就会
+#        出现，-i 0.3 意味着 >300ms 的线路必然触发）被 tr -d ' ms' 压成
+#        "4.634,pipe2" 原样写进 JSON，整份文件解析不了。顺带四处：
+#        ① 所有数值字段过 num() 兜底，非纯数字降级为 null；
+#        ② 落盘后自校验 JSON，不合法就报错退出，不再静默说「完成」；
+#        ③ 测速失败写 null 而不是 0（0 与「没测出来」在打分时含义完全相反）；
+#        ④ ICMP 全丢时补 TCP/53 交叉验证，区分「线路不通」与「ICMP 被过滤」；
+#        ⑤ 磁盘顺序读写另存一份数字字段，字符串 "390 MB/s" 没法拿去打分。
 #
 # 在被评估的机器上运行，把硬件 / 线路 / IP 三类指标采成一份 JSON。
 # 评分和横向对比交给 vpsscore/score.sh —— 采集与判断分开，理由：
@@ -55,6 +63,24 @@ J=""
 add() { J="${J}${J:+,}\"$1\":$2"; }
 str() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
 nul() { printf 'null'; }
+# 写进 JSON 前的最后一道闸：非纯数字一律降级成 null。
+# 采集脚本产出不可解析的 JSON，比某个字段缺失严重得多 —— 整个文件都废了。
+num() { case "${1:-}" in ''|*[!0-9.]*|*.*.*) printf 'null' ;; *) printf '%s' "$1" ;; esac; }
+
+# dd 输出形如 "390 MB/s"，字符串没法拿去打分，转成数字另存一份
+to_mbs() { awk -v s="$1" 'BEGIN{n=s+0; if(s~/GB\/s/)n*=1024; else if(s~/kB\/s/)n/=1024;
+                                if(n<=0){print ""; exit} printf "%.1f", n}'; }
+
+# TCP 连通性探测（不依赖 nc）。三网测试点都是 DNS 服务器，53 端口可用。
+# 用途：ICMP 100% 丢包时区分「线路真的不通」和「只是被过滤了 ICMP」——
+# 香港机被电信骨干丢 ICMP 很常见，据此判死刑会误杀。
+tcp_ms() {  # $1=ip $2=port；输出毫秒，失败返回非 0
+  local t0 t1
+  t0=$(date +%s%N)
+  timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null || return 1
+  t1=$(date +%s%N)
+  echo $(( (t1-t0)/1000000 ))
+}
 
 echo "════ VPS 质量采集 · $HOST · $(date -u '+%F %T') UTC ════" >&2
 
@@ -65,7 +91,7 @@ VIRT=$(systemd-detect-virt 2>/dev/null || echo unknown)
 say "系统 ${PRETTY_NAME:-?} | 内核 $(uname -r) | 虚拟化 $VIRT"
 add host        "$(str "$HOST")"
 add probed_at   "$(str "$(date -u +%FT%TZ)")"
-add probe_ver   "$(str '1.0.0')"
+add probe_ver   "$(str '1.0.1')"
 add os          "$(str "${PRETTY_NAME:-unknown}")"
 add kernel      "$(str "$(uname -r)")"
 add virt        "$(str "$VIRT")"
@@ -127,6 +153,9 @@ if [ "$QUICK" -eq 0 ]; then
   say "磁盘 顺序写 ${DISK_W:-?} / 顺序读 ${DISK_R:-?}"
   add disk_seq_write "$(str "${DISK_W:-unknown}")"
   add disk_seq_read  "$(str "${DISK_R:-unknown}")"
+  # 同时存一份数字版：字符串 "390 MB/s" 没法直接拿去打分
+  add disk_seq_write_mbs "$(num "$(to_mbs "${DISK_W:-}")")"
+  add disk_seq_read_mbs  "$(num "$(to_mbs "${DISK_R:-}")")"
   # 4K 随机要 fio，没装就如实标注缺失，不用顺序读写去糊弄
   if command -v fio >/dev/null 2>&1; then
     FIO=$(fio --name=r --rw=randread --bs=4k --size=64M --numjobs=1 --runtime=8 \
@@ -165,10 +194,28 @@ for kv in $PING_TARGETS; do
   label="${kv%%=*}"; ip="${kv##*=}"
   out=$(ping -c 10 -i 0.3 -W 2 "$ip" 2>/dev/null | tail -3)
   loss=$(printf '%s' "$out" | grep -oE '[0-9.]+% packet loss' | grep -oE '^[0-9.]+')
-  rtt=$(printf '%s'  "$out" | awk -F'/' '/rtt|round-trip/{print $5}')
-  jit=$(printf '%s'  "$out" | awk -F'/' '/rtt|round-trip/{print $7}' | tr -d ' ms')
-  say "$label ($ip) 延迟 ${rtt:-?}ms 抖动 ${jit:-?}ms 丢包 ${loss:-?}%"
-  PING_JSON="${PING_JSON}${PING_JSON:+,}$(str "$label"):{\"ip\":$(str "$ip"),\"rtt_ms\":${rtt:-null},\"jitter_ms\":${jit:-null},\"loss_pct\":${loss:-null}}"
+  # RTT 汇总行在丢包/高延迟时末尾会多一截 ", pipe N"（RTT > 发包间隔就会出现，
+  # 这里 -i 0.3 意味着 >300ms 的线路必然触发）。先按「= 之后、第一个空格之前」
+  # 截出纯数字段，再拆 —— 原来用 tr -d ' ms' 会把它压成 "4.634,pipe2"，
+  # 那个值原样进 JSON，整份文件就解析不了了。
+  stats=$(printf '%s' "$out" | sed -n 's|.*= \([0-9./]*\).*|\1|p' | head -1)
+  rtt=""; jit=""
+  if [ -n "$stats" ]; then
+    IFS=/ read -r _rmin rtt _rmax jit <<EOF
+$stats
+EOF
+  fi
+  # ICMP 全丢时交叉验证：TCP 通得了就是被过滤，不是线路死了
+  icmp_only=false; tcpms=""
+  if [ "${loss:-100}" = "100" ]; then
+    if tcpms=$(tcp_ms "$ip" 53); then icmp_only=true; fi
+  fi
+  if [ "$icmp_only" = true ]; then
+    say "$label ($ip) ICMP 全丢，但 TCP/53 通（${tcpms}ms）—— 是 ICMP 被过滤，非线路不通"
+  else
+    say "$label ($ip) 延迟 ${rtt:-?}ms 抖动 ${jit:-?}ms 丢包 ${loss:-?}%"
+  fi
+  PING_JSON="${PING_JSON}${PING_JSON:+,}$(str "$label"):{\"ip\":$(str "$ip"),\"rtt_ms\":$(num "$rtt"),\"jitter_ms\":$(num "$jit"),\"loss_pct\":$(num "$loss"),\"icmp_filtered\":$icmp_only,\"tcp53_ms\":$(num "$tcpms")}"
 done
 add ping "{$PING_JSON}"
 add ping_confidence "$(str 'medium')"   # 单次 10 包，受时段影响
@@ -176,10 +223,18 @@ add ping_confidence "$(str 'medium')"   # 单次 10 包，受时段影响
 # 带宽：受测速点与时段影响极大，单次结果只能当参考
 if [ "$QUICK" -eq 0 ]; then
   BW=$(curl -s -o /dev/null -w '%{speed_download}' --max-time 30 "$SPEED_URL" 2>/dev/null)
-  BW_MBPS=$(awk -v b="${BW:-0}" 'BEGIN{printf "%.1f", b*8/1000000}')
-  say "下行带宽 ${BW_MBPS} Mbps（单点单次，仅供参考）"
-  add down_mbps "$BW_MBPS"
-  add bandwidth_confidence "$(str 'medium')"
+  BW_MBPS=$(awk -v b="${BW:-0}" 'BEGIN{v=b*8/1000000; if(v<0.05){print ""; exit} printf "%.1f", v}')
+  # 测速失败写 0 是错的：0 和「没测出来」在打分时含义完全相反
+  # —— 前者是「这机器带宽极差」，后者是「这项没有数据，别参与计算」
+  if [ -n "$BW_MBPS" ]; then
+    say "下行带宽 ${BW_MBPS} Mbps（单点单次，仅供参考）"
+    add down_mbps "$(num "$BW_MBPS")"
+    add bandwidth_confidence "$(str 'medium')"
+  else
+    say "下行带宽测试失败（测速点不可达或被限速），该项留空"
+    add down_mbps "$(nul)"
+    add bandwidth_confidence "$(str 'failed')"
+  fi
 else
   add down_mbps "$(nul)"; add bandwidth_confidence "$(str 'skipped')"
 fi
@@ -272,6 +327,17 @@ fi
 
 # ==================== 落盘 ====================
 printf '{%s}\n' "$J" > "$JSON"
+# 自校验：产出不可解析的 JSON 是这个脚本最糟的失败方式 —— 下游 score.sh 拿到
+# 一堆坏文件，而人只会看到「完成」。宁可这里就红着脸报错。
+if command -v python3 >/dev/null 2>&1; then
+  if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$JSON" 2>/tmp/.vpsjson.err; then
+    echo "[致命] 生成的 JSON 不合法，文件保留供排查: $JSON" >&2
+    sed 's/^/       /' /tmp/.vpsjson.err >&2
+    rm -f /tmp/.vpsjson.err
+    exit 1
+  fi
+  rm -f /tmp/.vpsjson.err
+fi
 [ -s "$TMP/mtr.txt" ] && cp "$TMP/mtr.txt" "${JSON%.json}.route.txt"
 ln -sf "$(basename "$JSON")" "$OUTDIR/latest.json"
 
