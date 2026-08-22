@@ -17,6 +17,7 @@
 # ⚠️ cron 里调用本地路径 /usr/local/bin/vw-fullbackup.sh，**不要写成 opsget**。
 #    不能让备份依赖外网才能启动。更新用 `opsget -i backup/vw-fullbackup` 显式安装。
 #
+# ENV-REQUIRED: VW_BACKUP_DIR VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
 set -o pipefail
 
 ########## 配置（全部来自 env.conf，本文件不含任何域名/路径硬编码） ##########
