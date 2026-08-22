@@ -3,7 +3,8 @@
 # 全服务备份：Vaultwarden + Komari + SubConverter + 系统配置
 # 打包 → 7z AES-256 加密 → 上传两个网盘
 #
-# VERSION: 2.2.0
+# VERSION: 2.2.1
+# 2.2.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
 # 2.2.0 变更：加反向监控心跳（dead man's switch）。正向告警盖不住「脚本压根没跑」
 #            —— 宕机、cron 挂掉、crontab 被面板重写，这三种情况一封邮件都不会有。
 #            心跳由外部观察者盯着：约定时间没收到就由它告警。
