@@ -2,7 +2,8 @@
 #
 # xboard-fullbackup.sh —— Xboard 面板单包备份
 #
-# VERSION: 2.2.1
+# VERSION: 2.2.2
+# 2.2.2: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
 # 2.2.1 变更：XBOARD_SITES 留空时改为**自动扫描 vhost 目录**收集全部站点与证书。
 #            写死列表的毛病是：每次在面板增删域名都要记得同步改配置，
 #            忘了就报假警（或更糟——静默漏备份一个站）。
