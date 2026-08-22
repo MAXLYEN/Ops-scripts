@@ -9,6 +9,7 @@
 #   4. 数据库账号授权
 #
 # 输出刻意不含主机名，diff 才干净。
+# ENV-REQUIRED: DB_NAMES
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env
