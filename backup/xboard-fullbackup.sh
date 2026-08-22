@@ -23,7 +23,7 @@
 # ⚠️ cron 里调用本地路径 /usr/local/bin/xboard-fullbackup.sh，**不要写成 opsget**。
 #    更新用 `opsget -i backup/xboard-fullbackup` 显式安装。
 #
-
+# ENV-REQUIRED: SVC_XBOARD_DIR XBOARD_DB_NAME XBOARD_DB_USER XBOARD_DB_PASS_FILE XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH RCLONE_REMOTES VW_PASS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
 set -uo pipefail
 
 # ==================== 配置（全部来自 env.conf） ====================
