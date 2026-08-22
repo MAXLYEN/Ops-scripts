@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
 # ops/ssl-audit.sh — 证书三方对账
-# VERSION: 2.0.1
-# 变更: 结论按实际检测结果分支（原来无条件打印"不会续期"）；
-#       站点根目录改为从 vhost 配置里查，兼容多域名共用一个站点的情况
+# VERSION: 2.1.0
+# 2.1.0 变更：
+#   · 第 5 节的域名来源改用 resolve_domains() —— 原来直接 for dom in $DOMAINS，
+#     配置漂移时既会对废域名误报，也会静默漏掉没列进配置的真站点
+#   · 通配符证书覆盖的域名跳过 HTTP-01 目录检查。通配符签发只能走 DNS-01，
+#     对它检查 .well-known 目录必然误报
+# 2.0.1: 结论按实际检测结果分支（原来无条件打印"不会续期"）；
+#        站点根目录改为从 vhost 配置里查，兼容多域名共用一个站点的情况
 #
 # 证书文件正常 != 会自动续期。这两件事由不同的东西驱动：
 #   nginx 直接读文件 -> 所以站点当下是好的
 #   续期任务读面板记录 -> 记录丢了就不会续，到期那天全站一起挂
 #
 # 迁移后这是最典型的"静默失效"，本脚本把三方摆到一起看。
+#
+# 依赖 lib/common.sh >= 1.1.0（resolve_domains）
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env
-require_env PANEL_CERT_DIR
+require_env PANEL_CERT_DIR WWWROOT
 
 section "1. 证书文件与到期日"
 NOW=$(date -u +%s)
@@ -88,7 +95,27 @@ section "5. HTTP-01 验证目录"
 # 续期走 HTTP-01 时需要往站点根目录写 .well-known/acme-challenge/
 # 多个域名可能共用一个站点（副域名只出现在证书 SAN 和 server_name 里），
 # 所以先按域名同名目录找，找不到再回到 vhost 配置里查真实 root。
-for dom in $DOMAINS; do
+resolve_domains
+echo "  域名来源: $OPS_DOMAINS_MODE（${#OPS_DOMAINS[@]} 个）"
+
+# 所有证书的 SAN 汇总一次，用于判断某域名是不是只被通配符覆盖
+CERT_SANS=$(for d in "$PANEL_CERT_DIR"/*/; do
+  [ -f "$d/fullchain.pem" ] || continue
+  openssl x509 -noout -ext subjectAltName -in "$d/fullchain.pem" 2>/dev/null \
+    | tail -1 | tr ',' '\n' | sed -e 's/.*DNS://' -e 's/[[:space:]]//g'
+done | grep -v '^$' | sort -u)
+
+# 有精确 SAN -> 不是通配符覆盖；只有 *.父域 匹配 -> 是
+wildcard_only() {
+  printf '%s\n' "$CERT_SANS" | grep -qxF "$1" && return 1
+  printf '%s\n' "$CERT_SANS" | grep -qxF "*.${1#*.}"
+}
+
+for dom in "${OPS_DOMAINS[@]}"; do
+  if wildcard_only "$dom"; then
+    printf '  [跳过] %-30s 通配符证书，续期走 DNS-01，不需要验证目录\n' "$dom"
+    continue
+  fi
   p="$WWWROOT/$dom"
   if [ -d "$p" ]; then
     printf '  [OK]   %-30s %s\n' "$dom" "$p"
