@@ -1,6 +1,11 @@
 #!/bin/bash
 # init/03-ssh-firewall.sh — SSH 与防火墙
-# VERSION: 1.2.0
+# VERSION: 1.3.0
+# 1.3.0: 新增交互式 SSH 会话的空闲超时（默认 2 小时，可由 env.conf 的
+#        SSH_IDLE_TIMEOUT 覆盖，设 0 关闭）。
+#        用 shell 层的 TMOUT 而非 ClientAlive* —— 后者管的是「对端失联多久算断」，
+#        只要终端还在回应保活包，挂多久都不会断，实现不了「无操作超时」。
+#        TMOUT 只在 bash 等待输入时计数，跑长任务期间不会被打断。
 # 1.2.0: 端口段可由 /etc/ops-scripts/env.conf 覆盖；容器数据库放行改为按配置生成
 # 1.1.0: 去掉 61000:62000；ufw enable 后检查 Docker iptables 链
 #
@@ -22,6 +27,8 @@ EXTRA_UDP="443 50000:60000"
 DOCKER_CIDR=""
 [ -f /etc/ops-scripts/env.conf ] && . /etc/ops-scripts/env.conf 2>/dev/null || true
 EXTRA_TCP="${SVC_TCP_RANGES:-$EXTRA_TCP}"
+# 交互式 SSH 会话空闲多久自动退出（秒）。0 = 不启用。
+IDLE_TIMEOUT="${SSH_IDLE_TIMEOUT:-7200}"
 EXTRA_UDP="${SVC_UDP_RANGES:-$EXTRA_UDP}"
 
 echo "════════ 03 · SSH 与防火墙 ════════"
@@ -137,6 +144,32 @@ sshd -t || {
 }
 systemctl reload "$SSH_UNIT"
 echo "  实际生效: $(sshd -T | grep -iE "^(passwordauthentication|${KBD}|maxauthtries)" | tr '\n' ' ')"
+
+# 空闲超时走 shell 层。ClientAliveInterval/CountMax 管的是「对端失联多久算断」，
+# 终端只要还在回应保活包就永远不断 —— 用它实现不了「无操作超时」。
+IDLE_FILE=/etc/profile.d/99-idle-timeout.sh
+case "$IDLE_TIMEOUT" in
+  ''|0|*[!0-9]*)
+    rm -f "$IDLE_FILE"
+    echo "  空闲超时: 未启用（SSH_IDLE_TIMEOUT=${IDLE_TIMEOUT:-未设})"
+    ;;
+  *)
+    cat > "$IDLE_FILE" << INNER
+# 交互式 SSH 会话空闲超时  $TS
+# TMOUT 只在 bash 等待输入时计数：跑备份/采集等长任务期间不会被打断，
+# 任务结束回到提示符才开始计时。
+# 只对 SSH 会话生效 —— VNC/串口等救援通道不设超时，免得 SSH 出问题时
+# 连补救的入口也一起被掐。
+# 需要长时间挂着请用 screen/tmux：那样断线也不丢进度，比放宽超时更可靠。
+case \$- in
+  *i*) [ -n "\$SSH_CONNECTION" ] && { TMOUT=$IDLE_TIMEOUT; readonly TMOUT; export TMOUT; } ;;
+esac
+INNER
+    chmod 644 "$IDLE_FILE"
+    echo "  空闲超时: ${IDLE_TIMEOUT}秒（$((IDLE_TIMEOUT / 60)) 分钟）→ $IDLE_FILE"
+    echo "    下次登录生效；当前会话不受影响"
+    ;;
+esac
 
 echo
 echo "─ 5. 防火墙规则（先写全，最后才 enable）─"
