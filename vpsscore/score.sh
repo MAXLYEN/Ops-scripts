@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # vpsscore/score.sh — 对 probe.sh 采集的 JSON 打分与横向对比
-# VERSION: 1.2.0
+# VERSION: 1.2.1
+# 1.2.1: 跟进 probe.sh 1.1.3 的字段改名 tcp53_ms → tcp_ms，并兼容旧数据。
+#        交叉验证的端口从 53 改成 80/443（53 实测全部不通，见 probe 变更说明）。
 # 1.2.0: 角色重构为 line / ip / web，并按地区分组对比。
 #        · relay 与 land 合并成 line —— 两者的权重差别只在延迟，
 #          分成两个榜看到的是同一批机器换个顺序，没有新增判断力。
@@ -167,8 +169,12 @@ def ping_stats(d):
     for v in (d.get("ping") or {}).values():
         if v.get("icmp_filtered"):
             # TCP 通就用 TCP 时延顶替，丢包这项对该目标弃权
-            if v.get("tcp53_ms") is not None:
-                rtts.append(float(v["tcp53_ms"]))
+            # 1.1.3 起字段名是 tcp_ms；旧数据里叫 tcp53_ms，一并兼容
+            tcp = v.get("tcp_ms")
+            if tcp is None:
+                tcp = v.get("tcp53_ms")
+            if tcp is not None:
+                rtts.append(float(tcp))
             continue
         if v.get("loss_pct") is not None:
             losses.append(float(v["loss_pct"]))
