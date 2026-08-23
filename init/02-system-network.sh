@@ -1,6 +1,7 @@
 #!/bin/bash
 # init/02-system-network.sh — 系统与网络调优
-# VERSION: 1.0.0
+# VERSION: 1.1.0
+# 1.1.0: fstab 校验区分真实问题与已知无害项（详见 init/04-verify.sh 1.1.0）。
 #
 # UTC 时区、IPv4 优先解析、SUID 加固、磁盘 udev、BBR、内核参数、日志上限。
 # 本目录的脚本刻意不依赖 lib/common.sh，理由见 00-precheck.sh 头部。
@@ -22,6 +23,55 @@ CORES=$(nproc)
 echo "════════ 02 · 系统与网络调优 ════════"
 echo "内存 ${MEM_MB}MB | CPU ${CORES} 核 | 服务端口段 $SVC_RANGES"
 
+# fstab 校验分类：把「Debian 模板遗留的虚拟光驱」和「swapfile 语义」这两类
+# 恒定误报单独归类，只有真实挂载点的问题才算失败。
+# 不这么做的话，每台新机都会看到一个永远不会消失的红叉 —— 那会训练人忽略告警。
+fstab_verify() {
+  local raw
+  raw=$(findmnt --verify --verbose 2>&1)
+  printf '%s\n' "$raw" | awk '
+    # 无缩进且非计数行 = 一个挂载目标的小节标题
+    /^[^ \t]/ && !/parse error/ {
+      target = $0
+      next
+    }
+    /\[E\]|\[W\]/ {
+      msg = $0
+      sub(/^[ \t]+/, "", msg)
+      harmless = 0
+      # /media/cdrom* 是 Debian 安装留下的模板条目，noauto 从不挂载
+      if (target ~ /^\/media\/cdrom/) harmless = 1
+      # findmnt 不理解 swap 语义，总把 swapfile 报成「非 bind 挂载源是普通文件」
+      if (msg ~ /non-bind mount source/ && msg ~ /swap|swapfile/) harmless = 1
+      if (target == "none" && msg ~ /non-bind mount source/) harmless = 1
+      if (harmless) { hn++; hlist = hlist "\n      " target ": " msg }
+      else          { rn++; rlist = rlist "\n      " target ": " msg }
+    }
+    END {
+      print "REAL=" rn
+      print "HARM=" hn
+      if (rn) printf "RLIST=%s\n", rlist
+      if (hn) printf "HLIST=%s\n", hlist
+    }'
+}
+
+fstab_report() {   # $1: 缩进前缀
+  local pre="${1:-  }" out real harm
+  out=$(fstab_verify)
+  real=$(printf '%s\n' "$out" | sed -n 's/^REAL=//p')
+  harm=$(printf '%s\n' "$out" | sed -n 's/^HARM=//p')
+  if [ "${real:-0}" -eq 0 ]; then
+    printf '%s✅ 真实挂载点校验通过\n' "$pre"
+    [ "${harm:-0}" -gt 0 ] && \
+      printf '%sℹ️  另有 %s 项已知无害（虚拟光驱模板 / swapfile 语义），不影响启动\n' "$pre" "$harm"
+    return 0
+  fi
+  printf '%s❌ 真实挂载点有 %s 项问题:\n' "$pre" "$real"
+  printf '%s\n' "$out" | sed -n '/^RLIST=/,$p' | sed '1s/^RLIST=//' | sed '/^HLIST=/,$d'
+  [ "${harm:-0}" -gt 0 ] && \
+    printf '%s（另有 %s 项已知无害，已忽略）\n' "$pre" "$harm"
+  return 1
+}
 echo
 echo "─ 1. 时区与时间同步 ─"
 # 统一 UTC：多机日志时间戳可直接对比，cron 表达式跨机器语义一致。
@@ -208,12 +258,7 @@ echo "  上限 ${LOGMAX}MB"
 
 echo
 echo "─ 8. fstab 校验（只读，本阶段不修改 fstab）─"
-if findmnt --verify >/dev/null 2>&1; then
-  echo "  ✅ 通过"
-else
-  echo "  ❌ 有问题:"
-  findmnt --verify --verbose 2>&1 | sed -n '1,20p' | sed 's/^/    /'
-fi
+fstab_report "  " || true
 
 echo
 echo "════════ 验证实际生效值 ════════"
