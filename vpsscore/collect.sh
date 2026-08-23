@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # vpsscore/collect.sh — 把多台机器的 probe JSON 收到一处并打分
-# VERSION: 1.2.1
+# VERSION: 1.2.2
+# 1.2.2: -p 时本机也重新采集。原来本机只从 /var/lib/vpsscore 复制已有 JSON，
+#        远程却是重采 —— 两条路径不对称，导致本机数据永远停在上一次手动
+#        跑探针的时刻，而它照样参与排名。实测本机因此长期用着几个版本前的
+#        旧数据，榜单上完全看不出来（又一个「结果不对但表面正常」）。
+#        现在本机与远程走同一套参数，采集完再复制。
 # 1.2.1: ① 采集前后都对账探针版本。两条采集路径拿到的可能不是同一个版本 ——
 #           装了 opsget 的机器从云端拉，没装的用本机 /usr/local/bin/probe.sh 推送。
 #           实测出现过本机 1.1.2、云端 1.1.3，21 台跑的是旧版而输出完全看不出来，
@@ -220,6 +225,18 @@ if [ "$DO_PROBE" -eq 1 ] && [ -n "$HOSTS" ]; then
   T0=$(date +%s)
   PLOG=$(mktemp -d) || die "mktemp 失败"
   running=0
+  # 本机也要重新采集 —— 只复制旧文件的话，本机数据会永远停在上次手动跑
+  # 探针的时刻，而它在榜单里照样参与排名（表面完全正常，看不出是旧数据）。
+  # 放后台与远程并行：本机采集不占用 ssh 并发额度，串行跑纯属浪费时间。
+  LOCAL_PID=""
+  if [ -x /usr/local/bin/probe.sh ] && [ "$(id -u)" -eq 0 ]; then
+    ( /usr/local/bin/probe.sh $PROBE_ARGS >"$PLOG/.local" 2>&1
+      printf '%s\n' "$?" > "$PLOG/.local.rc" ) &
+    LOCAL_PID=$!
+  elif [ -x /usr/local/bin/probe.sh ]; then
+    log "  [提示] 非 root，跳过本机采集（探针需要 root）"
+  fi
+
   # 进度上报要先起：采集循环自己是阻塞的，放在循环之后就永远等不到实时输出
   : > "$PLOG/.done"
   (
@@ -278,6 +295,16 @@ if [ "$DO_PROBE" -eq 1 ] && [ -n "$HOSTS" ]; then
   sleep 4                      # 让上报器把最后几行打完
   kill "$PROG_PID" 2>/dev/null
   wait "$PROG_PID" 2>/dev/null
+
+  if [ -n "$LOCAL_PID" ]; then
+    wait "$LOCAL_PID" 2>/dev/null
+    if [ "$(cat "$PLOG/.local.rc" 2>/dev/null || echo 1)" = "0" ]; then
+      log "  本机: 采集完成"
+    else
+      log "  本机: 采集失败 —— 单独运行 probe.sh $PROBE_ARGS 看原因"
+      tail -3 "$PLOG/.local" 2>/dev/null | sed 's/^/      /' >&2
+    fi
+  fi
 
   ELAPSED=$(( $(date +%s) - T0 ))
   log "  采集耗时 $((ELAPSED / 60)) 分 $((ELAPSED % 60)) 秒"
