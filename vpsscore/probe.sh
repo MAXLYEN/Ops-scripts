@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # vpsscore/probe.sh — VPS 质量采集探针（服务端）
-# VERSION: 1.1.2
+# VERSION: 1.1.3
+# 1.1.3: 修 ICMP 交叉验证从未生效。1.0.2 加交叉验证时我写的理由是
+#        「三网测试点都是 DNS 服务器，53 端口可用」—— 这是没验证过的假设。
+#        实测三个目标的 TCP/53 全部不通：219.141.136.10 的 PTR 是
+#        xd-cache-1.bjtelecom.net，是缓存节点不是 DNS；另两个同样不开 53。
+#        后果：电信那一路每台都被记成 100% 丢包，三网均值凭空多出 33%，
+#        而丢包在线路评分里占 30 分权重 —— 23 台的线路分全部偏低且趋同。
+#        改为依次尝试 80/443（实测三个目标都通），并记录实际使用的端口，
+#        避免探测方式再次失效而无人察觉。
 # 1.1.2: 去掉调用 IPQuality 时的 -n。-n 是「跳过依赖检查与安装」，而它的依赖
 #        （ip.sh:401）是 jq curl bc netcat dnsutils —— 缺 jq 时 db_maxmind 里
 #        `jq . || RESPONSE=""` 会置空，进而 mode_lite=1，脚本降级成 Lite：
@@ -136,7 +144,7 @@ num() { case "${1:-}" in ''|*[!0-9.]*|*.*.*) printf 'null' ;; *) printf '%s' "$1
 to_mbs() { awk -v s="$1" 'BEGIN{n=s+0; if(s~/GB\/s/)n*=1024; else if(s~/kB\/s/)n/=1024;
                                 if(n<=0){print ""; exit} printf "%.1f", n}'; }
 
-# TCP 连通性探测（不依赖 nc）。三网测试点都是 DNS 服务器，53 端口可用。
+# TCP 连通性探测（不依赖 nc）。
 # 用途：ICMP 100% 丢包时区分「线路真的不通」和「只是被过滤了 ICMP」——
 # 香港机被电信骨干丢 ICMP 很常见，据此判死刑会误杀。
 tcp_ms() {  # $1=ip $2=port；输出毫秒，失败返回非 0
@@ -145,6 +153,21 @@ tcp_ms() {  # $1=ip $2=port；输出毫秒，失败返回非 0
   timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null || return 1
   t1=$(date +%s%N)
   echo $(( (t1-t0)/1000000 ))
+}
+
+# 端口按实测选：三个测试点的 TCP/53 全部不通（219.141.136.10 的 PTR 是
+# xd-cache-1.bjtelecom.net，缓存节点而非 DNS），80/443 才通。
+# 依次尝试并记录实际用到的端口 —— 只写死一个端口的话，
+# 哪天它也关了，交叉验证会再次静默失效。
+TCP_PROBE_PORTS="${VPSSCORE_TCP_PORTS:-80 443}"
+# 输出「毫秒 端口」两个值，不要靠全局变量回传 —— 调用方写成
+# ms=$(tcp_probe ip) 时函数跑在子 shell 里，赋的全局变量传不回来
+tcp_probe() {  # $1=ip；输出 "<毫秒> <端口>"，全部失败返回非 0
+  local ip=$1 port ms
+  for port in $TCP_PROBE_PORTS; do
+    if ms=$(tcp_ms "$ip" "$port"); then printf '%s %s' "$ms" "$port"; return 0; fi
+  done
+  return 1
 }
 
 echo "════ VPS 质量采集 · $HOST · $(date -u '+%F %T') UTC ════" >&2
@@ -156,7 +179,7 @@ VIRT=$(systemd-detect-virt 2>/dev/null || echo unknown)
 say "系统 ${PRETTY_NAME:-?} | 内核 $(uname -r) | 虚拟化 $VIRT"
 add host        "$(str "$HOST")"
 add probed_at   "$(str "$(date -u +%FT%TZ)")"
-add probe_ver   "$(str '1.1.2')"
+add probe_ver   "$(str '1.1.3')"
 add os          "$(str "${PRETTY_NAME:-unknown}")"
 add kernel      "$(str "$(uname -r)")"
 add virt        "$(str "$VIRT")"
@@ -308,16 +331,19 @@ $stats
 EOF
   fi
   # ICMP 全丢时交叉验证：TCP 通得了就是被过滤，不是线路死了
-  icmp_only=false; tcpms=""
+  icmp_only=false; tcpms=""; tcpport=""
   if [ "${loss:-100}" = "100" ]; then
-    if tcpms=$(tcp_ms "$ip" 53); then icmp_only=true; fi
+    if _r=$(tcp_probe "$ip"); then
+      icmp_only=true
+      tcpms=${_r%% *}; tcpport=${_r##* }
+    fi
   fi
   if [ "$icmp_only" = true ]; then
-    say "$label ($ip) ICMP 全丢，但 TCP/53 通（${tcpms}ms）—— 是 ICMP 被过滤，非线路不通"
+    say "$label ($ip) ICMP 全丢，但 TCP/${tcpport} 通（${tcpms}ms）—— 是 ICMP 被过滤，非线路不通"
   else
     say "$label ($ip) 延迟 ${rtt:-?}ms 抖动 ${jit:-?}ms 丢包 ${loss:-?}%"
   fi
-  PING_JSON="${PING_JSON}${PING_JSON:+,}$(str "$label"):{\"ip\":$(str "$ip"),\"rtt_ms\":$(num "$rtt"),\"jitter_ms\":$(num "$jit"),\"loss_pct\":$(num "$loss"),\"icmp_filtered\":$icmp_only,\"tcp53_ms\":$(num "$tcpms")}"
+  PING_JSON="${PING_JSON}${PING_JSON:+,}$(str "$label"):{\"ip\":$(str "$ip"),\"rtt_ms\":$(num "$rtt"),\"jitter_ms\":$(num "$jit"),\"loss_pct\":$(num "$loss"),\"icmp_filtered\":$icmp_only,\"tcp_ms\":$(num "$tcpms"),\"tcp_port\":$(num "$tcpport")}"
 done
 add ping "{$PING_JSON}"
 add ping_samples "30"
