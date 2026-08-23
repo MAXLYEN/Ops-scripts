@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # vpsscore/probe.sh — VPS 质量采集探针（服务端）
-# VERSION: 1.1.4
+# VERSION: 1.1.5
+# 1.1.5: 新增 ipq_geo_consensus —— 各库对该 IP 归属国判定的一致程度。
+#        起因：一台机器 IPQuality 判「原生IP」、我给出 IP 质量 92.6 分排 HK 第二，
+#        但实际用起来很差。查 ping0/IPPure/iplark 三个站，都判它是广播 IP、
+#        风控 37-40%、bot 流量占 66%、适用场景全部不推荐。
+#        分歧的根源在 Factor.CountryCode：七个库给出 HK/SG/CN/US 四个国家，
+#        各服务把它判到不同区域，行为不可预测 —— 而我从没解析这个字段。
+#        这一项比「原生/广播」更能预测实际可用性，且现有采集数据里就有，
+#        不增加任何检测耗时。
 # 1.1.4: 修 ICMP 交叉验证从未生效 —— 真正的原因是数值比较写成了字符串比较。
 #        1.1.2 把丢包率格式化到一位小数（ping 会给出 16.6667% 这种值），
 #        于是 100 变成 "100.0"，而触发条件写的是 [ "$loss" = "100" ]，
@@ -181,7 +189,7 @@ VIRT=$(systemd-detect-virt 2>/dev/null || echo unknown)
 say "系统 ${PRETTY_NAME:-?} | 内核 $(uname -r) | 虚拟化 $VIRT"
 add host        "$(str "$HOST")"
 add probed_at   "$(str "$(date -u +%FT%TZ)")"
-add probe_ver   "$(str '1.1.4')"
+add probe_ver   "$(str '1.1.5')"
 add os          "$(str "${PRETTY_NAME:-unknown}")"
 add kernel      "$(str "$(uname -r)")"
 add virt        "$(str "$VIRT")"
@@ -586,6 +594,26 @@ out["ipq_risk_avg"] = round(sum(vals) / len(vals), 1) if vals else None
 out["ipq_risk_sources"] = len(vals)
 
 factor = d.get("Factor") or {}
+
+# 各库对这个 IP 的归属国判定是否一致。ip.sh 把两字母国家码写进
+# Factor.CountryCode（每库一项，拿不到为 null）。
+# 这一项比「原生/广播」更能预测实际可用性：实测有机器 IPQuality 判「原生IP」，
+# 但七个库给出 HK/SG/CN/US 四个国家，各服务把它判到不同区域，
+# 行为不可预测 —— 用起来的表现远差于分数。
+cc = {k: v for k, v in (factor.get("CountryCode") or {}).items()
+      if v is not None and str(v).strip().lower() != "null"}
+if cc:
+    top_cc, top_n = collections.Counter(cc.values()).most_common(1)[0]
+    out["ipq_geo_top"] = top_cc
+    out["ipq_geo_consensus"] = round(top_n / len(cc), 2)
+    out["ipq_geo_sources"] = len(cc)
+    out["ipq_geo_spread"] = sorted(set(cc.values()))
+else:
+    out["ipq_geo_top"] = None
+    out["ipq_geo_consensus"] = None
+    out["ipq_geo_sources"] = None
+    out["ipq_geo_spread"] = None
+
 flag_n = flag_d = 0
 for key in ("Proxy", "VPN", "Tor", "Abuser", "Robot"):
     for v in (factor.get(key) or {}).values():
@@ -658,6 +686,12 @@ rd=d.get("ipq_risk_detail") or {}
 p("风险 max %s / avg %s  %s" % (d.get("ipq_risk_max"), d.get("ipq_risk_avg"),
   " ".join("%s=%g" % (k,v) for k,v in sorted(rd.items(), key=lambda x:-x[1]))))
 p("风险标记 %s/%s 库次" % (d.get("ipq_flags_hit"), d.get("ipq_flags_total")))
+gc=d.get("ipq_geo_consensus")
+if gc is not None:
+    sp=d.get("ipq_geo_spread") or []
+    msg="归属地一致性 %.0f%%（%s 库判 %s）" % (gc*100, d.get("ipq_geo_sources"), d.get("ipq_geo_top"))
+    if len(sp)>1: msg += "  ⚠ 分歧: %s" % "/".join(sp)
+    p(msg)
 dead=d.get("ipq_sources_dead")
 if dead: p("⚠ 无数据的库: %s（分母已相应缩小）" % ", ".join(dead))
 m=d.get("ipq_media") or {}
