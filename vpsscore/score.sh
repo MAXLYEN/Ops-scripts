@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # vpsscore/score.sh — 对 probe.sh 采集的 JSON 打分与横向对比
-# VERSION: 1.2.1
+# VERSION: 1.3.0
+# 1.3.0: IP 榜新增「归属地一致性」并调整权重。实测一台 IPQuality 判「原生IP」、
+#        本表给 92.6 分排 HK 第二的机器，实际用起来很差 —— 七个库对它的归属国
+#        给出 HK/SG/CN/US 四种判定，各服务把它判到不同区域，行为不可预测。
+#        原生/广播只是单一数据源的一家之言（该机 ping0 与 iplark 均判广播），
+#        而多库地区分歧是可交叉验证的硬信号，故 ip_native 权重 25 → 15，
+#        新增 ip_geo 20。
+#        同时在 IP 榜下方标明：这是初筛，不是结论 —— 实际可用性仍以使用体感为准。
 # 1.2.1: 跟进 probe.sh 1.1.3 的字段改名 tcp53_ms → tcp_ms，并兼容旧数据。
 #        交叉验证的端口从 53 改成 80/443（53 实测全部不通，见 probe 变更说明）。
 # 1.2.0: 角色重构为 line / ip / web，并按地区分组对比。
@@ -114,8 +121,8 @@ ROLES = {
     "line": ("线路质量", {
         "bw": 30, "loss": 30, "rtt": 20, "steal": 10, "virt": 5, "cpu": 5}),
     "ip": ("IP 质量", {
-        "ip_native": 25, "ip_media": 30, "ip_risk": 20,
-        "ip_blacklist": 15, "ip_flags": 5, "ip_residential": 5}),
+        "ip_media": 25, "ip_geo": 20, "ip_risk": 20, "ip_native": 15,
+        "ip_blacklist": 12, "ip_flags": 5, "ip_residential": 3}),
     "web": ("建站（4C4G+）", {
         "cpu": 20, "mem": 15, "disk_4k": 20, "disk_seq": 15,
         "bw": 10, "loss": 10, "steal": 5, "virt": 5}),
@@ -230,13 +237,24 @@ def ip_metrics(d):
     if not ok:
         # 没有 --ipq 数据时全部留空，由归一化剔除 ——
         # 不能拿 dnsbl_hits 凑数，那是完全不同量级的指标
-        for k in ("ip_native", "ip_media", "ip_risk",
+        for k in ("ip_native", "ip_media", "ip_risk", "ip_geo",
                   "ip_blacklist", "ip_flags", "ip_residential"):
             m[k] = (None, 1.0)
         return m
 
     nat = d.get("ipq_native")
     m["ip_native"] = (None if nat is None else (100.0 if nat else 35.0), 1.0)
+
+    # 归属地一致性：各库判定越分散，服务把它判到哪个区域就越不可预测。
+    # 全一致 100 分，一半一致约 33 分 —— 曲线做得陡，因为分歧本身
+    # 就意味着「有的服务能用有的不能用」，而不是线性变差。
+    gc = d.get("ipq_geo_consensus")
+    if gc is None:
+        m["ip_geo"] = (None, 1.0)
+    else:
+        src = d.get("ipq_geo_sources") or 0
+        m["ip_geo"] = (band(float(gc), [(0.3, 0), (0.5, 25), (0.7, 55), (0.85, 80), (1.0, 100)]),
+                       1.0 if src >= 5 else 0.7)
 
     tot = d.get("ipq_media_total") or 0
     if tot:
@@ -339,6 +357,7 @@ LABEL = {"bw": "带宽", "loss": "丢包", "rtt": "延迟", "cpu": "CPU",
          "disk_seq": "磁盘顺序", "disk_4k": "磁盘4K", "mem": "内存",
          "steal": "steal", "virt": "虚拟化",
          "ip_native": "原生IP", "ip_media": "流媒体", "ip_risk": "风险评分",
+         "ip_geo": "归属地一致性",
          "ip_blacklist": "黑名单", "ip_flags": "风险标记", "ip_residential": "住宅属性"}
 
 # 组内少于这个数量时，「第几名」没有参考价值，只报绝对分
@@ -459,6 +478,11 @@ for rk, blk in result.items():
                        key=lambda x: (-(x[1][0] or 0), -(x[1][1] or 0)))[:8]
         print("  " + "、".join(f"{h}({c}C/{(m or 0) / 1024:.1f}G)" for h, (c, m) in shown)
               + ("…" if len(uniq) > 8 else ""))
+
+if not ROLE or ROLE == "ip":
+    print("\n  ⓘ IP 榜是初筛，不是结论。它反映的是各风险库怎么看这个 IP，")
+    print("    而实际可用性还取决于你的具体用途和使用体感 —— 后者更准。")
+    print("    分数接近时（相差 10 分以内），以实际使用表现为准。")
 
 print("\n  绝对分：0-100，按角色权重加权，缺失项剔除后归一化")
 print("  覆盖率：参与计分的权重占该角色总权重的比例")
