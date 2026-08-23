@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # vpsscore/collect.sh — 把多台机器的 probe JSON 收到一处并打分
-# VERSION: 1.2.0
+# VERSION: 1.2.1
+# 1.2.1: ① 采集前后都对账探针版本。两条采集路径拿到的可能不是同一个版本 ——
+#           装了 opsget 的机器从云端拉，没装的用本机 /usr/local/bin/probe.sh 推送。
+#           实测出现过本机 1.1.2、云端 1.1.3，21 台跑的是旧版而输出完全看不出来，
+#           白跑一轮才发现。现在开跑前比对，跑完统计版本分布，不一致就告警。
+#        ② 实时进度：每台完成打印一行带耗时，不再是十几分钟静默。
+#        ③ --ipq 不再压低并发。原来降到 4 的理由是「汇总机出口会成为瓶颈」，
+#           但 IPQ 的耗时全在各机器自己等第三方 API，请求不经过汇总机 ——
+#           那是没有依据的猜测。默认改 8，-j 可继续调高。
 # 1.2.0: 新增 --ipq，透传给远程探针做深度 IP 质量检测。
 #        它每台要跑 1-2 分钟（查十几个第三方库），所以启用时默认并发降到 4；
 #        显式给了 -j 则以你给的为准。
@@ -89,10 +97,36 @@ command -v ssh >/dev/null 2>&1 || die "缺少 ssh"
 
 if [ "$DO_IPQ" -eq 1 ]; then
   PROBE_ARGS="--ipq"
-  # IPQ 每台多花 1-2 分钟，且都在等第三方 API 返回。并发开太高时汇总机
-  # 自己的出口会成为瓶颈，反而拖慢每一台；没显式指定就降到 4
-  [ "$JOBS_SET" -eq 1 ] || JOBS=4
+  # IPQ 的耗时全在各机器自己等第三方 API，请求不经过汇总机，
+  # 所以并发数不影响对端看到的负载分布，只影响总时长。
+  # 默认 8 而非更高，纯粹是为了控制故障爆炸半径 —— 出问题时
+  # 你有时间 Ctrl-C，而不是一次性全打出去。
+  [ "$JOBS_SET" -eq 1 ] || JOBS=8
 fi
+
+# 探针版本对账：本机副本用于推送给没装 opsget 的机器，云端版本给装了的。
+# 两者不一致时，同一轮采集会混用两个版本，而结果里完全看不出来。
+probe_ver_of() { grep -m1 -oE '^# VERSION: *[0-9.]+' "$1" 2>/dev/null | grep -oE '[0-9.]+$'; }
+check_probe_version() {
+  local local_v cloud_v tmp
+  [ -r /usr/local/bin/probe.sh ] || return 0
+  local_v=$(probe_ver_of /usr/local/bin/probe.sh)
+  tmp=$(mktemp)
+  if curl -fsSL --max-time 20 \
+       "https://raw.githubusercontent.com/MAXLYEN/ops-scripts/main/vpsscore/probe.sh?_=$(date +%s)" \
+       -o "$tmp" 2>/dev/null; then
+    cloud_v=$(probe_ver_of "$tmp")
+  fi
+  rm -f "$tmp"
+  [ -n "$local_v" ] && [ -n "$cloud_v" ] || return 0
+  if [ "$local_v" != "$cloud_v" ]; then
+    log "⚠ 探针版本不一致：本机 $local_v，云端 $cloud_v"
+    log "  装了 opsget 的机器会拉云端版，没装的会用本机版 —— 同一轮会混用两个版本"
+    log "  先执行: opsget -i vpsscore/probe"
+    return 1
+  fi
+  return 0
+}
 case "$JOBS" in ''|*[!0-9]*) die "-j 必须是数字: $JOBS" ;; esac
 [ "$JOBS" -ge 1 ] || JOBS=1
 
@@ -171,16 +205,45 @@ FAILED=""
 
 # ── 可选：先在每台上重新采集 ────────────────────────────────
 if [ "$DO_PROBE" -eq 1 ] && [ -n "$HOSTS" ]; then
+  check_probe_version || log ""
+  NHOSTS=$(printf '%s\n' $HOSTS | wc -l)
   if [ "$DO_IPQ" -eq 1 ]; then
-    log "▸ 远程采集 + 深度 IP 质量（并发 $JOBS，每台约 2-4 分钟）"
+    PER=180
+    log "▸ 远程采集 + 深度 IP 质量（$NHOSTS 台，并发 $JOBS）"
   else
-    log "▸ 远程采集（并发 $JOBS，每台约 1-2 分钟）"
+    PER=90
+    log "▸ 远程采集（$NHOSTS 台，并发 $JOBS）"
   fi
+  # 粗估：批数 × 每台耗时。给个数量级，免得十几分钟静默让人以为卡死
+  EST=$(( (NHOSTS + JOBS - 1) / JOBS * PER ))
+  log "  预计约 $((EST / 60)) 分钟（$(( (NHOSTS + JOBS - 1) / JOBS )) 批 × 每台约 $((PER / 60)) 分钟）"
+  T0=$(date +%s)
   PLOG=$(mktemp -d) || die "mktemp 失败"
+  running=0
+  # 进度上报要先起：采集循环自己是阻塞的，放在循环之后就永远等不到实时输出
+  : > "$PLOG/.done"
+  (
+    shown=0
+    while [ "$shown" -lt "$NHOSTS" ]; do
+      sleep 3
+      cur=$(wc -l < "$PLOG/.done" 2>/dev/null || echo 0)
+      while [ "$shown" -lt "$cur" ]; do
+        shown=$((shown + 1))
+        line=$(sed -n "${shown}p" "$PLOG/.done" 2>/dev/null)
+        printf '  [%2d/%d] %-34s %ss\n' "$shown" "$NHOSTS" "${line% *}" "${line##* }" >&2
+      done
+    done
+  ) &
+  PROG_PID=$!
+
+  PIDS=""
   running=0
   for h in $HOSTS; do
     (
       out="$PLOG/$(printf '%s' "$h" | tr -c 'A-Za-z0-9._-' '_')"
+      t_start=$(date +%s)
+      # 完成信号写文件而不是靠变量：子 shell 里的赋值传不回父进程
+      trap 'printf "%s %s\n" "$h" "$(( $(date +%s) - t_start ))" >> "$PLOG/.done"' EXIT
       # 探针要写 /var/lib/vpsscore、读 /proc/stat，普通用户跑不了。
       # 有免密 sudo 就用，没有就如实报错，不要静默产出半份数据。
       pfx=''
@@ -204,12 +267,20 @@ if [ "$DO_PROBE" -eq 1 ] && [ -n "$HOSTS" ]; then
         exit 1
       fi
     ) &
+    PIDS="$PIDS $!"
     running=$((running + 1))
     if [ "$running" -ge "$JOBS" ]; then
-      if wait -n 2>/dev/null; then running=$((running - 1)); else wait; running=0; fi
+      wait -n 2>/dev/null && running=$((running - 1)) || { wait $PIDS 2>/dev/null; running=0; }
     fi
   done
-  wait
+  # 只等采集任务，不要用无参 wait —— 那会连进度上报器一起等，永远不返回
+  wait $PIDS 2>/dev/null
+  sleep 4                      # 让上报器把最后几行打完
+  kill "$PROG_PID" 2>/dev/null
+  wait "$PROG_PID" 2>/dev/null
+
+  ELAPSED=$(( $(date +%s) - T0 ))
+  log "  采集耗时 $((ELAPSED / 60)) 分 $((ELAPSED % 60)) 秒"
 
   pok=0; pbad=""
   for h in $HOSTS; do
@@ -294,6 +365,31 @@ if [ -n "$FAILED" ]; then
 fi
 
 # ── 打分 ────────────────────────────────────────────────────
+# 版本分布从收到的 JSON 读（probe_ver 只在 JSON 里，终端输出没有）。
+# 两条采集路径可能拿到不同版本，混用时结果不可比而表面完全正常
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$OUTDIR" <<'PYVER' >&2
+import json, glob, os, sys, collections
+best = {}
+for f in glob.glob(os.path.join(sys.argv[1], "*.json")):
+    if os.path.basename(f) == "latest.json":
+        continue
+    try:
+        d = json.load(open(f, encoding="utf-8"))
+    except Exception:
+        continue
+    ip = d.get("ipv4") or d.get("host") or f
+    if ip not in best or (d.get("probed_at") or "") > (best[ip].get("probed_at") or ""):
+        best[ip] = d
+c = collections.Counter(d.get("probe_ver") or "未知" for d in best.values())
+if len(c) > 1:
+    print("")
+    print("  ⚠ 探针版本不一致：" + "，".join(f"{v} × {n}" for v, n in c.most_common()))
+    print("    装了 opsget 的机器拉云端版，没装的用本机 /usr/local/bin/probe.sh")
+    print("    先执行 opsget -i vpsscore/probe，再重采")
+PYVER
+fi
+
 SCORE=$(command -v score.sh || echo /usr/local/bin/score.sh)
 if [ -x "$SCORE" ]; then
   "$SCORE" "$OUTDIR"
