@@ -22,7 +22,7 @@ export DEBIAN_FRONTEND=noninteractive
 # ── 除 SSH 外要放行的端口 ──
 # 默认值适用于大多数机器；若本机已有 /etc/ops-scripts/env.conf，
 # 以它的 SVC_TCP_RANGES / SVC_UDP_RANGES 为准。
-EXTRA_TCP="80 443 10000:11000 50000:60000"
+EXTRA_TCP="80 443 10001:11000 50000:60000"
 EXTRA_UDP="443 50000:60000"
 DOCKER_CIDR=""
 [ -f /etc/ops-scripts/env.conf ] && . /etc/ops-scripts/env.conf 2>/dev/null || true
