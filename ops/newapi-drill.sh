@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # newapi-drill.sh
-# VERSION: 1.0.0
+# VERSION: 1.0.1
+# 1.0.1 状态文件的值加引号（含空格的时间戳 source 时被当成命令）；脱敏改为按值判断，
+#       原先按 key 名匹配会把 false/true/5 这类布尔与短数字也打码，看着像有值其实没有
 # ENV-REQUIRED: NEWAPI_HOST BACKUP_PASS_FILE NEWAPI_CLOUD_DIR
 #
 # 灾难恢复演练：假设主落地机彻底不可用，只剩云端备份，
@@ -88,7 +90,7 @@ do_restore() {
     echo "DOCKER_PREEXISTING=0" > "$STATE_FILE"
     log "目标机原本没有 docker，teardown 时会卸载还原"
   fi
-  echo "DRILL_START=$(date -u '+%F %T')" >> "$STATE_FILE"
+  echo "DRILL_START='$(date -u '+%F %T')'" >> "$STATE_FILE"
 
   log "----- 从云端取最新备份 -----"
   command -v rclone >/dev/null 2>&1 || die "本机缺少 rclone"
@@ -176,8 +178,8 @@ docker ps --filter name=${DRILL_CONTAINER} --format '  {{.Names}}  {{.Image}}  {
 REMOTE_RUN
   [ $? -ne 0 ] && die "恢复实例起不来或自检不过"
 
-  echo "RESTORED_FROM=$LATEST" >> "$STATE_FILE"
-  echo "IMAGE=$IMAGE" >> "$STATE_FILE"
+  echo "RESTORED_FROM='$LATEST'" >> "$STATE_FILE"
+  echo "IMAGE='$IMAGE'" >> "$STATE_FILE"
   log "恢复完成。下一步：newapi-drill.sh verify $TARGET"
 }
 
@@ -237,10 +239,11 @@ do_verify() {
     python3 -c \"
 import sqlite3,sys,re
 SEC=re.compile(r'(key|secret|token|password)', re.I)
+SAFE=re.compile(r'^(true|false|null|\d{1,6}|\[.*\]|\{.*\})$', re.I)
 c=sqlite3.connect(sys.argv[1])
 for k,v in sorted(c.execute('SELECT key,value FROM options')):
     v=v or ''
-    if SEC.search(k):
+    if SEC.search(k) and v and not SAFE.match(v):
         v=('%s…%s [len=%d]' % (v[:4], v[-2:], len(v))) if len(v)>8 else ('*'*len(v))
     elif len(v)>50: v=v[:50]+' …'
     print('  %-32s = %s' % (k, v or '(空)'))
