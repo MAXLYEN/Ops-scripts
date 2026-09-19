@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # newapi-fullbackup.sh
-# VERSION: 1.0.0
+# VERSION: 1.0.1
+# 1.0.1 rclone check 两边都必须是目录，原先传单个文件路径导致 "is a file not a directory" 误报失败
 # ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_BAK_DIR BACKUP_PASS_FILE MAIL_TO
 #
 # 从汇总机拉取落地机上的 new-api 数据并打包加密上传。
@@ -63,7 +64,7 @@ finish() {
   if [ "$FAIL" -gt 0 ] || [ "$rc" -ne 0 ]; then
     hb /fail
     send_mail "[FAIL] new-api backup $TS" "$(tail -n 60 "$LOG")"
-    log "结束：FAIL=$FAIL WARN=$WARN 退出码=$rc"
+    log "结束：FAIL=$FAIL WARN=$WARN 传入码=$rc 实际退出码=1"
     exit 1
   elif [ "$WARN" -gt 0 ]; then
     hb /fail
@@ -311,8 +312,8 @@ for R in $RCLONE_REMOTES; do
      && rclone copy "${ARCHIVE}.sha256" "${R}:/${CLOUD_DIR}/" >>"$LOG" 2>&1; then
     # Google Drive 元数据有延迟，立刻 check 会误报
     sleep 10
-    if rclone check "$ARCHIVE" "${R}:/${CLOUD_DIR}/$(basename "$ARCHIVE")" \
-         >>"$LOG" 2>&1; then
+    if rclone check "$NEWAPI_BAK_DIR" "${R}:/${CLOUD_DIR}" \
+         --include "$(basename "$ARCHIVE")" >>"$LOG" 2>&1; then
       log "${R} 校验通过"
       UPLOADED=$((UPLOADED+1))
     else
