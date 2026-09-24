@@ -3,7 +3,7 @@
 # 全服务备份：Vaultwarden + Komari + SubConverter + 系统配置
 # 打包 → 7z AES-256 加密 → 上传两个网盘
 #
-# VERSION: 2.3.1
+# VERSION: 2.3.2
 # 2.3.1: ENV-REQUIRED 里的密码键改写成 BACKUP_PASS_FILE|VW_PASS_FILE 二选一 ——
 #        脚本内部本就有回落，声明按字面写会让 opsget 把能跑的机器拦下来。
 # 2.3.0: 备份加密密码改读 BACKUP_PASS_FILE，VW_PASS_FILE 作回落。原来两个备份
@@ -188,6 +188,7 @@ for d in plugin plugin-data; do
 done
 [ -n "$KOMARI_EXTRA" ] && [ -f "$KOMARI_EXTRA/auto-discovery.json" ] && cp -a "$KOMARI_EXTRA/auto-discovery.json" "$STAGE/komari/"
 [ -n "$KOMARI_DATA" ] && [ -d "$KOMARI_DATA/theme" ] && ls "$KOMARI_DATA/theme" > "$STAGE/komari/theme-list.txt"
+[ -n "$KOMARI_DATA" ] && [ -f "$(dirname "$KOMARI_DATA")/compose.yaml" ] && cp -a "$(dirname "$KOMARI_DATA")/compose.yaml" "$STAGE/komari/"
 
 ########## 4. SubConverter ##########
 log "收集 SubConverter 配置 ..."
@@ -303,9 +304,9 @@ docker exec vaultwarden printenv ADMIN_TOKEN | head -c 12   # 必须是 $argon2i
 
 ## 3. Komari
 ```bash
-mkdir -p /root/data && cp komari/komari.db /root/data/
-cp -a komari/plugin komari/plugin-data /root/data/ 2>/dev/null
-# 启动命令见 system/docker/run-commands.sh
+mkdir -p /opt/komari/data && cp komari/komari.db /opt/komari/data/
+cp -a komari/plugin komari/plugin-data /opt/komari/data/ 2>/dev/null
+cp komari/compose.yaml /opt/komari/ && cd /opt/komari && docker compose up -d
 ```
 主题需要在面板里重新下载（清单见 komari/theme-list.txt）。
 **监控历史不在备份内，重建后从零开始记录，agent token 在 komari.db 里，被控端不用重装。**
@@ -314,13 +315,13 @@ cp -a komari/plugin komari/plugin-data /root/data/ 2>/dev/null
 如果里面是宿主机的公网 IP，换到 NAT 后面的机器就连不上 —— 改成网桥网关地址：
 
 ```bash
-sqlite3 /root/data/komari.db "SELECT rowid,value FROM configs WHERE value LIKE '%3306%'"
+sqlite3 /opt/komari/data/komari.db "SELECT rowid,value FROM configs WHERE value LIKE '%3306%'"
 ```
 
 ## 4. SubConverter
 ```bash
 mkdir -p /opt/SubConverter-Extended && cp -a subconverter/. /opt/SubConverter-Extended/
-# 启动命令见 system/docker/run-commands.sh
+cd /opt/SubConverter-Extended && docker compose up -d
 ```
 `pref.toml` 是全部自定义配置的唯一载体，**不要用上游示例覆盖它**。
 
