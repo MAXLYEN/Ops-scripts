@@ -1,31 +1,10 @@
 #!/bin/sh
-# =============================================================================
-# dns-anti-poison.sh —— OpenClash DNS 反投毒配置注入
-#
-# 用途：向 openclash_custom_overwrite.sh 注入一个 OPS-DNS 块，使
-#         · 国内域名  → 国内 DoH，直连解析
-#         · 境外域名  → 境外 DoH，经代理解析（绕开投毒通道）
-#         · 节点/自建域名 → 国内 DoH，直连解析（防死锁）
-#
-# 背景：dns.nameserver 只配国内 DoH 时，境外域名的解析结果可能被投毒成
-#       回环地址、私有地址或其他大厂 IP，进而导致 GEOIP,private 等规则误判。
-#       详见《订阅链路故障排查.md》第 5 节。
-#
-# 用法：
-#   sh dns-anti-poison.sh                 安装/更新（幂等）
-#   sh dns-anti-poison.sh --check         只检查当前状态，不改动
-#   sh dns-anti-poison.sh --uninstall     移除 OPS-DNS 块
-#   sh dns-anti-poison.sh --dry-run       打印将写入的内容，不落盘
-#
-# 自定义（环境变量，均可选）：
-#   OPS_DNS_CN      国内 DoH 列表，逗号分隔
-#   OPS_DNS_FQ      境外 DoH 列表，逗号分隔
-#   OPS_DNS_DIRECT  需强制走国内 DNS 直连解析的自有域名，逗号分隔
-#                   （订阅域名、规则域名、自建服务域名 —— 不填则不注入这部分）
-#   例：OPS_DNS_DIRECT="example.com,example.net" sh dns-anti-poison.sh
-#
-# 注意：目标文件末尾通常有 `exit 0`，本脚本会自动把块插到它之前。
-# =============================================================================
+# dns-anti-poison.sh — 为 OpenClash 注入国内直连、境外代理的 DoH 分流配置
+# VERSION: 1.0.0
+# 用法: sh dns-anti-poison.sh [--check|--uninstall|--dry-run]
+# 配置: OPS_OVERWRITE 指定目标文件；OPS_DNS_CN、OPS_DNS_FQ、OPS_DNS_DIRECT
+#       分别指定国内 DoH、境外 DoH 和需直连解析的域名，列表用逗号分隔。
+# 安装/更新会备份原文件，并把配置块放在目标文件第一个 exit 0 之前。
 
 set -e
 
@@ -33,7 +12,6 @@ OVERWRITE="${OPS_OVERWRITE:-/etc/openclash/custom/openclash_custom_overwrite.sh}
 MARK_BEGIN="# OPS-DNS"
 MARK_END="# OPS-DNS-END"
 
-# ---- 默认上游 -----------------------------------------------------------
 OPS_DNS_CN="${OPS_DNS_CN:-https://doh.pub/dns-query,https://dns.alidns.com/dns-query}"
 OPS_DNS_FQ="${OPS_DNS_FQ:-https://cloudflare-dns.com/dns-query,https://dns.google/dns-query}"
 OPS_DNS_DIRECT="${OPS_DNS_DIRECT:-}"
@@ -50,11 +28,10 @@ esac
 log() { echo "[dns-anti-poison] $*"; }
 die() { echo "[dns-anti-poison] !! $*" >&2; exit 1; }
 
-# ---- 前置检查 -----------------------------------------------------------
 [ -f "$OVERWRITE" ] || die "找不到 $OVERWRITE
   若 OpenClash 装在别处，用 OPS_OVERWRITE=<路径> 指定"
 
-# 把逗号分隔列表转成 ruby 数组字面量: 'a','b'
+# 将逗号分隔的地址转成 ruby_edit 使用的数组元素列表。
 to_ruby_list() {
   echo "$1" | tr ',' '\n' | sed "s/^[[:space:]]*//; s/[[:space:]]*$//" \
     | grep -v '^$' | sed "s/^/'/; s/$/'/" | paste -sd, -
@@ -65,7 +42,6 @@ FQ_LIST=$(to_ruby_list "$OPS_DNS_FQ")
 [ -n "$CN_LIST" ] || die "OPS_DNS_CN 为空"
 [ -n "$FQ_LIST" ] || die "OPS_DNS_FQ 为空"
 
-# 自有域名 → nameserver-policy 条目
 DIRECT_ENTRIES=""
 if [ -n "$OPS_DNS_DIRECT" ]; then
   for d in $(echo "$OPS_DNS_DIRECT" | tr ',' ' '); do
@@ -75,7 +51,6 @@ if [ -n "$OPS_DNS_DIRECT" ]; then
   done
 fi
 
-# ---- check 模式 ---------------------------------------------------------
 if [ "$MODE" = check ]; then
   log "目标文件: $OVERWRITE"
   if grep -q "^${MARK_BEGIN}\$" "$OVERWRITE"; then
@@ -96,7 +71,6 @@ if [ "$MODE" = check ]; then
   exit 0
 fi
 
-# ---- uninstall 模式 -----------------------------------------------------
 if [ "$MODE" = uninstall ]; then
   grep -q "^${MARK_BEGIN}\$" "$OVERWRITE" || { log "未安装，无需移除"; exit 0; }
   cp "$OVERWRITE" "${OVERWRITE}.bak.$(date +%Y%m%d%H%M%S)"
@@ -106,7 +80,6 @@ if [ "$MODE" = uninstall ]; then
   exit 0
 fi
 
-# ---- 生成块内容 ---------------------------------------------------------
 BLOCK=$(cat <<OPSEOF
 ${MARK_BEGIN}
 # 反 DNS 投毒：国内域名走国内 DoH 直连，境外域名走境外 DoH 且经代理解析
@@ -128,8 +101,7 @@ if [ "$MODE" = dryrun ]; then
   exit 0
 fi
 
-# ---- install 模式 -------------------------------------------------------
-# 幂等：内容相同则跳过；不同则备份后替换；不存在则新建
+# 内容或位置不符时先备份，再替换原配置块。
 if grep -q "^${MARK_BEGIN}\$" "$OVERWRITE"; then
   CUR=$(sed -n "/^${MARK_BEGIN}\$/,/^${MARK_END}\$/p" "$OVERWRITE")
   CUR_LINE=$(grep -n "^${MARK_BEGIN}\$" "$OVERWRITE" | cut -d: -f1)
@@ -150,7 +122,7 @@ else
   log "首次安装（原文件已备份）"
 fi
 
-# 插入：优先插到第一个 exit 0 之前，没有则追加到末尾
+# 插到第一个 exit 0 前，避免配置块落在不会执行的区域。
 TMP=$(mktemp)
 if grep -q "^exit 0\$" "$OVERWRITE"; then
   awk -v blk="$BLOCK" '
@@ -164,7 +136,6 @@ fi
 mv "$TMP" "$OVERWRITE"
 chmod +x "$OVERWRITE"
 
-# ---- 落地校验 -----------------------------------------------------------
 if ! sh -n "$OVERWRITE" 2>/dev/null; then
   die "写入后语法检查失败！请用备份文件回滚：
   cp ${OVERWRITE}.bak.<最新时间戳> $OVERWRITE"

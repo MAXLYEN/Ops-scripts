@@ -1,19 +1,15 @@
 #!/bin/bash
-# init/02-system-network.sh — 系统与网络调优
-# VERSION: 1.1.0
-# 1.1.0: fstab 校验区分真实问题与已知无害项（详见 init/04-verify.sh 1.1.0）。
-#
-# UTC 时区、IPv4 优先解析、SUID 加固、磁盘 udev、BBR、内核参数、日志上限。
-# 本目录的脚本刻意不依赖 lib/common.sh，理由见 00-precheck.sh 头部。
+# init/02-system-network.sh — 配置时区、网络、磁盘和内核参数
+# VERSION: 1.1.1
+# 1.1.1: 统一注释与目录文档，执行逻辑未变。
+# 用法: 以 root 执行；已存在的 env.conf 可覆盖服务端口段。
 
 set -e
 [ "$(id -u)" -eq 0 ] || { echo "❌ 需要 root"; exit 1; }
 TS=$(date +%Y%m%d-%H%M%S)
 export DEBIAN_FRONTEND=noninteractive
 
-# ── 服务端口段 ──
-# 默认值适用于大多数机器；若本机已有 /etc/ops-scripts/env.conf，以它的
-# SVC_TCP_RANGES 为准，这样端口规划只在一处维护。
+# 已有 env.conf 时沿用其中的服务端口段，避免与防火墙规划不一致。
 SVC_RANGES="10000:11000 50000:60000"
 [ -f /etc/ops-scripts/env.conf ] && . /etc/ops-scripts/env.conf 2>/dev/null || true
 SVC_RANGES="${SVC_TCP_RANGES:-$SVC_RANGES}"
@@ -23,9 +19,7 @@ CORES=$(nproc)
 echo "════════ 02 · 系统与网络调优 ════════"
 echo "内存 ${MEM_MB}MB | CPU ${CORES} 核 | 服务端口段 $SVC_RANGES"
 
-# fstab 校验分类：把「Debian 模板遗留的虚拟光驱」和「swapfile 语义」这两类
-# 恒定误报单独归类，只有真实挂载点的问题才算失败。
-# 不这么做的话，每台新机都会看到一个永远不会消失的红叉 —— 那会训练人忽略告警。
+# 将 Debian 光驱模板和 swapfile 语义误报单独归类；只把真实挂载错误计为失败。
 fstab_verify() {
   local raw
   raw=$(findmnt --verify --verbose 2>&1)

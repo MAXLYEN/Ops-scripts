@@ -1,14 +1,8 @@
 #!/bin/bash
-# init/01-swap-memory.sh — Swap 与内存参数
-# VERSION: 1.1.0
-# 1.1.0: 修「校验失败自动回滚」这条保险从未武装的问题。原来用
-#        `findmnt --verify` 的退出码判断改动前 fstab 是否健康，而它在 Debian 上
-#        因 /media/cdrom* 模板条目恒定失败 —— PRE_OK 永远是 0，于是无论改动
-#        引入什么问题，都会走「改动前也不通过，未回滚」这条分支。
-#        改为只统计真实挂载点的问题数，并按增量判断：改动后新增了问题才回滚。
-#
-# 按内存分档创建 swapfile，配置 swappiness 与脏页写回。
-# 本目录的脚本刻意不依赖 lib/common.sh，理由见 00-precheck.sh 头部。
+# init/01-swap-memory.sh — 按内存和磁盘容量配置 swapfile 与内存参数
+# VERSION: 1.1.1
+# 1.1.1: 统一注释与目录文档，执行逻辑未变。
+# 用法: 以 root 执行；会校验 fstab 并在新增真实挂载错误时回滚。
 
 set -e
 SWAPFILE=/swapfile
@@ -25,9 +19,7 @@ case "$FSTYPE" in
   xfs)       echo "ℹ️  XFS：fallocate 的文件 swapon 会拒绝，将直接用 dd（较慢，正常）" ;;
 esac
 
-# fstab 校验分类：把「Debian 模板遗留的虚拟光驱」和「swapfile 语义」这两类
-# 恒定误报单独归类，只有真实挂载点的问题才算失败。
-# 不这么做的话，每台新机都会看到一个永远不会消失的红叉 —— 那会训练人忽略告警。
+# 将 Debian 光驱模板和 swapfile 语义误报单独归类；只把真实挂载错误计为失败。
 fstab_verify() {
   local raw
   raw=$(findmnt --verify --verbose 2>&1)
@@ -75,7 +67,7 @@ fstab_report() {   # $1: 缩进前缀
   return 1
 }
 
-# 只返回真实挂载点的问题数，供「改动是否引入了新问题」的判断使用
+# 回滚只看本次改动新增的真实挂载错误。
 fstab_real_count() { fstab_verify | sed -n 's/^REAL=//p'; }
 MEM_MB=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
 if   [ "$MEM_MB" -le 2048 ]; then SWAP_MB=$((MEM_MB*2))

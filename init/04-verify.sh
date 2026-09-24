@@ -1,24 +1,14 @@
 #!/bin/bash
-# init/04-verify.sh — 重启后持久性验证（只读）
-# VERSION: 1.1.0
-# 1.1.0: fstab 校验区分「真实挂载点问题」与「已知无害项」。
-#        findmnt --verify 在 Debian 上恒定报三类误报：/media/cdrom* 是安装时
-#        留下的模板条目（noauto，从不挂载），以及 swapfile 被当成「非 bind
-#        挂载源是普通文件」。原来一律打 ❌，等于每台新机都有一个永远不会
-#        消失的红叉 —— 那会训练人忽略告警，真出问题时也不会有人看。
-#
-# 只读，随时可跑。确认前面几个阶段的配置在重启后仍然生效。
-# 本目录的脚本刻意不依赖 lib/common.sh，理由见 00-precheck.sh 头部。
-#
-# 注意本脚本只覆盖系统层。容器与数据库那一侧另跑 migrate/08-post-start-check。
+# init/04-verify.sh — 重启后只读检查系统配置是否持久生效
+# VERSION: 1.1.1
+# 1.1.1: 统一注释与目录文档，执行逻辑未变。
+# 用法: 重启后执行；容器和数据库另用 migrate/08-post-start-check 验收。
 
 echo "════════ 04 · 开机后持久性检查 ════════"
 . /etc/os-release 2>/dev/null
 echo "  ${PRETTY_NAME:-未知} | 内核 $(uname -r) | 已运行 $(uptime -p 2>/dev/null | sed 's/^up //')"
 
-# fstab 校验分类：把「Debian 模板遗留的虚拟光驱」和「swapfile 语义」这两类
-# 恒定误报单独归类，只有真实挂载点的问题才算失败。
-# 不这么做的话，每台新机都会看到一个永远不会消失的红叉 —— 那会训练人忽略告警。
+# 将 Debian 光驱模板和 swapfile 语义误报单独归类；只把真实挂载错误计为失败。
 fstab_verify() {
   local raw
   raw=$(findmnt --verify --verbose 2>&1)

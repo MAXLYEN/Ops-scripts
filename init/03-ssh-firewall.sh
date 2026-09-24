@@ -1,27 +1,16 @@
 #!/bin/bash
-# init/03-ssh-firewall.sh — SSH 与防火墙
-# VERSION: 1.3.0
-# 1.3.0: 新增交互式 SSH 会话的空闲超时（默认 2 小时，可由 env.conf 的
-#        SSH_IDLE_TIMEOUT 覆盖，设 0 关闭）。
-#        用 shell 层的 TMOUT 而非 ClientAlive* —— 后者管的是「对端失联多久算断」，
-#        只要终端还在回应保活包，挂多久都不会断，实现不了「无操作超时」。
-#        TMOUT 只在 bash 等待输入时计数，跑长任务期间不会被打断。
-# 1.2.0: 端口段可由 /etc/ops-scripts/env.conf 覆盖；容器数据库放行改为按配置生成
-# 1.1.0: 去掉 61000:62000；ufw enable 后检查 Docker iptables 链
-#
-# 本目录的脚本刻意不依赖 lib/common.sh，理由见 00-precheck.sh 头部。
-#
-# ⚠️ 跑之前先连好第二个 SSH 窗口。脚本布置了 5 分钟自动回滚兜底，
-#    但带外控制台（VNC/管理终端）才是真正的最后一道保险。
+# init/03-ssh-firewall.sh — 加固 SSH、启用 ufw 并配置 fail2ban
+# VERSION: 1.3.1
+# 1.3.1: 统一注释与目录文档，执行逻辑未变。
+# 用法: 以 root 执行；先打开第二个 SSH 窗口并确认带外控制台可用。
+# 脚本会设置 5 分钟自动回滚，验证新连接后需明确取消回滚。
 
 set -e
 [ "$(id -u)" -eq 0 ] || { echo "❌ 需要 root"; exit 1; }
 TS=$(date +%Y%m%d-%H%M%S)
 export DEBIAN_FRONTEND=noninteractive
 
-# ── 除 SSH 外要放行的端口 ──
-# 默认值适用于大多数机器；若本机已有 /etc/ops-scripts/env.conf，
-# 以它的 SVC_TCP_RANGES / SVC_UDP_RANGES 为准。
+# 已有 env.conf 时从中读取 TCP/UDP 端口段和容器网段。
 EXTRA_TCP="80 443 10001:11000 50000:60000"
 EXTRA_UDP="443 50000:60000"
 DOCKER_CIDR=""
@@ -46,8 +35,7 @@ if grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/
 else
   DROPIN=0
 fi
-# SSH 端口自动探测：sshd 配置里的 + 当前连接实际用的，取并集。
-# 所以换机器不用手工改端口，这一点容易被忘掉而白白改配置。
+# 同时放行 sshd 配置端口和当前连接端口，避免切断现有 SSH 会话。
 CFG_PORTS=$(sshd -T 2>/dev/null | awk '/^port /{print $2}')
 CUR_PORT=$(echo "${SSH_CONNECTION:-}" | awk '{print $4}')
 PORTS=$(printf '%s\n' $CFG_PORTS $CUR_PORT | grep -E '^[0-9]+$' | sort -un)
@@ -145,8 +133,7 @@ sshd -t || {
 systemctl reload "$SSH_UNIT"
 echo "  实际生效: $(sshd -T | grep -iE "^(passwordauthentication|${KBD}|maxauthtries)" | tr '\n' ' ')"
 
-# 空闲超时走 shell 层。ClientAliveInterval/CountMax 管的是「对端失联多久算断」，
-# 终端只要还在回应保活包就永远不断 —— 用它实现不了「无操作超时」。
+# TMOUT 只计算交互式 shell 等待输入的时间，不中断运行中的任务。
 IDLE_FILE=/etc/profile.d/99-idle-timeout.sh
 case "$IDLE_TIMEOUT" in
   ''|0|*[!0-9]*)
@@ -181,9 +168,7 @@ for p in $PORTS; do
 done
 for r in $EXTRA_TCP; do ufw allow "$r"/tcp >/dev/null && echo "  $r/tcp"; done
 for r in $EXTRA_UDP; do ufw allow "$r"/udp >/dev/null && echo "  $r/udp"; done
-# 容器访问宿主机数据库：只有配置里明确写了 DOCKER_CIDR 才加，
-# 通用机器不需要这条。漏了它是延迟发作的 —— 连接池里的旧连接还能撑
-# 几小时，然后突然全站 503。
+# 仅在明确配置 DOCKER_CIDR 时放行容器到宿主机数据库的连接。
 if [ -n "$DOCKER_CIDR" ] && command -v docker >/dev/null 2>&1; then
   ufw allow from "$DOCKER_CIDR" to any port 3306 proto tcp \
     comment 'containers -> host MySQL' >/dev/null \
@@ -203,8 +188,7 @@ if [ -n "$MISS" ]; then
   exit 1
 fi
 echo "  ✅ 所有 SSH 端口已确认放行"
-# ufw enable 会重建 iptables，可能打乱 dockerd 自插的 DOCKER 链，
-# 表现为容器端口突然不通、或容器连不上宿主机服务。
+# ufw 可能重建 iptables；启用后核对 Docker 链并在需要时恢复。
 if command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -q 2>/dev/null)" ]; then
   if iptables -S DOCKER 2>/dev/null | grep -q -- '-j ACCEPT'; then
     echo "  ✅ Docker iptables 链完好"

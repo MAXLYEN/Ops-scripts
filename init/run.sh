@@ -1,10 +1,9 @@
 #!/bin/bash
-# init/run.sh — 初始化阶段调度器
-# VERSION: 2.0.0
-# 2.0.0: 改为配合 opsget 使用 —— 阶段脚本从云端拉取，不再依赖 /root/s0*.sh
-#
-#   opsget init/run              列出阶段与当前状态
-#   opsget init/run 03           执行指定阶段（会自动拉取该阶段的最新版）
+# init/run.sh — 列出初始化阶段，并通过 opsget 执行指定阶段
+# VERSION: 2.0.1
+# 2.0.1: 统一注释与目录文档，执行逻辑未变。
+# 用法: opsget init/run [00|01|02|03|04]
+# 执行阶段 03 前先准备第二个 SSH 窗口和带外控制台。
 
 STAGES="00:precheck:环境探测与更新:检查系统/硬件/网络形态/能力/软件源，打补丁，判断是否需重启
 01:swap-memory:Swap 与内存参数:按内存分档创建 swapfile，配置 swappiness / 脏页写回

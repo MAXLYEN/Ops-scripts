@@ -1,14 +1,8 @@
 #!/bin/bash
-# init/00-precheck.sh — 环境探测与更新
-# VERSION: 1.0.1
-# 1.0.1 修正：网络形态判断在 dual-stack 机器上误报 NAT ——
-#            `curl ifconfig.me` 优先走 IPv6 返回 v6 地址，却拿去和 IPv4 网卡列表比对，
-#            必然不匹配。现在分别探测两个协议族，各自和对应的地址列表比。
-#
-# 新机初始化的第一步。只探测和更新，不改任何配置。
-#
-# 本目录的脚本**刻意不依赖 lib/common.sh** —— 它们要能在一台什么都没有的
-# 新机上单跑（甚至直接 curl 下来执行），少一个依赖就少一个失败点。
+# init/00-precheck.sh — 探测新机环境、更新系统并判断是否需要重启
+# VERSION: 1.0.2
+# 1.0.2: 统一注释与目录文档，执行逻辑未变。
+# 用法: 以 root 执行；软件源异常时可交互确认修复。
 
 export DEBIAN_FRONTEND=noninteractive
 [ "$(id -u)" -eq 0 ] || { echo "❌ 需要 root，请先执行 sudo -i"; exit 1; }
@@ -56,12 +50,8 @@ echo
 
 echo
 echo "[网络形态]"
-# 公网 IP 不在网卡上 = 机器在 NAT 后面。这会影响两件事：
-#   1. 入站可达性必须单独验证（出网通不代表能连进来）
-#   2. 容器内不能用宿主机公网 IP 访问宿主机服务 —— 包会发到网关再也回不来
-#
-# ⚠️ 必须分协议族探测。dual-stack 机器上 curl 默认可能走 IPv6，
-#    拿回来的 v6 地址去和 IPv4 网卡列表比对必然不匹配，会误报成 NAT。
+# 公网地址与同协议族网卡地址比较，避免双栈机器被误判为 NAT。
+# NAT 环境需另验入站可达性，容器访问宿主机应使用网桥网关地址。
 PUB4=$(curl -s -4 --max-time 10 https://ifconfig.me 2>/dev/null)
 PUB6=$(curl -s -6 --max-time 10 https://ifconfig.me 2>/dev/null)
 printf '  %-16s %s\n' 网卡IPv4 "$(ip -4 -br addr | grep -v '^lo' | awk '{print $1"="$3}' | tr '\n' ' ')"
