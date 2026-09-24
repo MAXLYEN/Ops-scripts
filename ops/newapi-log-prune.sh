@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/newapi-log-prune.sh — 清理超过保留期的 new-api 消费日志
-# VERSION: 1.0.2
-# 1.0.2: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.0.3
+# 1.0.3: 访问令牌改经 stdin 传给 curl，不再出现在进程命令行。
 # ENV-REQUIRED: NEWAPI_PUBLIC_URL NEWAPI_ROOT_PAT NEWAPI_LOG_KEEP_DAYS
 # 按配置保留期清理；低于 30 天将中止。
 
@@ -32,6 +32,8 @@ esac
 BASE="${NEWAPI_PUBLIC_URL%/}"
 PAT="$NEWAPI_ROOT_PAT"
 MASK="${PAT:0:4}…${PAT: -4}[len=${#PAT}]"
+# 令牌经 stdin 交给 curl（-H @-），不进命令行 —— /proc/*/cmdline 同机任何用户都能读
+api() { curl -s -H @- "$@" <<<"Authorization: Bearer ${PAT}"; }
 TS=$(( $(date +%s) - NEWAPI_LOG_KEEP_DAYS * 86400 ))
 
 log "目标站点：${BASE}"
@@ -43,9 +45,7 @@ if [ "$DRY" = 1 ]; then
   exit 0
 fi
 
-RESP=$(curl -s -m 30 -X POST \
-  -H "Authorization: Bearer ${PAT}" \
-  "${BASE}/api/system-task/log-cleanup?target_timestamp=${TS}")
+RESP=$(api -m 30 -X POST "${BASE}/api/system-task/log-cleanup?target_timestamp=${TS}")
 [ -n "$RESP" ] || die "接口无响应"
 
 TASK=$(printf '%s' "$RESP" | python3 -c '
@@ -69,7 +69,7 @@ log "轮询任务状态（最多 300 秒）"
 FINAL=""
 for i in $(seq 1 60); do
   sleep 5
-  S=$(curl -s -m 20 -H "Authorization: Bearer ${PAT}" "${BASE}/api/system-task/${TASK_ID}" \
+  S=$(api -m 20 "${BASE}/api/system-task/${TASK_ID}" \
       | python3 -c '
 import sys,json
 try: d=json.load(sys.stdin)

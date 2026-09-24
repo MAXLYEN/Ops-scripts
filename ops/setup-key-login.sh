@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/setup-key-login.sh — 配置新机器的 SSH 密钥登录并验证
-# VERSION: 1.0.1
-# 1.0.1: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.0.2
+# 1.0.2: 密码参数改为可选，省略时从终端静默读取或取环境变量 SSHPASS，避免留在 shell 历史和进程命令行。
 
 set -o pipefail
 
@@ -9,16 +9,18 @@ usage() {
   cat <<'USAGE'
 setup-key-login.sh — 给新机器配置密钥登录
 
-  setup-key-login.sh <IP> <端口> <密码> [--user 用户名]
+  setup-key-login.sh <IP> <端口> [密码] [--user 用户名]
 
   <IP>      新机器公网 IP
   <端口>    SSH 端口（通常 22）
-  <密码>    该机器的登录密码，含特殊字符时用单引号包起来
+  [密码]    建议省略：省略时终端里静默输入（不回显、不进 shell 历史），
+            非交互调用时取环境变量 SSHPASS。写在参数里也兼容，
+            但会留在 shell 历史和进程命令行里
   --user    登录用户，默认 root
 
 例:
-  setup-key-login.sh 1.2.3.4 22 'MyPassw0rd'
-  setup-key-login.sh 1.2.3.4 2222 'MyPassw0rd' --user administrator
+  setup-key-login.sh 1.2.3.4 22
+  setup-key-login.sh 1.2.3.4 2222 --user administrator
 
 成功后会把这台追加到 ~/.vps-hosts.txt，collect.sh 下次即可带上它。
 密码登录不会被关闭 —— 始终保留退路。
@@ -30,7 +32,9 @@ say() { printf '%s\n' "$*"; }
 
 case "${1:-}" in -h|--help|'') usage; exit 0 ;; esac
 
-IP="$1"; PORT="$2"; PW="$3"; shift 3 2>/dev/null || die "参数不足，看 setup-key-login.sh -h"
+IP="${1:-}"; PORT="${2:-}"; shift 2 2>/dev/null || die "参数不足，看 setup-key-login.sh -h"
+PW=""
+case "${1:-}" in ''|--user) ;; *) PW="$1"; shift ;; esac
 USER_NAME=root
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -39,7 +43,17 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$IP" ] && [ -n "$PORT" ] && [ -n "$PW" ] || die "用法: setup-key-login.sh <IP> <端口> <密码>"
+[ -n "$IP" ] && [ -n "$PORT" ] || die "用法: setup-key-login.sh <IP> <端口> [密码]"
+if [ -z "$PW" ]; then
+  if [ -n "${SSHPASS:-}" ]; then
+    PW="$SSHPASS"
+  else
+    [ -t 0 ] || die "未提供密码：非交互调用请用环境变量 SSHPASS 传入"
+    printf '%s@%s 的密码（不回显）: ' "$USER_NAME" "$IP" >&2
+    read -rs PW; printf '\n' >&2
+  fi
+fi
+[ -n "$PW" ] || die "密码为空"
 case "$PORT" in ''|*[!0-9]*) die "端口必须是数字: $PORT" ;; esac
 command -v sshpass >/dev/null 2>&1 || die "缺 sshpass: apt-get install -y sshpass"
 

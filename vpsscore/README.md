@@ -25,7 +25,7 @@ score.sh -r line ~/vpsscore-baseline    # 只看某一个榜
 → `~/.vps-hosts.txt` → `~/.ssh/config` 的 Host 条目。走 ssh 别名时端口/IP/用户
 全由 ssh 解析，不用在这里再维护一份。
 
-新机器纳管：`opsget ops/setup-key-login <IP> <端口> <密码>`，成功后自动追加进清单。
+新机器纳管：`opsget ops/setup-key-login <IP> <端口>（密码会提示输入）`，成功后自动追加进清单。
 
 ## 三个榜
 

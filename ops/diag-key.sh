@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/diag-key.sh — 诊断指定主机的 SSH 密钥登录失败原因
-# VERSION: 1.0.1
-# 1.0.1: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.0.2
+# 1.0.2: 提示改为省略密码参数的 setup-key-login 用法，执行逻辑未变。
 
 set -o pipefail
 
@@ -17,7 +17,7 @@ diag-key.sh — 诊断密钥登录失败的原因
 检查项: 家目录与 .ssh 权限、authorized_keys 内容、sshd 生效配置、
         磁盘是否写满、SELinux、以及客户端侧的完整认证过程。
 
-只读不改。要自动修复: opsget ops/setup-key-login <IP> <端口> <密码>
+只读不改。要自动修复: opsget ops/setup-key-login <IP> <端口>（密码会提示输入）
 USAGE
 }
 

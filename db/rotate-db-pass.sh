@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # db/rotate-db-pass.sh — 轮换数据库密码并核对所有 host 记录
-# VERSION: 2.0.1
-# 2.0.1: 整理注释与帮助输出，并补充目录文档。
+# VERSION: 2.0.2
+# 2.0.2: ALTER USER 语句改经 stdin 交给 mysql，新密码不再出现在进程命令行。
 # 用法: rotate-db-pass.sh check|rotate <用户名> [下游sqlite] [容器名]
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -59,7 +59,8 @@ rotate)
   section "改 MySQL（所有 host 记录）"
   myq "SELECT host FROM mysql.user WHERE user='$USER'" | while read -r h; do
     [ -z "$h" ] && continue
-    my -e "ALTER USER '$USER'@'$h' IDENTIFIED BY '$NEWPASS'" \
+    # SQL 走 stdin 而不是 -e：-e 的参数（含新密码）同机任何用户都能从 /proc 读到
+    printf "ALTER USER '%s'@'%s' IDENTIFIED BY '%s';\n" "$USER" "$h" "$NEWPASS" | my \
       && ok "$USER@'$h'" || warn "$USER@'$h' 失败"
   done
   my -e "FLUSH PRIVILEGES"

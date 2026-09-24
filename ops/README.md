@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | `check-llm-security.sh` | 1.0.2 | 只读盘点 LiteLLM 与 new-api 的访问控制 |
 | `compare-backup-content.sh` | 1.0.4 | 比对两个加密备份包的内容清单 |
-| `diag-key.sh` | 1.0.1 | 诊断指定主机的 SSH 密钥登录失败原因 |
+| `diag-key.sh` | 1.0.2 | 诊断指定主机的 SSH 密钥登录失败原因 |
 | `komari-metrics-check.sh` | 2.0.1 | 检查 Komari 指标库的保留期与增长速度 |
 | `mail-doctor.sh` | 1.0.2 | 诊断告警邮件的配置与发送链路 |
 | `panel-cron-inspect.sh` | 2.0.3 | 查看面板计划任务的真实命令与运行状态 |
@@ -26,11 +26,11 @@
 | `bind-localhost.sh` | 2.0.1 | 将容器端口映射从公网绑定改为本机绑定 |
 | `containerize-and-pin.sh` | 1.1.1 | 把服务改为 compose 管理并锁定镜像 digest |
 | `decommission-archive.sh` | 2.0.1 | 在机器退役前归档最终状态与数据 |
-| `deploy-litellm.sh` | 1.2.1 | 部署 LiteLLM、Postgres 与 Redis 容器 |
+| `deploy-litellm.sh` | 1.2.3 | 部署 LiteLLM、Postgres 与 Redis 容器 |
 | `panel-backup-upload.sh` | 1.0.3 | 加密并上传面板生成的整机备份包 |
-| `push-keys.sh` | 1.0.1 | 按主机清单批量下发 SSH 公钥 |
+| `push-keys.sh` | 1.0.2 | 按主机清单批量下发 SSH 公钥 |
 | `restore-cron.sh` | 2.0.2 | 从快照恢复仓库管理的 cron 任务 |
-| `setup-key-login.sh` | 1.0.1 | 配置新机器的 SSH 密钥登录并验证 |
+| `setup-key-login.sh` | 1.0.2 | 配置新机器的 SSH 密钥登录并验证 |
 | `sync-llm-allowlist.sh` | 2.0.3 | 同步 LLM 站点白名单与 fail2ban 规则 |
 | `upgrade-vaultwarden.sh` | 1.2.1 | 检查并升级 Vaultwarden，锁定镜像 digest |
 
@@ -43,7 +43,7 @@
 | `fix-newapi-quota-data.sh` | 1.0.1 | 按已修正的日志重算 new-api 配额统计 |
 | `newapi-drill.sh` | 1.0.2 | 在备用机演练 new-api 备份的恢复与清理 |
 | `newapi-linkcheck.sh` | 1.0.1 | 检查 new-api 隧道和公网访问全链路 |
-| `newapi-log-prune.sh` | 1.0.2 | 清理超过保留期的 new-api 消费日志 |
+| `newapi-log-prune.sh` | 1.0.3 | 清理超过保留期的 new-api 消费日志 |
 
 ## 清理
 

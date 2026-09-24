@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/push-keys.sh — 按主机清单批量下发 SSH 公钥
-# VERSION: 1.0.1
-# 1.0.1: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.0.2
+# 1.0.2: 提示改为省略密码参数的 setup-key-login 用法，执行逻辑未变。
 
 set -o pipefail
 
@@ -19,7 +19,7 @@ push-keys.sh — 批量下发 SSH 公钥
 下发完成后请销毁: shred -u <清单文件>
 
 已免密的机器自动跳过，可重复运行。
-单台新机器建议改用: opsget ops/setup-key-login <IP> <端口> <密码>
+单台新机器建议改用: opsget ops/setup-key-login <IP> <端口>（密码会提示输入）
 USAGE
 }
 
@@ -97,7 +97,7 @@ log "处理 $n / 清单 $total —— 新下发 $ok，已免密 $skip，缺密�
   log ""
   log "未成功:$fail"
   log "  多半是服务端 PubkeyAuthentication no —— 逐台处理并自动修复:"
-  log "    opsget ops/setup-key-login <IP> <端口> <密码>"
+  log "    opsget ops/setup-key-login <IP> <端口>（密码会提示输入）"
   log "  或诊断: opsget ops/diag-key <ssh目标[:端口]> <密码>"
 }
 log ""

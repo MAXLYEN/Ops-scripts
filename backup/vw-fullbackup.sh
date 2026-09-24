@@ -1,7 +1,7 @@
 #!/bin/bash
 # backup/vw-fullbackup.sh — 备份 Vaultwarden、Komari、SubConverter 与系统配置
-# VERSION: 2.3.3
-# 2.3.3: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 2.3.4
+# 2.3.4: 数据库密码改经临时 option 文件传给 mysqldump/mysql，不再出现在进程命令行。
 # ENV-REQUIRED: VW_BACKUP_DIR BACKUP_PASS_FILE|VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
 # 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
 
@@ -114,8 +114,15 @@ if [ -n "$DBURL" ]; then
     DBHOST="$(echo "$DBURL" | sed -E 's#^mysql://[^@]+@([^:/]+).*#\1#')"
     DBNAME="$(echo "$DBURL" | sed -E 's#.*/([^/?]+)$#\1#')"
     [ "$DBHOST" = "host.docker.internal" ] && DBHOST="127.0.0.1"
+    # 密码写进临时 option 文件（mktemp 建出即 600），不用 -p —— 命令行参数
+    # 同机任何用户都能从 /proc/*/cmdline 读到。--defaults-extra-file 必须排第一个。
+    # 值加双引号，密码里的 # 才不会被当成注释截断；\ 和 " 按 option 文件规则转义。
+    DBCNF="$(mktemp)" || die "mktemp 失败"
+    trap 'rm -rf "$STAGE"; rm -f "$DBCNF"' EXIT
+    esc=${DBPASS//\\/\\\\}; esc=${esc//\"/\\\"}
+    printf '[client]\npassword="%s"\n' "$esc" > "$DBCNF"
     log "导出数据库 ${DBNAME}@${DBHOST} ..."
-    if "$MYSQLDUMP_BIN" -h"$DBHOST" -u"$DBUSER" -p"$DBPASS" \
+    if "$MYSQLDUMP_BIN" --defaults-extra-file="$DBCNF" -h"$DBHOST" -u"$DBUSER" \
          --no-tablespaces --single-transaction --routines \
          --default-character-set=utf8mb4 "$DBNAME" 2>>"$LOG_FILE" \
          | gzip > "$STAGE/db/${DBNAME}.sql.gz"; then
@@ -123,7 +130,7 @@ if [ -n "$DBURL" ]; then
         [ -s "$STAGE/db/${DBNAME}.sql.gz" ] || die "数据库导出为空文件"
         log "  ✓ ${DBNAME} dump 完成 (${SZ})"
         # 记录账号授权（还原时要照着重建用户，host 段错了容器就连不上）
-        "$MYSQL_BIN" -h"$DBHOST" -u"$DBUSER" -p"$DBPASS" -N -B \
+        "$MYSQL_BIN" --defaults-extra-file="$DBCNF" -h"$DBHOST" -u"$DBUSER" -N -B \
             -e "SELECT CURRENT_USER(); SHOW GRANTS;" > "$STAGE/db/${DBNAME}-grants.txt" 2>/dev/null \
             || warn "无法记录 ${DBNAME} 的授权信息"
     else

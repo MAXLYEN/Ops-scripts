@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/deploy-litellm.sh — 部署 LiteLLM、Postgres 与 Redis 容器
-# VERSION: 1.2.2
-# 1.2.2: 修正 mask() 对 8 位及以下凭据的输出，长度不再显示为 0。
+# VERSION: 1.2.3
+# 1.2.3: 验收时 master key 改经 ssh 的 stdin 传给远端 curl，不再出现在两端的进程命令行。
 # ENV-REQUIRED: LITELLM_HOST LITELLM_WORKDIR LITELLM_PORT NEWAPI_PUBLIC_URL
 # 模型加入后须保留 LITELLM_SALT_KEY；丢失将无法解密已有凭据。
 
@@ -205,7 +205,10 @@ echo "===== 结果 ====="
 rsh "cd ${WORKDIR} && docker compose ps --format '  {{.Name}}  {{.Image}}  {{.Status}}'"
 if [ "$OK" = 1 ]; then
   log "LiteLLM 已就绪（/health/liveliness 返回 200）"
-  C=$(rshn "curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'Authorization: Bearer ${MASTER_KEY}' http://127.0.0.1:${LITELLM_PORT}/v1/models" 2>/dev/null)
+  # 用 rsh 而不是 rshn：key 经 ssh 的 stdin 交给远端 curl（-H @-），
+  # 写进命令串会同时出现在本机 ssh 和远端 curl 的命令行里
+  C=$(rsh "curl -s -o /dev/null -w '%{http_code}' -m 10 -H @- http://127.0.0.1:${LITELLM_PORT}/v1/models" \
+        <<<"Authorization: Bearer ${MASTER_KEY}" 2>/dev/null)
   echo "  带 master key 列模型：HTTP ${C:-无响应}（200 且列表为空 = 正常，模型还没加）"
 else
   warn "90 秒内未就绪，查日志："
