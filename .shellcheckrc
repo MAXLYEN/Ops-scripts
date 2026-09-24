@@ -1,0 +1,5 @@
+# 仓库级 shellcheck 配置（CI 与本地都会读取）
+
+# SC1090：source 的是运行时才存在的 env.conf、状态文件或装好的 ops-common.sh，
+# 静态分析跟不进去，属于误报。
+disable=SC1090

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/compare-backup-content.sh — 比对两个加密备份包的内容清单
-# VERSION: 1.0.4
-# 1.0.4: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.0.5
+# 1.0.5: 修正 shellcheck 警告，执行逻辑未变。
 # ENV-REQUIRED: BACKUP_PASS_FILE|VW_PASS_FILE
 
 usage() {
@@ -50,7 +50,7 @@ fi
 TD=$(mktemp -d); trap 'rm -rf "$TD"' EXIT
 
 listing() {  # $1=包路径 $2=输出文件
-  local d="$TD/$(basename "$1" .7z)"
+  local d; d="$TD/$(basename "$1" .7z)"
   mkdir -p "$d"
   # </dev/null 必需：-mhe=on 的包密码不对会交互式等输入
   7z x -p"$PASS" -o"$d" "$1" >/dev/null 2>&1 </dev/null || { echo "解包失败: $1" >&2; return 1; }

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.1.3
-# 1.1.3: 新增 ops_base()，按 opsget 的固定规则给出云端地址。
+# VERSION: 1.1.4
+# 1.1.4: sha_write 改用 glob：文件名含空格不再出错，跳过子目录，空目录不再卡在 stdin。
 
 set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
-OPS_COMMON_VERSION="1.1.3"
+# shellcheck disable=SC2034  # 供调用方查询公共库版本
+OPS_COMMON_VERSION="1.1.4"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
@@ -91,7 +92,7 @@ backup_file() {
   local f=$1 dir=${2:-/root/ops-backups}
   [ -e "$f" ] || return 0
   mkdir -p "$dir"
-  local b="$dir/$(basename "$f").$(date -u +%Y%m%d%H%M%S)"
+  local b; b="$dir/$(basename "$f").$(date -u +%Y%m%d%H%M%S)"
   cp -a "$f" "$b" && printf '%s\n' "$b"
 }
 
@@ -101,7 +102,12 @@ backup_file() {
 # 下面两个函数绕开这个坑。
 sha_write() {
   local dir=${1:-.}
-  ( cd "$dir" && sha256sum $(ls -1 | grep -v '^SHA256SUMS$') > SHA256SUMS )
+  ( cd "$dir" || exit 1
+    local f; local -a files=()
+    for f in *; do [ -f "$f" ] && [ "$f" != SHA256SUMS ] && files+=("$f"); done
+    # 一个文件都没有时 sha256sum 会转去读 stdin 卡住
+    [ ${#files[@]} -gt 0 ] || { : > SHA256SUMS; exit 0; }
+    sha256sum -- "${files[@]}" > SHA256SUMS )
 }
 sha_check() {
   local dir=${1:-.}
@@ -188,6 +194,7 @@ scan_vhost_nondomains() {
 #
 # 为什么两个方向都要报：多出来的废域名只是噪音，漏掉的才致命 ——
 # 漏掉的站点压根不进循环，输出还是全绿，看起来像"检查过了"。
+# shellcheck disable=SC2034  # OPS_DOMAINS_MODE 是输出变量，由 ssl-audit、08-post-start-check 读取
 resolve_domains() {
   local scanned skipped cfg stale fresh
   scanned=$(scan_vhost_domains)

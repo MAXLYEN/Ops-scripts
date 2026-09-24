@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/deploy-litellm.sh — 部署 LiteLLM、Postgres 与 Redis 容器
-# VERSION: 1.2.3
-# 1.2.3: 验收时 master key 改经 ssh 的 stdin 传给远端 curl，不再出现在两端的进程命令行。
+# VERSION: 1.2.4
+# 1.2.4: 未使用的循环计数改为 _，执行逻辑未变。
 # ENV-REQUIRED: LITELLM_HOST LITELLM_WORKDIR LITELLM_PORT NEWAPI_PUBLIC_URL
 # 模型加入后须保留 LITELLM_SALT_KEY；丢失将无法解密已有凭据。
 
@@ -194,7 +194,7 @@ rsh "cd ${WORKDIR} && docker compose pull && docker compose up -d" || die "启�
 
 log "等待 LiteLLM 就绪（最多 90 秒）"
 OK=0
-for i in $(seq 1 18); do
+for _ in $(seq 1 18); do
   C=$(rshn "curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:${LITELLM_PORT}/health/liveliness" 2>/dev/null)
   if [ "$C" = "200" ]; then OK=1; break; fi
   sleep 5

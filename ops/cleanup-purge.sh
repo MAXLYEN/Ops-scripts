@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/cleanup-purge.sh — 按安装台账移除 ops-scripts 及其产物
-# VERSION: 1.0.2
-# 1.0.2: 云端地址改用 ops_base()，按本机固定的 ref 取清单并给出重装命令。
+# VERSION: 1.0.3
+# 1.0.3: 待删清单直接传 glob，不再用 ls 分词。
 # 默认预演，--apply 才执行移除并要求确认。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -55,10 +55,11 @@ add /usr/local/bin/opsget /usr/local/lib/ops-common.sh
 add /var/lib/ops-scripts
 
 section "2. 脚本的旧版备份"
-add $(ls /usr/local/bin/*.sh.bak.* 2>/dev/null)
+# glob 没匹配时保持字面值，add() 的 [ -e ] 会跳过它
+add /usr/local/bin/*.sh.bak.*
 
 section "3. 运行产物"
-add $(ls -d /root/inventory_*.txt /root/verify_*.txt /root/fwstate_* /root/crontab.bak.* 2>/dev/null)
+add /root/inventory_*.txt /root/verify_*.txt /root/fwstate_* /root/crontab.bak.*
 add "${RESTORE_STAGE:-/root/restore_stage}" "${RESTORE_CMD_DIR:-/root/restore_cmds}" /root/ops-backups
 [ -n "${IMAGE_EXPORT_DIR:-}" ] && add "$IMAGE_EXPORT_DIR"
 [ -n "${SNAPSHOT_ROOT:-}" ] && add "$SNAPSHOT_ROOT/images"

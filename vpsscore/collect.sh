@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsscore/collect.sh — 从多台机器收集探针 JSON 并触发评分
-# VERSION: 1.2.3
-# 1.2.3: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.2.4
+# 1.2.4: ssh 调用收进 rssh()；提示写出实际路径。
 
 set -o pipefail
 
@@ -115,7 +115,7 @@ elif [ -r "$HOME/.vps-hosts.txt" ]; then
   HOSTS=$(hosts_from_file "$HOME/.vps-hosts.txt")
   SRC="$HOME/.vps-hosts.txt"
 else
-  HOSTS=$(hosts_from_ssh_config); SRC="~/.ssh/config"
+  HOSTS=$(hosts_from_ssh_config); SRC="$HOME/.ssh/config"
 fi
 HOSTS=$(printf '%s\n' $HOSTS | awk 'NF && !seen[$0]++')
 
@@ -158,6 +158,12 @@ fi
 
 mkdir -p "$OUTDIR" || die "建不了目录: $OUTDIR"
 SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+# SSH_OPTS 与 ssh_args 的输出都是要按空格拆开的参数串（选项、端口、主机别名都不含空格）
+rssh() {
+  local h=$1; shift
+  # shellcheck disable=SC2046,SC2086
+  ssh $SSH_OPTS $(ssh_args "$h") "$@"
+}
 FAILED=""
 
 # ── 可选：先在每台上重新采集 ────────────────────────────────
@@ -210,14 +216,15 @@ if [ "$DO_PROBE" -eq 1 ] && [ -n "$HOSTS" ]; then
   for h in $HOSTS; do
     (
       out="$PLOG/$(printf '%s' "$h" | tr -c 'A-Za-z0-9._-' '_')"
+      # shellcheck disable=SC2034  # 在下面单引号的 EXIT trap 里使用，触发时才展开
       t_start=$(date +%s)
       # 完成信号写文件而不是靠变量：子 shell 里的赋值传不回父进程
       trap 'printf "%s %s\n" "$h" "$(( $(date +%s) - t_start ))" >> "$PLOG/.done"' EXIT
       # 探针要写 /var/lib/vpsscore、读 /proc/stat，普通用户跑不了。
       # 有免密 sudo 就用，没有就如实报错，不要静默产出半份数据。
       pfx=''
-      if ! ssh $SSH_OPTS $(ssh_args "$h") '[ "$(id -u)" -eq 0 ]' </dev/null 2>/dev/null; then
-        if ssh $SSH_OPTS $(ssh_args "$h") 'sudo -n true' </dev/null 2>/dev/null; then
+      if ! rssh "$h" '[ "$(id -u)" -eq 0 ]' </dev/null 2>/dev/null; then
+        if rssh "$h" 'sudo -n true' </dev/null 2>/dev/null; then
           pfx='sudo -n '
         else
           echo "不是 root 且无免密 sudo —— 探针需要 root 权限" > "$out"
@@ -226,10 +233,10 @@ if [ "$DO_PROBE" -eq 1 ] && [ -n "$HOSTS" ]; then
       fi
       # 注意 </dev/null：不加的话这条会抢走 stdin，
       # 把下面本该喂给 probe.sh 的脚本内容吃掉
-      if ssh $SSH_OPTS $(ssh_args "$h") 'command -v opsget >/dev/null 2>&1' </dev/null 2>/dev/null; then
-        ssh $SSH_OPTS $(ssh_args "$h") "${pfx}opsget vpsscore/probe $PROBE_ARGS" </dev/null > "$out" 2>&1
+      if rssh "$h" 'command -v opsget >/dev/null 2>&1' </dev/null 2>/dev/null; then
+        rssh "$h" "${pfx}opsget vpsscore/probe $PROBE_ARGS" </dev/null > "$out" 2>&1
       elif [ -r /usr/local/bin/probe.sh ]; then
-        ssh $SSH_OPTS $(ssh_args "$h") "cat > /tmp/.probe.sh && ${pfx}bash /tmp/.probe.sh $PROBE_ARGS; rc=\$?; rm -f /tmp/.probe.sh; exit \$rc" \
+        rssh "$h" "cat > /tmp/.probe.sh && ${pfx}bash /tmp/.probe.sh $PROBE_ARGS; rc=\$?; rm -f /tmp/.probe.sh; exit \$rc" \
           < /usr/local/bin/probe.sh > "$out" 2>&1
       else
         echo "对方没有 opsget，本机也没有 /usr/local/bin/probe.sh 可推送" > "$out"

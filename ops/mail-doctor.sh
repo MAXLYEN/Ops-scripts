@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/mail-doctor.sh — 诊断告警邮件的配置与发送链路
-# VERSION: 1.0.2
-# 1.0.2: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.0.3
+# 1.0.3: msmtp 的 TLS 参数改用数组传递。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root
@@ -60,8 +60,8 @@ fi
 
 section "5. msmtp 自检"
 # --serverinfo 会真的连上去握手，能一次性暴露证书、端口、TLS 模式的问题
-msmtp --serverinfo --host="$HOST" --port="$PORT" \
-      $([ "$PORT" = 465 ] && echo --tls --tls-starttls=off || echo --tls) 2>&1 \
+TLS_OPTS=(--tls); [ "$PORT" = 465 ] && TLS_OPTS+=(--tls-starttls=off)
+msmtp --serverinfo --host="$HOST" --port="$PORT" "${TLS_OPTS[@]}" 2>&1 \
   | head -12 | sed 's/^/  /'
 
 section "6. 发信历史"

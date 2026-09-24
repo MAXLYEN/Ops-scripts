@@ -39,12 +39,12 @@ jobs:
           done < /tmp/scripts
           exit $rc
 
-      # 门槛先设在 error：现有 warning 多为未使用变量等无害项，
-      # 清理完再收紧到 warning，否则 CI 永远是红的，很快就没人看了。
+      # 门槛为 warning。仓库根目录的 .shellcheckrc 关闭了 SC1090（source 运行时文件）；
+      # 其余确属有意的写法在行内用 disable 注释并写明理由，不要整条关掉。
       - name: shellcheck
         run: |
           shellcheck --version | head -2
-          xargs shellcheck -S error < /tmp/scripts
+          xargs shellcheck -S warning < /tmp/scripts
 
       - name: 每个脚本都有 VERSION 头
         run: |

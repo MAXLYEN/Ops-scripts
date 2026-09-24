@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/push-keys.sh — 按主机清单批量下发 SSH 公钥
-# VERSION: 1.0.2
-# 1.0.2: 提示改为省略密码参数的 setup-key-login 用法，执行逻辑未变。
+# VERSION: 1.0.3
+# 1.0.3: 删除未使用的 PUBKEY，执行逻辑未变。
 
 set -o pipefail
 
@@ -38,7 +38,6 @@ command -v sshpass >/dev/null 2>&1 || die "缺 sshpass: apt-get install -y sshpa
 perm=$(stat -c %a "$LIST" 2>/dev/null)
 case "$perm" in 600|400) ;; *) die "$LIST 权限是 $perm，含明文密码必须 600: chmod 600 $LIST" ;; esac
 
-PUBKEY=$(cat "$KEY")
 total=$(awk 'NF && $1 !~ /^#/ {n++} END{print n+0}' "$LIST")
 log "清单共 $total 台"; log ""
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/panel-data-locate.sh — 定位面板数据在磁盘上的存储位置
-# VERSION: 2.0.1
-# 2.0.1: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 2.0.2
+# 2.0.2: 删除结果未被使用的逐表 COUNT(*) 查询。
 
 set -o pipefail
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -28,7 +28,6 @@ echo
 echo "===== 3. 哪个库里能查到这个域名 ====="
 find "$PANEL" -maxdepth 4 -name '*.db' 2>/dev/null | while read -r f; do
   for t in $(sqlite3 "$f" ".tables" 2>/dev/null | tr -s ' ' '\n'); do
-    n=$(sqlite3 "$f" "SELECT COUNT(*) FROM \"$t\" WHERE CAST(\"$t\".rowid AS TEXT) IS NOT NULL" 2>/dev/null)
     hit=$(sqlite3 "$f" "SELECT * FROM \"$t\"" 2>/dev/null | grep -c "$PROBE" || true)
     [ "${hit:-0}" -gt 0 ] && echo "  $f | 表 $t | 命中 $hit 行"
   done

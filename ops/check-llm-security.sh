@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/check-llm-security.sh — 只读盘点 LiteLLM 与 new-api 的访问控制
-# VERSION: 1.0.2
-# 1.0.2: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.0.3
+# 1.0.3: vhost 列表改用 glob，不再 ls | xargs。
 # ENV-REQUIRED: LITELLM_SITE NEWAPI_SITE ALLOW_EXTRA_IPS
 
 set -o pipefail
@@ -24,7 +24,7 @@ else
 fi
 
 hr "1. 宝塔 nginx 站点与 extension 目录"
-ls -1 "$VHOST"/*.conf 2>/dev/null | xargs -r -n1 basename | sed 's/^/  vhost: /'
+for f in "$VHOST"/*.conf; do [ -e "$f" ] || continue; echo "  vhost: $(basename "$f")"; done
 ls -1 "$EXT" 2>/dev/null | sed 's/^/  ext : /' || echo "  （无 extension 目录）"
 
 hr "2. extension 下的配置文件"

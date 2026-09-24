@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/panel-backup-upload.sh — 加密并上传面板生成的整机备份包
-# VERSION: 1.0.3
-# 1.0.3: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.0.4
+# 1.0.4: 删除未使用的 FAILED（告警已由 finish 统计），执行逻辑未变。
 # ENV-REQUIRED: RCLONE_REMOTES
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -82,7 +82,6 @@ else
 fi
 
 section "上传"
-FAILED=0
 for r in $RCLONE_REMOTES; do
   log "→ $r:/$DEST"
   # 退出码不在这里判 —— 下面的 rclone check 做单向校验才是判据
@@ -92,7 +91,7 @@ for r in $RCLONE_REMOTES; do
   if rclone check "$UPDIR" "$r:/$DEST" --include "$NAME" --one-way >/dev/null 2>&1; then
     ok "$r 校验通过"
   else
-    warn "$r 校验未通过"; FAILED=1
+    warn "$r 校验未通过"
   fi
 done
 

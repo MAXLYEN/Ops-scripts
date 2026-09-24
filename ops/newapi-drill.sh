@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/newapi-drill.sh — 在备用机演练 new-api 备份的恢复与清理
-# VERSION: 1.0.2
-# 1.0.2: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.0.3
+# 1.0.3: 可选的 data-rest 改用位置参数传给 tar；提示写出实际路径。
 # ENV-REQUIRED: NEWAPI_HOST BACKUP_PASS_FILE NEWAPI_CLOUD_DIR
 # 在备用机运行；禁止指向生产落地机。
 # 用法：
@@ -49,7 +49,7 @@ guard_target() {
 guard_target
 
 TPORT="$(awk -F: -v h="$TARGET" '$0 ~ h {print $NF}' "${HOME}/.vps-hosts.txt" 2>/dev/null | head -1)"
-[ -z "$TPORT" ] && die "~/.vps-hosts.txt 里找不到 $TARGET 的 SSH 端口"
+[ -z "$TPORT" ] && die "${HOME}/.vps-hosts.txt 里找不到 $TARGET 的 SSH 端口"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30)
 rsh() { ssh "${SSH_OPTS[@]}" -p "$TPORT" "root@$TARGET" "$@"; }
 rsh_n() { ssh -n "${SSH_OPTS[@]}" -p "$TPORT" "root@$TARGET" "$@"; }
@@ -146,7 +146,9 @@ REMOTE_DOCKER
   rsh_n "rm -rf ${DRILL_DATA} && mkdir -p ${DRILL_DATA}" || die "目标机建目录失败"
 
   # 只传 db 与 data-rest；-wal/-shm 包里本就没有，放回去反而会造成不一致
-  ( cd "$WORK/x" && tar czf - one-api.db $( [ -d data-rest ] && echo data-rest ) ) \
+  ( cd "$WORK/x" || exit 1
+    set -- one-api.db; [ -d data-rest ] && set -- "$@" data-rest
+    tar czf - "$@" ) \
     | rsh "tar xzf - -C ${DRILL_DATA} --strip-components=0" \
     || die "数据传输失败"
   rsh_n "[ -s ${DRILL_DATA}/one-api.db ]" || die "目标机上快照为空"

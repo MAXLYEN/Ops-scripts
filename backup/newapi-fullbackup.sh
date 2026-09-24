@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # backup/newapi-fullbackup.sh — 从汇总机拉取 new-api 数据，生成一致性快照并加密上传
-# VERSION: 1.0.2
-# 1.0.2: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.0.3
+# 1.0.3: 未使用的重试计数改为 _，执行逻辑未变。
 # ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_BAK_DIR BACKUP_PASS_FILE MAIL_TO
 # 定时任务调用已安装的本地脚本；SQLite 使用在线备份生成一致性快照。
 
@@ -37,9 +37,9 @@ hb() {
 
 # 三次重试 + webhook 兜底 + 落盘兜底
 send_mail() {
-  local subject="$1" body="$2" i
+  local subject="$1" body="$2"
   if command -v msmtp >/dev/null 2>&1 && [ -n "${MAIL_TO:-}" ]; then
-    for i in 1 2 3; do
+    for _ in 1 2 3; do
       printf 'To: %s\nSubject: %s\n\n%s\n' "$MAIL_TO" "$subject" "$body" \
         | msmtp -t 2>>"$LOG" && return 0
       sleep 20

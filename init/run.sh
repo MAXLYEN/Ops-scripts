@@ -1,7 +1,7 @@
 #!/bin/bash
 # init/run.sh — 列出初始化阶段，并通过 opsget 执行指定阶段
-# VERSION: 2.0.1
-# 2.0.1: 统一注释与目录文档，执行逻辑未变。
+# VERSION: 2.0.2
+# 2.0.2: 删除未使用的变量 N，执行逻辑未变。
 # 用法: opsget init/run [00|01|02|03|04]
 # 执行阶段 03 前先准备第二个 SSH 窗口和带外控制台。
 
@@ -29,7 +29,6 @@ if [ -z "${1:-}" ]; then
   echo "推荐顺序: 00 →(需要则重启)→ 01 → 02 → 03 →(重启)→ 04"
   echo
   echo "已安装的阶段脚本:"
-  N=0
   printf '%s\n' "$STAGES" | while IFS=: read -r n s _ _; do
     f="/usr/local/bin/${n}-${s}.sh"
     if [ -e "$f" ]; then

@@ -1,7 +1,7 @@
 #!/bin/bash
 # init/03-ssh-firewall.sh — 加固 SSH、启用 ufw 并配置 fail2ban
-# VERSION: 1.3.1
-# 1.3.1: 统一注释与目录文档，执行逻辑未变。
+# VERSION: 1.3.2
+# 1.3.2: 未使用的循环计数改为 _，执行逻辑未变。
 # 用法: 以 root 执行；先打开第二个 SSH 窗口并确认带外控制台可用。
 # 脚本会设置 5 分钟自动回滚，验证新连接后需明确取消回滚。
 
@@ -247,7 +247,7 @@ else
 fi
 systemctl enable fail2ban >/dev/null 2>&1 || true
 systemctl restart fail2ban || echo "  ⚠️  fail2ban 启动失败: journalctl -u fail2ban -n 20"
-for i in $(seq 1 20); do
+for _ in $(seq 1 20); do
   fail2ban-client status sshd >/dev/null 2>&1 && break
   sleep 1
 done

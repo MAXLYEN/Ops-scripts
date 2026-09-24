@@ -2,6 +2,23 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-09-24：清理 shellcheck 警告
+
+CI 的 shellcheck 门槛由 error 收紧到 warning。仓库根目录新增 `.shellcheckrc` 关闭 SC1090（source 的是运行时才存在的文件）。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `cleanup-purge.sh` | 1.0.2 → 1.0.3 | 待删清单直接传 glob，不再 `$(ls ...)` 分词；文件名含空格时不再拆散 |
+| `check-llm-security.sh` | 1.0.2 → 1.0.3 | vhost 列表改用 glob 循环，输出不变 |
+| `mail-doctor.sh` | 1.0.2 → 1.0.3 | msmtp 的 TLS 参数改用数组传递，参数不变 |
+| `newapi-drill.sh` | 1.0.2 → 1.0.3 | 可选的 `data-rest` 改用位置参数传给 tar；找不到端口的提示写出实际路径 |
+| `panel-data-locate.sh` | 2.0.1 → 2.0.2 | 删除结果未被使用的逐表 `COUNT(*)` 查询，少跑一半 sqlite 查询 |
+| `compare-backup-content.sh` | 1.0.4 → 1.0.5 | local 声明与赋值拆开，执行逻辑未变 |
+| `deploy-litellm.sh` | 1.2.3 → 1.2.4 | 未使用的循环计数改为 `_`，执行逻辑未变 |
+| `newapi-linkcheck.sh` | 1.0.1 → 1.0.2 | 未使用的重试计数改为 `_`，执行逻辑未变 |
+| `panel-backup-upload.sh` | 1.0.3 → 1.0.4 | 删除未使用的 `FAILED`（告警由 `finish` 统计），执行逻辑未变 |
+| `push-keys.sh` | 1.0.2 → 1.0.3 | 删除未使用的 `PUBKEY`，执行逻辑未变 |
+
 ## 2026-09-24：版本固定
 
 | 文件 | 原版本 → 当前版本 | 变更 |

@@ -1,7 +1,7 @@
 #!/bin/bash
 # backup/vw-fullbackup.sh — 备份 Vaultwarden、Komari、SubConverter 与系统配置
-# VERSION: 2.3.6
-# 2.3.6: dump 校验改看解压内容：无表即中止，缺 Dump completed 结尾标记则告警。
+# VERSION: 2.3.7
+# 2.3.7: 清单里的站点列表改用 glob，不再 ls | xargs。
 # ENV-REQUIRED: VW_BACKUP_DIR BACKUP_PASS_FILE|VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
 # 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
 
@@ -254,7 +254,7 @@ log "生成清单 ..."
     echo "Nginx: $(nginx -v 2>&1)"
     echo
     echo "---- 站点 ----"
-    ls "$BT_VHOST"/*.conf 2>/dev/null | xargs -n1 basename
+    for f in "$BT_VHOST"/*.conf; do [ -e "$f" ] || continue; basename "$f"; done
     echo
     echo "---- 内容校验和 ----"
     (cd "$STAGE" && find . -type f -exec sha256sum {} \; | sort -k2)
