@@ -1,7 +1,7 @@
 #!/bin/bash
 # backup/vw-fullbackup.sh — 备份 Vaultwarden、Komari、SubConverter 与系统配置
-# VERSION: 2.3.5
-# 2.3.5: 修正 2.3.4 的回归：临时 option 文件改用 --defaults-file，不再被 ~/.my.cnf 的密码覆盖。
+# VERSION: 2.3.6
+# 2.3.6: dump 校验改看解压内容：无表即中止，缺 Dump completed 结尾标记则告警。
 # ENV-REQUIRED: VW_BACKUP_DIR BACKUP_PASS_FILE|VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
 # 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
 
@@ -132,8 +132,17 @@ if [ -n "$DBURL" ]; then
          --default-character-set=utf8mb4 "$DBNAME" 2>>"$LOG_FILE" \
          | gzip > "$STAGE/db/${DBNAME}.sql.gz"; then
         SZ=$(du -h "$STAGE/db/${DBNAME}.sql.gz" | cut -f1)
-        [ -s "$STAGE/db/${DBNAME}.sql.gz" ] || die "数据库导出为空文件"
-        log "  ✓ ${DBNAME} dump 完成 (${SZ})"
+        # 不能只看 -s：gzip 压缩空输入也有 20 字节头，文件永远非空。要看解压后的内容。
+        # 都先读完整个流再判断 —— zcat | grep -q 会在命中后提前关管道，zcat 吃
+        # SIGPIPE，pipefail 下整条管道算失败，好的 dump 反被判坏。
+        TABLES=$(zcat "$STAGE/db/${DBNAME}.sql.gz" | grep -c '^CREATE TABLE')
+        [ "${TABLES:-0}" -gt 0 ] || die "数据库导出里没有任何表（${SZ}），不要信任这个 dump"
+        TAIL=$(zcat "$STAGE/db/${DBNAME}.sql.gz" | tail -n 3)
+        case "$TAIL" in
+            *"-- Dump completed"*) ;;
+            *) warn "${DBNAME} dump 末尾没有 'Dump completed' 标记，文件可能被截断" ;;
+        esac
+        log "  ✓ ${DBNAME} dump 完成 (${SZ}，${TABLES} 张表)"
         # 记录账号授权（还原时要照着重建用户，host 段错了容器就连不上）
         "$MYSQL_BIN" --defaults-file="$DBCNF" -h"$DBHOST" -u"$DBUSER" -N -B \
             -e "SELECT CURRENT_USER(); SHOW GRANTS;" > "$STAGE/db/${DBNAME}-grants.txt" 2>/dev/null \
