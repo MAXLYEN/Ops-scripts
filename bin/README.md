@@ -4,7 +4,7 @@
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `opsget` | 1.3.2 | 从仓库拉取、安装和执行运维脚本 |
+| `opsget` | 1.4.0 | 从仓库拉取、安装和执行运维脚本 |
 
 ## 常用命令
 
@@ -15,8 +15,9 @@ opsget -i backup/vw-fullbackup    # 仅安装，不执行
 opsget -e backup/vw-fullbackup    # 查看该脚本需要的配置键
 opsget -c backup/vw-fullbackup    # 补齐该脚本需要的配置键
 opsget -u                         # 更新引导器与公共库
+opsget --pin v2026.09.24          # 固定到验证过的 tag；--pin 查看，--unpin 取消
 ```
 
-脚本头部的 `# ENV-REQUIRED:` 声明用于按需预检；`A|B` 表示两个键任一有值即可。未声明的脚本不要求 `env.conf`。`OPS_REPO` 可指定仓库，`OPS_REF` 可锁定分支或 tag。无人值守的 cron 应调用已安装脚本的本地路径。
+脚本头部的 `# ENV-REQUIRED:` 声明用于按需预检；`A|B` 表示两个键任一有值即可。未声明的脚本不要求 `env.conf`。`OPS_REPO` 可指定仓库。ref 按「环境变量 `OPS_REF` > `/etc/ops-scripts/ref`（`--pin` 写入）> `main`」判定，执行脚本时导出 `OPS_REF`；固定与发版流程见根目录 README 的「固定版本」。无人值守的 cron 应调用已安装脚本的本地路径。
 
 版本记录见 [CHANGELOG.md](CHANGELOG.md)。

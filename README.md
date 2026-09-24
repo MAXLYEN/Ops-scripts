@@ -17,6 +17,9 @@ vi /etc/ops-scripts/env.conf
 opsget -l                          # 列出可用脚本
 opsget migrate/01-inventory        # 拉取并执行
 opsget -i ops/preflight-backup     # 只安装到 /usr/local/bin，不执行
+
+# 4. 生产机固定到验证过的版本（见「固定版本」）
+opsget --pin v2026.09.24 && opsget -u
 ```
 
 路径写成 `migrate/03-pre-migrate` 或 `migrate/03-pre-migrate.sh` 都可以，参数直接跟在后面：`opsget ops/cleanup-tidy --apply`。
@@ -106,6 +109,30 @@ opsget -i <路径>        # 只安装，不执行
 
 安装路径与 cron 里写的路径一致，所以**更新脚本不需要动 crontab**。
 
+## 固定版本
+
+cron 只调用本地脚本，挡住的是「云端改动在无人值守时生效」；但下一次有人手动 `opsget`，`main` 上最新的提交照样会装上来。`main` 上一个坏提交，所有机器下次更新都会中招 —— `vw-fullbackup` 2.3.4 就是这样把生产备份弄坏的。
+
+生产机固定到验证过的 tag：
+
+```bash
+opsget --pin v2026.09.24     # 之后 -i / -u / -l / 执行都只从这个 tag 拉
+opsget -u                    # 引导器和 common.sh 也换成这一版
+opsget --pin                 # 查看当前 ref 与来源
+opsget --unpin               # 取消固定，回到 main
+```
+
+固定写在 `/etc/ops-scripts/ref`。环境变量 `OPS_REF` 优先于它，用于单次覆盖；`opsget` 执行脚本时会导出 `OPS_REF`，`common.sh` 的 `ops_base()` 按同样顺序判定，所以 `script-inventory` 等脚本比对的是同一个版本。
+
+发版流程：
+
+1. 改动推到 `main`，CI 通过
+2. 挑一台机器单次覆盖装上新版并手动跑一次：`OPS_REF=main opsget -i <路径>`（`common.sh` 会一并换成 `main` 版）
+3. 验证通过后打 tag 并推送：`git tag -a v2026.09.24 -m "<说明>" && git push origin v2026.09.24`，同一天再发用 `v2026.09.24.1`
+4. 其余机器 `opsget --pin <新 tag> && opsget -u`，需要更新的脚本再逐个 `opsget -i`
+
+tag 发布后不要移动，有问题就打新 tag。`--pin` 会拒绝 `main`、拒绝仓库里取不到的 ref，也拒绝 opsget 早于 1.4.0 的 ref —— 固定到那里再 `opsget -u`，会装回一个不读固定文件的旧引导器，固定就悄悄失效了。
+
 ## 改完云端立刻验证
 
 `opsget` 从 1.2.1 起给每次请求加了 cache-buster。原因是 raw.githubusercontent 有约 5 分钟 CDN 缓存，而"改完立刻验证"恰恰是最常见的场景——拿到旧版会让人误判成"改了没效果"，然后去改本来正确的代码。
@@ -116,6 +143,8 @@ opsget -i <路径>        # 只安装，不执行
 curl -fsSL "https://raw.githubusercontent.com/MAXLYEN/ops-scripts/main/bin/opsget?nc=$(date +%s)" \
   -o /tmp/opsget.new && grep -m1 '^# VERSION' /tmp/opsget.new
 ```
+
+**固定了版本的机器拉不到 `main` 上的新提交**，这是设计如此；验证新提交用 `OPS_REF=main` 单次覆盖。
 
 `common.sh` 不用单独安装——每次执行任何脚本时 `sync_lib` 都会同步一次。改了 `common.sh` 就等于所有脚本都拿到了新版，这也意味着**改它要格外小心**。
 

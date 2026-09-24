@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ops/script-inventory.sh — 盘点本机脚本并区分仓库来源与本地文件
-# VERSION: 1.0.1
-# 1.0.1: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.0.2
+# 1.0.2: 云端地址改用 ops_base()，固定了版本的机器按固定的 ref 比对。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env
 
 LEDGER=/var/lib/ops-scripts/installed.list
-BASE="${OPS_REPO:-https://raw.githubusercontent.com/MAXLYEN/ops-scripts}/${OPS_REF:-main}"
+BASE=$(ops_base)   # 与 opsget 同一 ref：OPS_REF > /etc/ops-scripts/ref > main
 SCAN_DIRS="${SCRIPT_SCAN_DIRS:-/usr/local/bin /usr/local/sbin /root/deploy /root}"
 
 MAN=$(curl -fsSL --max-time 20 "$BASE/MANIFEST" 2>/dev/null)

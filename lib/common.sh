@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.1.2
-# 1.1.2: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.1.3
+# 1.1.3: 新增 ops_base()，按 opsget 的固定规则给出云端地址。
 
 set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
-OPS_COMMON_VERSION="1.1.2"
+OPS_COMMON_VERSION="1.1.3"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
@@ -214,6 +214,16 @@ resolve_domains() {
   [ -n "${stale// /}" ] && warn "DOMAINS 里有但 vhost 里没有: ${stale% } —— 站点已删就从配置移除"
   [ -n "${fresh// /}" ] && warn "vhost 里有但 DOMAINS 没列: ${fresh% } —— 这些站点不会被检查"
   return 0
+}
+
+# ── 云端地址 ────────────────────────────────────────────────
+# 与 opsget 同一套 ref 判定：环境变量 OPS_REF > /etc/ops-scripts/ref > main。
+# 脚本直接从 /usr/local/bin 运行时没有 opsget 导出的 OPS_REF，也要读固定文件，
+# 否则固定了版本的机器会拿本机脚本和 main 比，全部误报「与云端不一致」。
+ops_base() {
+  local ref=${OPS_REF:-}
+  [ -n "$ref" ] || ref=$(head -n1 /etc/ops-scripts/ref 2>/dev/null)
+  printf '%s/%s' "${OPS_REPO:-https://raw.githubusercontent.com/MAXLYEN/ops-scripts}" "${ref:-main}"
 }
 
 # ── 其它 ────────────────────────────────────────────────────

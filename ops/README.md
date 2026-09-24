@@ -15,7 +15,7 @@
 | `panel-data-locate.sh` | 2.0.1 | 定位面板数据在磁盘上的存储位置 |
 | `preflight-backup.sh` | 2.0.2 | 检查备份脚本运行前的依赖与配置 |
 | `save-fw.sh` | 2.0.1 | 在修改防火墙前保存当前配置快照 |
-| `script-inventory.sh` | 1.0.1 | 盘点本机脚本并区分仓库来源与本地文件 |
+| `script-inventory.sh` | 1.0.2 | 盘点本机脚本并区分仓库来源与本地文件 |
 | `ssl-audit.sh` | 2.1.2 | 核对证书文件、站点引用与续期记录 |
 | `verify-backup-pass.sh` | 2.0.2 | 验证本地密码能否解开云端备份包 |
 
@@ -49,7 +49,7 @@
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `cleanup-purge.sh` | 1.0.1 | 按安装台账移除 ops-scripts 及其产物 |
+| `cleanup-purge.sh` | 1.0.2 | 按安装台账移除 ops-scripts 及其产物 |
 | `cleanup-tidy.sh` | 1.1.1 | 清理历史输出、旧版备份与中间产物 |
 
 ## 操作约定

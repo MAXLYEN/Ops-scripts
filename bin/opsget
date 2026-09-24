@@ -1,13 +1,34 @@
 #!/usr/bin/env bash
 # bin/opsget — 从仓库拉取、安装和执行运维脚本
-# VERSION: 1.3.2
-# 1.3.2: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.4.0
+# 1.4.0: 新增 --pin / --unpin，把本机固定到验证过的 tag 或提交；执行脚本时导出 OPS_REF。
 # 配置依赖以目标脚本的 ENV-REQUIRED 声明为准。
 
 set -o pipefail
 
+die() { printf '[致命] %s\n' "$*" >&2; exit 1; }
+log() { printf '%s\n' "$*"; }
+
+# ref 只进 URL 路径，限定字符集，也挡掉 .. 这类路径穿越
+valid_ref() {
+  case "$1" in ''|*[!A-Za-z0-9._/-]*|*..*) return 1 ;; esac
+}
+
 OPS_REPO="${OPS_REPO:-https://raw.githubusercontent.com/MAXLYEN/ops-scripts}"
-OPS_REF="${OPS_REF:-main}"
+# ref 判定：环境变量 OPS_REF（单次覆盖）> REF_FILE（opsget --pin 写入）> main。
+# 生产机固定到验证过的 tag / 提交后，main 上的新提交不会在下次 opsget 时
+# 自动装上 —— 否则 main 上一个坏提交，所有机器下次更新都会中招。
+# common.sh 的 ops_base() 按同样顺序判定，改这里要同步改那里。
+REF_FILE=/etc/ops-scripts/ref
+if [ -n "${OPS_REF:-}" ]; then
+  REF_SRC="环境变量 OPS_REF"
+elif [ -s "$REF_FILE" ]; then
+  OPS_REF=$(head -n1 "$REF_FILE"); REF_SRC="固定于 $REF_FILE"
+else
+  OPS_REF=main; REF_SRC="默认，未固定"
+fi
+# --unpin 放行：固定文件被改坏时，它正是修复手段
+valid_ref "$OPS_REF" || [ "${1:-}" = --unpin ] || die "ref 不合法: '$OPS_REF'（来源：$REF_SRC）"
 BASE="$OPS_REPO/$OPS_REF"
 BIN_DIR=/usr/local/bin
 LIB_DST=/usr/local/lib/ops-common.sh
@@ -15,9 +36,6 @@ ENV_DIR=/etc/ops-scripts
 ENV_FILE="$ENV_DIR/env.conf"
 LEDGER_DIR=/var/lib/ops-scripts
 LEDGER="$LEDGER_DIR/installed.list"
-
-die() { printf '[致命] %s\n' "$*" >&2; exit 1; }
-log() { printf '%s\n' "$*"; }
 
 usage() {
   cat <<'USAGE'
@@ -27,6 +45,12 @@ opsget — ops-scripts 引导器
   opsget <路径> [参数...]        拉取、安装并执行
   opsget -i <路径>               只安装，不执行
   opsget -u                      更新自身与 common.sh
+
+版本固定：
+  opsget --pin                   看当前从哪个 ref 拉取、来源是什么
+  opsget --pin <tag|提交>        固定本机，之后只从这个 ref 拉取
+  opsget --unpin                 取消固定，回到 main
+  OPS_REF=main opsget -i <路径>  单次覆盖固定（先在一台机上验证新提交）
 
 配置（env.conf）：
   opsget -c                      按已装脚本的实际需要，补齐 env.conf
@@ -285,6 +309,7 @@ case "${1:-}" in
     exit 0 ;;
 
   -u|--update)
+    log "[ref] $OPS_REF（$REF_SRC）"
     fetch "bin/opsget" "$BIN_DIR/opsget"
     sync_lib
     log "已更新（ref: $OPS_REF）"
@@ -294,12 +319,49 @@ case "${1:-}" in
     shift
     [ -n "${1:-}" ] || die "用法: opsget -i <路径>"
     P=${1%.sh}; NAME=$(basename "$P")
+    log "[ref] $OPS_REF（$REF_SRC）"
     sync_lib
     fetch "$P.sh" "$BIN_DIR/$NAME.sh"
     log "已安装到 $BIN_DIR/$NAME.sh（未执行）"
     # 只提示不拦截：装完先看一眼要什么，等真执行时才强制
     MISS=$(env_missing "$BIN_DIR/$NAME.sh")
     [ -n "$MISS" ] && log "[提示] 执行前需补配置: $(echo $MISS)（opsget -c $P）"
+    exit 0 ;;
+
+  --pin)
+    shift
+    if [ -z "${1:-}" ]; then
+      log "当前 ref: $OPS_REF（$REF_SRC）"
+      exit 0
+    fi
+    NEW=$1
+    valid_ref "$NEW" || die "ref 只能含字母、数字和 . _ / -: $NEW"
+    [ "$NEW" = main ] && die "main 随每次提交变化，固定它等于没固定；取消固定用 opsget --unpin"
+    # 用目标 ref 下的 opsget 做校验：既确认 ref 存在，也确认那一版认得 REF_FILE。
+    # 固定到早于 1.4.0 的提交后再 opsget -u，会装回一个不读固定文件的旧引导器，
+    # 固定从此悄悄失效、又开始跟 main 走 —— 这里先拦住。
+    TMP=$(mktemp) || die "mktemp 失败"
+    curl_retry "$OPS_REPO/$NEW/bin/opsget" "$TMP" && [ -s "$TMP" ] \
+      || { rm -f "$TMP"; die "仓库里取不到 $NEW（tag 或提交写错了？提交要写完整 40 位）"; }
+    grep -q '^REF_FILE=' "$TMP" \
+      || { rm -f "$TMP"; die "$NEW 的 opsget 不支持版本固定（早于 1.4.0），固定后 opsget -u 会让固定失效"; }
+    rm -f "$TMP"
+    mkdir -p "$ENV_DIR"
+    printf '%s\n' "$NEW" > "$REF_FILE" && chmod 644 "$REF_FILE" || die "写入 $REF_FILE 失败"
+    log "[✓] 已固定到 $NEW（$REF_FILE）"
+    log "    再跑 opsget -u，让引导器和 common.sh 也换成这一版"
+    [ "$REF_SRC" = "环境变量 OPS_REF" ] && log "[!] 当前 shell 设了 OPS_REF=$OPS_REF，它会覆盖固定，unset 后才生效"
+    exit 0 ;;
+
+  --unpin)
+    if [ -f "$REF_FILE" ]; then
+      OLD=$(head -n1 "$REF_FILE")
+      rm -f "$REF_FILE" || die "删除 $REF_FILE 失败"
+      log "[✓] 已取消固定（原为 $OLD），之后从 main 拉取"
+      [ "$REF_SRC" = "环境变量 OPS_REF" ] && log "[!] 当前 shell 设了 OPS_REF=$OPS_REF，它仍会覆盖默认的 main"
+    else
+      log "本来就没有固定，当前从 $OPS_REF 拉取（$REF_SRC）"
+    fi
     exit 0 ;;
 
   ""|-h|--help)
@@ -310,6 +372,7 @@ esac
 # ── 拉取并执行 ──────────────────────────────────────────────
 P=${1%.sh}; shift
 NAME=$(basename "$P")
+log "[ref] $OPS_REF（$REF_SRC）"
 sync_lib
 fetch "$P.sh" "$BIN_DIR/$NAME.sh"
 
@@ -323,4 +386,6 @@ if [ -n "$MISS" ]; then
 fi
 
 log "──────── 执行 $NAME ────────"
+# 导出给子脚本：script-inventory 等要拿本机版本和「同一个 ref 的云端」比对
+export OPS_REPO OPS_REF
 exec "$BIN_DIR/$NAME.sh" "$@"

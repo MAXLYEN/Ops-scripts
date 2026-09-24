@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/cleanup-purge.sh — 按安装台账移除 ops-scripts 及其产物
-# VERSION: 1.0.1
-# 1.0.1: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.0.2
+# 1.0.2: 云端地址改用 ops_base()，按本机固定的 ref 取清单并给出重装命令。
 # 默认预演，--apply 才执行移除并要求确认。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -11,6 +11,8 @@ load_env
 APPLY=0; [ "${1:-}" = "--apply" ] && APPLY=1
 LEDGER=/var/lib/ops-scripts/installed.list
 TOTAL=0
+# 开头就算好：/etc/ops-scripts/ref 会随下面的清理一起删掉，结尾的重装提示要用删之前的值
+BASE=$(ops_base)
 
 PROTECTED="$BACKUP_DIRS $CONTAINER_DATA_DIRS $PANEL_ROOT $WWWROOT $PANEL_DB_BACKUP_DIR $MYSQL_DEFAULTS_FILE $BACKUP_PASS_FILES /root/.config/rclone /etc/msmtprc"
 is_protected() {
@@ -40,7 +42,7 @@ else
   echo "  没有台账（opsget 1.1.0 之前安装的），回落到按 MANIFEST 推断文件名"
   # 只删名字能对上 MANIFEST 的，避免误伤同目录下你自己的脚本
   MAN=$(curl -fsSL --max-time 30 \
-        "${OPS_REPO:-https://raw.githubusercontent.com/MAXLYEN/ops-scripts}/${OPS_REF:-main}/MANIFEST" 2>/dev/null)
+        "$BASE/MANIFEST" 2>/dev/null)
   if [ -n "$MAN" ]; then
     echo "$MAN" | grep -oE '^[a-z]+/[a-z0-9-]+' | while read -r p; do
       add "/usr/local/bin/$(basename "$p").sh"
@@ -119,7 +121,7 @@ ok "已移除，磁盘剩余：$(df -h / | tail -1 | awk '{print $4}')"
 cat <<EOF
 
   想重新装回来：
-    curl -fsSL ${OPS_REPO:-https://raw.githubusercontent.com/MAXLYEN/ops-scripts}/${OPS_REF:-main}/bin/opsget \\
+    curl -fsSL $BASE/bin/opsget \\
       -o /usr/local/bin/opsget && chmod +x /usr/local/bin/opsget
     opsget -c   # 重新生成配置
 EOF
