@@ -1,0 +1,79 @@
+# 静态检查：语法、shellcheck、以及几处"要人记得同步"的清单。
+# 只读检查，不执行任何脚本。
+name: lint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 列出脚本
+        run: |
+          { git ls-files '*.sh'; echo bin/opsget; } > /tmp/scripts
+          wc -l < /tmp/scripts
+
+      # CRLF 进仓库，脚本在 Linux 上直接报 $'\r': command not found
+      - name: 换行符必须是 LF
+        run: |
+          # 用 git 判断索引里的换行符（i/crlf、i/mixed），不受检出方式影响
+          bad=$(git ls-files --eol | awk '$1 ~ /^i\/(crlf|mixed)$/ {print $NF}')
+          [ -z "$bad" ] || { echo "::error::含 CRLF 的文件:"; echo "$bad"; exit 1; }
+
+      # 按 shebang 选解释器：openclash/ 在路由器上用 sh 跑，不能用 bash 语法
+      - name: 语法检查
+        run: |
+          rc=0
+          while read -r f; do
+            case "$(head -1 "$f")" in
+              *bash*) bash -n "$f" ;;
+              *)      sh -n "$f" ;;
+            esac || { echo "::error file=$f::语法错误"; rc=1; }
+          done < /tmp/scripts
+          exit $rc
+
+      # 门槛先设在 error：现有 warning 多为未使用变量等无害项，
+      # 清理完再收紧到 warning，否则 CI 永远是红的，很快就没人看了。
+      - name: shellcheck
+        run: |
+          shellcheck --version | head -2
+          xargs shellcheck -S error < /tmp/scripts
+
+      - name: 每个脚本都有 VERSION 头
+        run: |
+          rc=0
+          while read -r f; do
+            grep -q '^# VERSION:' "$f" || { echo "::error file=$f::缺少 # VERSION: 头"; rc=1; }
+          done < /tmp/scripts
+          exit $rc
+
+      # MANIFEST 是 opsget -l 的数据源；漏列的脚本用户看不到，多列的照着敲会 404
+      - name: MANIFEST 与文件一致
+        run: |
+          grep -oE '^[a-z]+/[A-Za-z0-9_-]+' MANIFEST | sort > /tmp/manifest
+          git ls-files '*.sh' | grep -v '^lib/' | sed 's/\.sh$//' | sort > /tmp/files
+          diff -u --label MANIFEST --label 实际文件 /tmp/manifest /tmp/files \
+            || { echo "::error::MANIFEST 与实际脚本不一致"; exit 1; }
+
+      # 声明了模板里没有的键，opsget -c 就补不出来，脚本运行时必然 die
+      - name: ENV-REQUIRED 的键都在配置模板里
+        run: |
+          T=config/env.example.conf
+          grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Z_][A-Z0-9_]*=' "$T" \
+            | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/=$//' | sort -u > /tmp/tplkeys
+          rc=0
+          while read -r f; do
+            for k in $(sed -n 's/^#[[:space:]]*ENV-REQUIRED:[[:space:]]*//p' "$f"); do
+              for a in ${k//|/ }; do
+                grep -qx "$a" /tmp/tplkeys || { echo "::error file=$f::$a 不在 $T 里"; rc=1; }
+              done
+            done
+          done < /tmp/scripts
+          exit $rc

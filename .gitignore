@@ -1,0 +1,9 @@
+# 真实配置含凭据，永不进仓库（仓库只保留 config/env.example.conf）
+env.conf
+*.env
+
+# opsget / install_file 替换前留下的旧版备份
+*.bak.*
+
+# 本地工具目录
+.codex/

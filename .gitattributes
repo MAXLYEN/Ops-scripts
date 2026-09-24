@@ -1,0 +1,3 @@
+# 脚本在 Linux 上执行，任何平台检出都必须是 LF。
+# CRLF 进仓库会让脚本报 $'\r': command not found。
+* text=auto eol=lf
