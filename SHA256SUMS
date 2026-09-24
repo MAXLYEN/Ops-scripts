@@ -1,2 +1,5 @@
 # ops-scripts 本次上传文件校验和
-9ced7aef3ca7bc47b1025a7fdc3d4aa5fd203edff74a99338196e475169341ac  ops/compare-backup-content.sh
+2f49493c31b8c88650875f0962529580be96f6ef30e561160c1705218ba28bdc  ops/apply-newapi-quota-fix.sh
+538b0f8f426d39dfa2ad746c718fb880c35935f241a8819f1784d782c47c136c  ops/fix-newapi-fallback-quota.sh
+49ac7e44db31a4b91ab9a1c5c5722d43e1684b9a8e8589296a41a6226f02e7a0  ops/fix-newapi-quota-data.sh
+7e16e0874d428d831ceb5a749720bab0f6cba334d818928e773ba7963b7f14fb  MANIFEST

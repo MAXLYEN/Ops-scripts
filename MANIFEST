@@ -49,6 +49,9 @@ ops/check-llm-security          LLM 两站访问控制现状盘点（只读，�
 ops/sync-llm-allowlist          同步 LiteLLM 白名单、fail2ban ignoreip 与 401 jail
 ops/containerize-and-pin        容器转 compose 管理并把镜像锁定为 digest
 ops/upgrade-vaultwarden         vaultwarden 升级（不带参数只查最新版，-y 才执行）
+ops/fix-newapi-fallback-quota    重算 new-api 因未设倍率走兜底价产生的虚高消费（logs + users）
+ops/fix-newapi-quota-data        按已修正的 logs 重算 quota_data，让看板统计跟上
+ops/apply-newapi-quota-fix       上面两个的执行外壳：停容器、拉库、修正、校验、传回、启动
 
 # ── vpsscore/ VPS 质量评估 ─────────────────────────────────
 vpsscore/probe                  服务端采集探针（--quick / --with-ecs）
