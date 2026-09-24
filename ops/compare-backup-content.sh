@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # ops/compare-backup-content.sh — 比对两个备份包的内容清单
-# VERSION: 1.0.2
+# VERSION: 1.0.3
+# 1.0.3: 结尾那句「只有体积差、清单一致 = 等价」原本无条件打印，有差异时会和
+#        上面的差异列表一起出现，同屏两个相反结论，看的人容易被后一句带偏。
+#        改为按清单是否有差异分别给结论。
 # 1.0.2: 差异判定不再把 diff 放进 if 的管道 —— lib/common.sh 设了 pipefail，
 #        管道退出码取最右边的非零值，而 diff 在「有差异」时返回 1（这是它的正常
 #        结果，不是错误），于是有差异反而走 else，打印「文件清单完全一致」。
@@ -93,11 +96,13 @@ section "差异"
 # diff 有差异时返回 1，会被当成整条管道的退出码，判定结果与事实相反。
 diff -u "$TD/before.txt" "$TD/after.txt" | tail -n +3 | grep -E '^[+-]' > "$TD/diffout.txt"
 if [ -s "$TD/diffout.txt" ]; then
+  LIST_SAME=0
   cat "$TD/diffout.txt"
   echo
   echo "  以 - 开头 = 新版少了这个文件（要解释清楚为什么）"
   echo "  以 + 开头 = 新版多了这个文件"
 else
+  LIST_SAME=1
   ok "文件清单完全一致"
 fi
 
@@ -123,5 +128,10 @@ for _, k, x, y in rows[:15]:
     print(f"  {k:<44} {x:>10} -> {y:>10}")
 PY
 echo
-echo "  只有体积差、清单一致 = 等价（差的是当天的数据量）"
+if [ "$LIST_SAME" = 1 ]; then
+  echo "  只有体积差、清单一致 = 等价（差的是当天的数据量）"
+else
+  echo "  清单有差异：上面每一条都要解释得通，才算等价。"
+  echo "  解释不通的（尤其是 - 行）说明改动漏掉了东西，别放过。"
+fi
 finish

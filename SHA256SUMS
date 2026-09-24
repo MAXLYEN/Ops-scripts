@@ -1,3 +1,2 @@
 # ops-scripts 本次上传文件校验和
-719c13eac027bd995ee3abab984667e695987b7330d320e72b7c5caf71364c9e  ops/compare-backup-content.sh
-e5c38d4be578e20d37f4726cc30a90953bd5660b927fd7502a2326169ee0de36  ops/panel-backup-upload.sh
+9ced7aef3ca7bc47b1025a7fdc3d4aa5fd203edff74a99338196e475169341ac  ops/compare-backup-content.sh
