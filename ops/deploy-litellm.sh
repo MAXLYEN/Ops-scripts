@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/deploy-litellm.sh — 部署 LiteLLM、Postgres 与 Redis 容器
-# VERSION: 1.2.1
-# 1.2.1: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.2.2
+# 1.2.2: 修正 mask() 对 8 位及以下凭据的输出，长度不再显示为 0。
 # ENV-REQUIRED: LITELLM_HOST LITELLM_WORKDIR LITELLM_PORT NEWAPI_PUBLIC_URL
 # 模型加入后须保留 LITELLM_SALT_KEY；丢失将无法解密已有凭据。
 
@@ -26,7 +26,7 @@ mask() {
   local s="$1"
   local n=${#s}
   if   [ "$n" -eq 0 ]; then echo "(空)"
-  elif [ "$n" -le 8 ]; then printf '%*s  [len=%d]\n' "$n" '' | tr ' ' '*'
+  elif [ "$n" -le 8 ]; then printf '%s  [len=%d]\n' "$(printf '%*s' "$n" '' | tr ' ' '*')" "$n"
   else printf '%s…%s  [len=%d]\n' "${s:0:4}" "${s: -2}" "$n"; fi
 }
 
