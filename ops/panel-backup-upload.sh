@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # ops/panel-backup-upload.sh — 把面板自带的整机备份包上传到网盘
-# VERSION: 1.0.1
+# VERSION: 1.0.2
+# 1.0.2: 上传那行原本写成 if rclone copy ...; then :; fi —— 两个分支都不做事，
+#        退出码被丢弃，这个 if 写了等于没写。判据本就是下面的 rclone check，
+#        直接调用即可，少一层会让人误以为这里在判成功与否的壳。
 # 1.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
 #
 # 面板自带的备份功能会在本地产生一个 tar.gz，可以在**另一台面板**上直接恢复。
@@ -101,7 +104,8 @@ section "上传"
 FAILED=0
 for r in $RCLONE_REMOTES; do
   log "→ $r:/$DEST"
-  if rclone copy "$UPFILE" "$r:/$DEST" --progress 2>&1 | tail -2 | sed 's/^/    /'; then :; fi
+  # 退出码不在这里判 —— 下面的 rclone check 做单向校验才是判据
+  rclone copy "$UPFILE" "$r:/$DEST" --progress 2>&1 | tail -2 | sed 's/^/    /'
   # 云盘写入后元数据有延迟，立刻校验会误报，等一下再比
   sleep 10
   if rclone check "$UPDIR" "$r:/$DEST" --include "$NAME" --one-way >/dev/null 2>&1; then

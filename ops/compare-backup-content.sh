@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # ops/compare-backup-content.sh — 比对两个备份包的内容清单
-# VERSION: 1.0.1
+# VERSION: 1.0.2
+# 1.0.2: 差异判定不再把 diff 放进 if 的管道 —— lib/common.sh 设了 pipefail，
+#        管道退出码取最右边的非零值，而 diff 在「有差异」时返回 1（这是它的正常
+#        结果，不是错误），于是有差异反而走 else，打印「文件清单完全一致」。
+#        结论方向正好是反的，最危险。改为先把差异落成文件，按文件是否为空判定。
 # 1.0.1: ① 密码键跟上 backup/*.sh 2.3.x：BACKUP_PASS_FILE 优先，VW_PASS_FILE 回落。
 #           原来只认 VW_PASS_FILE，旧键一旦清掉就会掉到 BACKUP_PASS_FILES（复数，
 #           是另一个键——密码文件**列表**）取第一项，多半是别的密码文件，
@@ -85,7 +89,11 @@ section "文件数"
 printf '  旧 %s 个 ｜ 新 %s 个\n' "$(wc -l < "$TD/before.txt")" "$(wc -l < "$TD/after.txt")"
 
 section "差异"
-if diff -u "$TD/before.txt" "$TD/after.txt" | tail -n +3 | grep -E '^[+-]' ; then
+# 注意：不要写成 if diff ... | grep ...; then —— 本脚本在 pipefail 下运行，
+# diff 有差异时返回 1，会被当成整条管道的退出码，判定结果与事实相反。
+diff -u "$TD/before.txt" "$TD/after.txt" | tail -n +3 | grep -E '^[+-]' > "$TD/diffout.txt"
+if [ -s "$TD/diffout.txt" ]; then
+  cat "$TD/diffout.txt"
   echo
   echo "  以 - 开头 = 新版少了这个文件（要解释清楚为什么）"
   echo "  以 + 开头 = 新版多了这个文件"
