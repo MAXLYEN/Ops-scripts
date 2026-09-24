@@ -127,7 +127,7 @@ opsget --unpin               # 取消固定，回到 main
 发版流程：
 
 1. 改动推到 `main`，CI 通过
-2. 挑一台机器单次覆盖装上新版并手动跑一次：`OPS_REF=main opsget -i <路径>`（`common.sh` 会一并换成 `main` 版）
+2. 挑一台机器按**完整提交号**单次覆盖装上新版并手动跑一次：`OPS_REF=<40 位提交号> opsget -i <路径>`（`common.sh` 会一并换成该提交的版本）。不要用 `OPS_REF=main`：raw.githubusercontent 会把分支指向的提交缓存几分钟，查询参数绕不过，刚推送后拉到的可能还是旧版，验证就白做了
 3. 验证通过后打 tag 并推送：`git tag -a v2026.09.24 -m "<说明>" && git push origin v2026.09.24`，同一天再发用 `v2026.09.24.1`
 4. 其余机器 `opsget --pin <新 tag> && opsget -u`，需要更新的脚本再逐个 `opsget -i`
 
@@ -144,7 +144,7 @@ curl -fsSL "https://raw.githubusercontent.com/MAXLYEN/ops-scripts/main/bin/opsge
   -o /tmp/opsget.new && grep -m1 '^# VERSION' /tmp/opsget.new
 ```
 
-**固定了版本的机器拉不到 `main` 上的新提交**，这是设计如此；验证新提交用 `OPS_REF=main` 单次覆盖。
+**固定了版本的机器拉不到 `main` 上的新提交**，这是设计如此；验证新提交用 `OPS_REF=<完整提交号>` 单次覆盖（分支名有几分钟缓存，见上）。
 
 `common.sh` 不用单独安装——每次执行任何脚本时 `sync_lib` 都会同步一次。改了 `common.sh` 就等于所有脚本都拿到了新版，这也意味着**改它要格外小心**。
 
