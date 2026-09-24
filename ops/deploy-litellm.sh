@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # deploy-litellm.sh
-# VERSION: 1.1.0
-# ENV-REQUIRED: (none — 目标机与端口写在脚本头部常量区)
+# VERSION: 1.2.0
+# ENV-REQUIRED: LITELLM_HOST LITELLM_WORKDIR LITELLM_PORT NEWAPI_PUBLIC_URL
+# 1.2.0: 目标机 IP、工作目录、端口改从 env.conf 读 —— 原来写在头部常量区，
+#        而本仓库公开托管；操作说明里的 new-api 地址也改成按 env 打印。
+#        PG_VERSION / REDIS_VERSION 是技术选型，仍留在脚本内。
 #
-# 在 43.165.176.248 上部署 LiteLLM + Postgres + Redis 三容器。
+# 在 env.conf 指定的目标机上部署 LiteLLM + Postgres + Redis 三容器。
 # 从汇总机执行，通过 SSH 操作目标机。
 #
 # 注意：
@@ -16,9 +19,14 @@
 # 1.1.0 凭据改由面板添加：不再询问上游 Key，config.yaml 不再写 model_list
 set -o pipefail
 
-TARGET_IP="43.165.176.248"
-LITELLM_PORT=4000
-WORKDIR=/opt/litellm
+ENV_FILE=/etc/ops-scripts/env.conf
+[ -r "$ENV_FILE" ] && . "$ENV_FILE"
+for k in LITELLM_HOST LITELLM_WORKDIR LITELLM_PORT NEWAPI_PUBLIC_URL; do
+  eval "v=\${$k:-}"
+  [ -z "$v" ] && { echo "env.conf 缺少必填项 $k"; exit 1; }
+done
+TARGET_IP="${LITELLM_HOST}"
+WORKDIR="${LITELLM_WORKDIR}"
 PG_VERSION=17
 REDIS_VERSION=7
 
@@ -245,8 +253,8 @@ cat <<TAIL
 
   provider 一律选 OpenAI-Compatible
 
-  relay/gpt-5.6-sol       api_base https://k3vq.210723.xyz/v1    key: new-api 令牌
-  relay/deepseek-v4-pro   api_base https://k3vq.210723.xyz/v1    key: new-api 令牌
+  relay/gpt-5.6-sol       api_base ${NEWAPI_PUBLIC_URL%/}/v1    key: new-api 令牌
+  relay/deepseek-v4-pro   api_base ${NEWAPI_PUBLIC_URL%/}/v1    key: new-api 令牌
   direct/deepseek-v4-pro  api_base https://api.deepseek.com/v1   key: DeepSeek 官方 Key
 
   加完每条点 Test 确认可用。

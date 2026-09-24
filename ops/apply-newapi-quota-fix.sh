@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # apply-newapi-quota-fix.sh
 # VERSION: 1.2.0
-# ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_CONTAINER
+# ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_CONTAINER NEWAPI_PUBLIC_URL
 # 1.2.0: 落地机地址、端口、数据目录、容器名改从 env.conf 读 —— 原来写死在脚本里，
 #        而本仓库公开托管，等于把落地机 IP 与 SSH 端口一起推了上去。
 #        ssh 用户沿用 backup/newapi-fullbackup 的约定，固定 root@，不另设键。
@@ -19,7 +19,7 @@ set -o pipefail
 
 ENV_FILE=/etc/ops-scripts/env.conf
 [ -r "$ENV_FILE" ] && . "$ENV_FILE"
-for k in NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_CONTAINER; do
+for k in NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_CONTAINER NEWAPI_PUBLIC_URL; do
   eval "v=\${$k:-}"
   [ -z "$v" ] && { echo "env.conf 缺少必填项 $k"; exit 1; }
 done
@@ -93,8 +93,8 @@ $SSH "docker logs ${CT} --since 2m 2>&1 | grep -iE 'error|panic|fail' | head -5"
 
 echo
 echo "===== 自检 ====="
-C=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "https://k3vq.210723.xyz/" 2>/dev/null)
-echo "  k3vq.210723.xyz  HTTP ${C}"
+C=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "${NEWAPI_PUBLIC_URL}" 2>/dev/null)
+echo "  ${NEWAPI_PUBLIC_URL}  HTTP ${C}"
 echo "  本机副本：${W}/one-api.db（改动后）、${W}/one-api.db.before（改动前）"
 echo "  落地机旧库：${JP_DIR}/one-api.db.bak-${TS}"
 echo

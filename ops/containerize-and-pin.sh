@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # containerize-and-pin.sh
-# VERSION: 1.0.0
+# VERSION: 1.1.0
+# ENV-REQUIRED: SVC_KOMARI_DATA SVC_SUBCONV_DIR SVC_XBOARD_DIR KOMARI_SITE SUBCONV_SITE
+# 1.1.0: 三个服务目录与两个自检域名改从 env.conf 读 —— 原来写死，而本仓库公开托管。
 #
 # 把 komari 与 SubConverter-Extended 从 docker run 转为 compose 管理，
 # 并将四个容器的镜像由 latest 锁定为当前正在运行的 digest。不升级版本。
@@ -11,6 +13,16 @@
 # - 旧容器停止后改名保留（不删除），compose 起不来时可改回
 # - xboard 与 vaultwarden 已是 compose 管理，只改 image 行
 set -o pipefail
+
+ENV_FILE=/etc/ops-scripts/env.conf
+[ -r "$ENV_FILE" ] && . "$ENV_FILE"
+for k in SVC_KOMARI_DATA SVC_SUBCONV_DIR SVC_XBOARD_DIR KOMARI_SITE SUBCONV_SITE; do
+  eval "v=\${$k:-}"
+  [ -z "$v" ] && { echo "env.conf 缺少必填项 $k"; exit 1; }
+done
+KOMARI_DIR="$(dirname "$SVC_KOMARI_DATA")"
+SUBCONV_DIR="$SVC_SUBCONV_DIR"
+XBOARD_DIR="$SVC_XBOARD_DIR"
 
 TS=$(date +%Y%m%d%H%M%S)
 BAK="/root/container-freeze-bak/${TS}"
@@ -35,7 +47,7 @@ docker compose version >/dev/null 2>&1 || die "docker compose v2 不可用"
 for c in komari SubConverter-Extended xboard-xboard-1 vaultwarden; do
   docker inspect "$c" >/dev/null 2>&1 || die "容器 $c 不存在"
 done
-[ -f /opt/xboard/compose.yaml ] || die "读不到 /opt/xboard/compose.yaml"
+[ -f ${XBOARD_DIR}/compose.yaml ] || die "读不到 ${XBOARD_DIR}/compose.yaml"
 
 D_KOMARI=$(digest_of ghcr.io/komari-monitor/komari:latest)
 D_SUB=$(digest_of aethersailor/subconverter-extended:latest)
@@ -67,19 +79,19 @@ if [ -d /root/data ]; then
 else
   warn "/root/data 不存在，跳过"
 fi
-if [ -d /opt/SubConverter-Extended ]; then
+if [ -d ${SUBCONV_DIR} ]; then
   tar czf "${BAK}/subconverter.tar.gz" -C /opt SubConverter-Extended || die "SubConverter 数据打包失败"
   echo "  [+] subconverter.tar.gz  $(du -h "${BAK}/subconverter.tar.gz" | cut -f1)"
 fi
 
 # ---------- 3. 搬迁 komari 数据目录 ----------
-log "3/6 komari 数据目录 /root/data -> /opt/komari/data"
-if [ -d /opt/komari/data ]; then
+log "3/6 komari 数据目录 /root/data -> ${SVC_KOMARI_DATA}"
+if [ -d ${SVC_KOMARI_DATA} ]; then
   echo "  [=] 目标已存在，跳过搬迁"
 elif [ -d /root/data ]; then
-  mkdir -p /opt/komari
-  mv /root/data /opt/komari/data || die "搬迁失败（数据已备份在 $BAK）"
-  echo "  [+] 已搬迁，$(du -sh /opt/komari/data | cut -f1)"
+  mkdir -p ${KOMARI_DIR}
+  mv /root/data ${SVC_KOMARI_DATA} || die "搬迁失败（数据已备份在 $BAK）"
+  echo "  [+] 已搬迁，$(du -sh ${SVC_KOMARI_DATA} | cut -f1)"
 else
   die "/root/data 不存在，无法搬迁"
 fi
@@ -99,12 +111,12 @@ services:
     ports:
       - "127.0.0.1:10086:25774"
     volumes:
-      - /opt/komari/data:/app/data
+      - ${SVC_KOMARI_DATA}:/app/data
     environment:
       GIN_MODE: release
       KOMARI_LISTEN: 0.0.0.0:25774
 EOF
-put_file "$T" /opt/komari/compose.yaml 644
+put_file "$T" ${KOMARI_DIR}/compose.yaml 644
 rm -f "$T"
 
 T=$(mktemp)
@@ -120,12 +132,12 @@ services:
     ports:
       - "127.0.0.1:25500:25500"
     volumes:
-      - /opt/SubConverter-Extended/stats:/base/stats
-      - /opt/SubConverter-Extended/base/pref.toml:/base/pref.toml
+      - ${SUBCONV_DIR}/stats:/base/stats
+      - ${SUBCONV_DIR}/base/pref.toml:/base/pref.toml
     environment:
       TZ: Asia/Shanghai
 EOF
-put_file "$T" /opt/SubConverter-Extended/compose.yaml 644
+put_file "$T" ${SUBCONV_DIR}/compose.yaml 644
 rm -f "$T"
 
 # ---------- 5. 切换 ----------
@@ -134,19 +146,19 @@ docker rename komari "komari-preswitch-${TS}" || die "改名失败"
 docker rename SubConverter-Extended "SubConverter-preswitch-${TS}" || die "改名失败"
 echo "  [~] 旧容器已改名保留（确认无误后再手动 docker rm）"
 
-docker compose -f /opt/komari/compose.yaml up -d || die "komari 启动失败，旧容器名为 komari-preswitch-${TS}"
-docker compose -f /opt/SubConverter-Extended/compose.yaml up -d || die "SubConverter 启动失败，旧容器名为 SubConverter-preswitch-${TS}"
+docker compose -f ${KOMARI_DIR}/compose.yaml up -d || die "komari 启动失败，旧容器名为 komari-preswitch-${TS}"
+docker compose -f ${SUBCONV_DIR}/compose.yaml up -d || die "SubConverter 启动失败，旧容器名为 SubConverter-preswitch-${TS}"
 
 # ---------- 6. xboard 锁版本 ----------
 log "6/6 xboard compose 锁定 digest"
-N=$(grep -cE '^[[:space:]]*image:.*cedar2025/xboard' /opt/xboard/compose.yaml)
+N=$(grep -cE '^[[:space:]]*image:.*cedar2025/xboard' ${XBOARD_DIR}/compose.yaml)
 if [ "$N" != 1 ]; then
   warn "xboard compose 里匹配到 ${N} 行 image，未自动修改，请手工处理"
 else
-  cp -a /opt/xboard/compose.yaml "${BAK}/xboard-compose.yaml"
-  sed -i -E "s|^([[:space:]]*image:[[:space:]]*).*cedar2025/xboard.*|\1${D_XBOARD}|" /opt/xboard/compose.yaml
-  echo "  [+] 已改为：$(grep -E '^[[:space:]]*image:' /opt/xboard/compose.yaml)"
-  docker compose -f /opt/xboard/compose.yaml up -d || die "xboard 启动失败，原文件在 ${BAK}/xboard-compose.yaml"
+  cp -a ${XBOARD_DIR}/compose.yaml "${BAK}/xboard-compose.yaml"
+  sed -i -E "s|^([[:space:]]*image:[[:space:]]*).*cedar2025/xboard.*|\1${D_XBOARD}|" ${XBOARD_DIR}/compose.yaml
+  echo "  [+] 已改为：$(grep -E '^[[:space:]]*image:' ${XBOARD_DIR}/compose.yaml)"
+  docker compose -f ${XBOARD_DIR}/compose.yaml up -d || die "xboard 启动失败，原文件在 ${BAK}/xboard-compose.yaml"
 fi
 
 # ---------- 自检 ----------
@@ -159,7 +171,7 @@ for p in 10086 25500; do
   printf '    127.0.0.1:%-6s HTTP %s\n' "$p" "${C:-无响应}"
 done
 echo "  对外站点："
-for S in komari.techx.blog api.29s.org; do
+for S in "$KOMARI_SITE" "$SUBCONV_SITE"; do
   C=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "https://${S}/" 2>/dev/null)
   printf '    %-22s HTTP %s\n' "$S" "${C:-无响应}"
 done
