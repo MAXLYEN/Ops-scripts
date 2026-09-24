@@ -1,0 +1,7 @@
+# ops-scripts 本次上传文件校验和
+4382c532b2ffdbf73eddca11140fd1ce12c4f44b76f4543a7352bda12c464d68  ops/check-llm-security.sh
+4cf106d4394f848889a7a03a582be0d41191ed72e8a066ed8278d5587061edb6  ops/containerize-and-pin.sh
+6fb5240d7b6363b402f2d1788a9a4420d2700a31e38e6cc2fa4a9959ee188672  ops/sync-llm-allowlist.sh
+39b6278ca9da4804778b847d1554d3a88d6946d70ebf0e9bc48fd30f4dc58324  ops/upgrade-vaultwarden.sh
+b40b9bc17a3560fe90f1dfa98ed67821508d196431a4bb53d49e9bb7a1a2046f  config/env.example.conf
+69a11c8d81ea7061706edf07195d2c9b2a4667417b105d1ffda4714c2eac213d  MANIFEST

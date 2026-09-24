@@ -44,7 +44,11 @@ ops/compare-backup-content      比对两个备份包的内容清单（改脚本
 ops/panel-backup-upload         把面板整机备份包加密上传到网盘（手动，--list/--raw/--prune）
 ops/newapi-linkcheck            new-api 链路健康检查（隧道 + 公网全链路，cron 5 分钟）
 ops/newapi-drill                new-api 灾难恢复演练（restore/verify/teardown，备用机上验证备份可还原）
-ops/deploy-litellm               在落地机部署 LiteLLM+Postgres+Redis 三容器（与 new-api 并行）
+ops/deploy-litellm              在落地机部署 LiteLLM+Postgres+Redis 三容器（与 new-api 并行）
+ops/check-llm-security          LLM 两站访问控制现状盘点（只读，改动前先跑）
+ops/sync-llm-allowlist          同步 LiteLLM 白名单、fail2ban ignoreip 与 401 jail
+ops/containerize-and-pin        容器转 compose 管理并把镜像锁定为 digest
+ops/upgrade-vaultwarden         vaultwarden 升级（不带参数只查最新版，-y 才执行）
 
 # ── vpsscore/ VPS 质量评估 ─────────────────────────────────
 vpsscore/probe                  服务端采集探针（--quick / --with-ecs）
