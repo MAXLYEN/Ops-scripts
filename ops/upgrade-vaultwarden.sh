@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # upgrade-vaultwarden.sh
-# VERSION: 1.1.0
+# VERSION: 1.2.0
+# ENV-REQUIRED: SVC_VW_DIR VW_BACKUP_DIR
+# 1.2.0: compose 路径与备份目录改从 env.conf 读 —— 原来写死，而本仓库公开托管。
+#        GH_REPO / IMAGE_REPO 是上游项目标识、BAK 是脚本自己的工作目录，仍留在脚本内。
 #
 # 升级 vaultwarden 并把 compose 的 image 由 tag 锁定为 digest。
 #
@@ -19,8 +22,14 @@ set -o pipefail
 
 GH_REPO="dani-garcia/vaultwarden"
 IMAGE_REPO="vaultwarden/server"
-COMPOSE="/opt/vaultwarden/compose.yaml"
-BACKUP_GLOB="/box/vaul_bak/srvbak_*.7z"
+ENV_FILE=/etc/ops-scripts/env.conf
+[ -r "$ENV_FILE" ] && . "$ENV_FILE"
+for k in SVC_VW_DIR VW_BACKUP_DIR; do
+  eval "v=\${$k:-}"
+  [ -z "$v" ] && { echo "env.conf 缺少必填项 $k"; exit 1; }
+done
+COMPOSE="${SVC_VW_DIR}/compose.yaml"
+BACKUP_GLOB="${VW_BACKUP_DIR}/srvbak_*.7z"
 TS=$(date +%Y%m%d%H%M%S)
 BAK="/root/vw-upgrade-bak/${TS}"
 

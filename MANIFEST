@@ -52,6 +52,7 @@ ops/upgrade-vaultwarden         vaultwarden 升级（不带参数只查最新版
 ops/fix-newapi-fallback-quota    重算 new-api 因未设倍率走兜底价产生的虚高消费（logs + users）
 ops/fix-newapi-quota-data        按已修正的 logs 重算 quota_data，让看板统计跟上
 ops/apply-newapi-quota-fix       上面两个的执行外壳：停容器、拉库、修正、校验、传回、启动
+ops/newapi-log-prune            清理超出保留期的 new-api 消费日志（cron 每月一次）
 
 # ── vpsscore/ VPS 质量评估 ─────────────────────────────────
 vpsscore/probe                  服务端采集探针（--quick / --with-ecs）

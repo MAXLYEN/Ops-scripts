@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # apply-newapi-quota-fix.sh
-# VERSION: 1.1.0
+# VERSION: 1.2.0
+# ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_CONTAINER
+# 1.2.0: 落地机地址、端口、数据目录、容器名改从 env.conf 读 —— 原来写死在脚本里，
+#        而本仓库公开托管，等于把落地机 IP 与 SSH 端口一起推了上去。
+#        ssh 用户沿用 backup/newapi-fullbackup 的约定，固定 root@，不另设键。
 # 1.1.0: 第 3 步补上 quota_data 的重算 —— logs 与 users 改了之后，看板读的是
 #        按小时预聚合的 quota_data，不跟着改就会一直显示旧的虚高金额。
 #
@@ -13,9 +17,16 @@
 # - 传回前校验 integrity_check 与两表总额一致，不通过则中止，不动落地机上的库
 set -o pipefail
 
-JP_HOST="root@103.100.158.215"
-JP_PORT="41452"
-JP_DIR="/opt/new-api/data"
+ENV_FILE=/etc/ops-scripts/env.conf
+[ -r "$ENV_FILE" ] && . "$ENV_FILE"
+for k in NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_CONTAINER; do
+  eval "v=\${$k:-}"
+  [ -z "$v" ] && { echo "env.conf 缺少必填项 $k"; exit 1; }
+done
+JP_HOST="root@${NEWAPI_HOST}"
+JP_PORT="${NEWAPI_SSH_PORT}"
+JP_DIR="${NEWAPI_DATA_DIR}"
+CT="${NEWAPI_CONTAINER}"
 FIXER="/usr/local/bin/fix-newapi-fallback-quota.sh"
 FIXER2="/usr/local/bin/fix-newapi-quota-data.sh"
 TS=$(date +%Y%m%d%H%M%S)
@@ -40,10 +51,10 @@ $SSH 'ls -x /usr/local/bin/newapi-fullbackup.sh >/dev/null 2>&1' \
 
 # ---------- 2. 停容器并拉库 ----------
 log "2/5 停 new-api 并拉回库文件"
-$SSH "docker stop new-api" >/dev/null || die "停容器失败"
+$SSH "docker stop ${CT}" >/dev/null || die "停容器失败"
 $SSH "ls -l ${JP_DIR}/one-api.db*" | sed 's/^/  /'
 scp -P "$JP_PORT" "${JP_HOST}:${JP_DIR}/one-api.db" "${W}/one-api.db" || {
-  $SSH "docker start new-api"; die "拉取失败，容器已重启"
+  $SSH "docker start ${CT}"; die "拉取失败，容器已重启"
 }
 cp -a "${W}/one-api.db" "${W}/one-api.db.before"
 log "  拉回 $(du -h "${W}/one-api.db" | cut -f1)，改动前副本已留存"
@@ -51,34 +62,34 @@ log "  拉回 $(du -h "${W}/one-api.db" | cut -f1)，改动前副本已留存"
 # ---------- 3. 修正 ----------
 log "3/5 执行修正（logs + users）"
 "$FIXER" "${W}/one-api.db" --apply || {
-  $SSH "docker start new-api"; die "修正失败，落地机上的库未被改动，容器已重启"
+  $SSH "docker start ${CT}"; die "修正失败，落地机上的库未被改动，容器已重启"
 }
 
 log "3b/5 执行修正（quota_data 看板聚合表）"
 "$FIXER2" "${W}/one-api.db" --apply || {
-  $SSH "docker start new-api"; die "看板表修正失败，落地机上的库未被改动，容器已重启"
+  $SSH "docker start ${CT}"; die "看板表修正失败，落地机上的库未被改动，容器已重启"
 }
 
 # ---------- 4. 校验后传回 ----------
 log "4/5 校验并传回"
 R=$(sqlite3 "${W}/one-api.db" 'PRAGMA integrity_check;')
-[ "$R" = "ok" ] || { $SSH "docker start new-api"; die "完整性校验失败：$R，未传回"; }
+[ "$R" = "ok" ] || { $SSH "docker start ${CT}"; die "完整性校验失败：$R，未传回"; }
 LEFT=$(sqlite3 "${W}/one-api.db" "SELECT COUNT(*) FROM logs WHERE type=2 AND other LIKE '%\"model_ratio\":37.5%';")
-[ "$LEFT" = 0 ] || { $SSH "docker start new-api"; die "仍有 ${LEFT} 条兜底记录，未传回"; }
+[ "$LEFT" = 0 ] || { $SSH "docker start ${CT}"; die "仍有 ${LEFT} 条兜底记录，未传回"; }
 DIFF=$(sqlite3 "${W}/one-api.db" "SELECT (SELECT SUM(quota) FROM quota_data) - (SELECT SUM(quota) FROM logs WHERE type=2);")
-[ "$DIFF" = 0 ] || { $SSH "docker start new-api"; die "quota_data 与 logs 总额差 ${DIFF}，未传回"; }
+[ "$DIFF" = 0 ] || { $SSH "docker start ${CT}"; die "quota_data 与 logs 总额差 ${DIFF}，未传回"; }
 
 $SSH "cp -a ${JP_DIR}/one-api.db ${JP_DIR}/one-api.db.bak-${TS} && rm -f ${JP_DIR}/one-api.db-wal ${JP_DIR}/one-api.db-shm" \
-  || { $SSH "docker start new-api"; die "落地机备份/清理 WAL 失败"; }
+  || { $SSH "docker start ${CT}"; die "落地机备份/清理 WAL 失败"; }
 scp -P "$JP_PORT" "${W}/one-api.db" "${JP_HOST}:${JP_DIR}/one-api.db" \
-  || { $SSH "docker start new-api"; die "传回失败，落地机上旧库仍在 one-api.db.bak-${TS}"; }
+  || { $SSH "docker start ${CT}"; die "传回失败，落地机上旧库仍在 one-api.db.bak-${TS}"; }
 
 # ---------- 5. 启动并验证 ----------
 log "5/5 启动容器"
-$SSH "docker start new-api" >/dev/null || die "启动失败"
+$SSH "docker start ${CT}" >/dev/null || die "启动失败"
 sleep 8
-$SSH "docker ps --filter name=new-api --format '  {{.Names}}  {{.Status}}'"
-$SSH "docker logs new-api --since 2m 2>&1 | grep -iE 'error|panic|fail' | head -5" | sed 's/^/  /'
+$SSH "docker ps --filter name=${CT} --format '  {{.Names}}  {{.Status}}'"
+$SSH "docker logs ${CT} --since 2m 2>&1 | grep -iE 'error|panic|fail' | head -5" | sed 's/^/  /'
 
 echo
 echo "===== 自检 ====="
