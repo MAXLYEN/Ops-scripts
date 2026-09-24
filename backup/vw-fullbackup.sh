@@ -1,11 +1,16 @@
 #!/bin/bash
 # backup/vw-fullbackup.sh — 备份 Vaultwarden、Komari、SubConverter 与系统配置
-# VERSION: 2.3.7
-# 2.3.7: 清单里的站点列表改用 glob，不再 ls | xargs。
+# VERSION: 2.3.8
+# 2.3.8: umask 077，暂存区与明文中间包不再对其他用户可读。
 # ENV-REQUIRED: VW_BACKUP_DIR BACKUP_PASS_FILE|VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
 # 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
 
 set -o pipefail
+# 暂存区里是明文：数据库 dump、容器 inspect（含环境变量里的密钥）、证书私钥、
+# 打包好的 payload.tar.gz。默认 umask 022 下它们是 644、目录 755，备份窗口内
+# 本机任何用户（例如面板上以 www 运行的站点）都能读到。之后新建的目录一律 700、
+# 文件 600；成品 7z 也随之变为 600，不影响 root 执行的上传与还原。
+umask 077
 
 # 配置（全部来自 env.conf，本文件不含任何域名/路径硬编码）
 ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
@@ -207,7 +212,8 @@ cp -a "$BT_CERT"/. "$STAGE/system/cert/" 2>/dev/null || warn "证书复制异常
 [ -f /root/.config/rclone/rclone.conf ] && cp -a /root/.config/rclone/rclone.conf "$STAGE/system/"
 crontab -l > "$STAGE/system/crontab.txt" 2>/dev/null
 cp -a "$0" "$STAGE/system/" 2>/dev/null
-# 配置本身也进包：换机器时照着它填，比回忆快得多（里面没有密码，只有路径与名称）
+# 配置本身也进包：换机器时照着它填，比回忆快得多。
+# 注意 env.conf 并非全无凭据（NEWAPI_ROOT_PAT、心跳与 webhook URL），只能随加密包走。
 cp -a "$ENV_FILE" "$STAGE/system/env.conf" 2>/dev/null
 ufw status verbose > "$STAGE/system/ufw-status.txt" 2>/dev/null
 # 容器网段：compose 起的服务会有独立网络，和默认 bridge 不在同一网段
