@@ -2,6 +2,12 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-09-24：修正 2.3.4 数据库导出失败
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `vw-fullbackup.sh` | 2.3.4 → 2.3.5 | 2.3.4 用 `--defaults-extra-file` 传密码，但 MySQL 之后还会读 `~/.my.cnf`，其中 `[client]` 的 root 密码覆盖了 vaultwarden 的密码，mysqldump 报 `Access denied (using password: YES)`，备份中止。改用 `--defaults-file` 只读临时文件，先 `!include` 存在的 `/etc/my.cnf`、`/etc/mysql/my.cnf` 保留全局设置，password 放在最后。**2.3.4 不要使用** |
+
 ## 2026-09-24：凭据移出进程命令行
 
 同机任何用户都能读 `/proc/*/cmdline`；面板上以 www 运行的站点被攻破后，可在任务运行窗口拿到凭据。
