@@ -53,11 +53,18 @@ ops/fix-newapi-fallback-quota    重算 new-api 因未设倍率走兜底价产�
 ops/fix-newapi-quota-data        按已修正的 logs 重算 quota_data，让看板统计跟上
 ops/apply-newapi-quota-fix       上面两个的执行外壳：停容器、拉库、修正、校验、传回、启动
 ops/newapi-log-prune            清理超出保留期的 new-api 消费日志（cron 每月一次）
+ops/setup-key-login            新机配置 SSH 密钥登录并验证，成功后追加进主机清单
+ops/push-keys                  按主机清单批量下发 SSH 公钥
+ops/diag-key                   诊断指定主机的 SSH 密钥登录失败原因
 
 # ── vpsscore/ VPS 质量评估 ─────────────────────────────────
 vpsscore/probe                  服务端采集探针（--quick / --with-ecs）
-vpsscore/score                  打分与横向对比            [待做，需先有采集数据]
+vpsscore/collect                汇总机：ssh 到各机重采、收集 JSON 并自动打分
+vpsscore/score                  汇总机：按角色权重打分与分组排名
 
 # ── db/ 数据库维护 ─────────────────────────────────────────
 db/rotate-db-pass               轮换库密码，核对所有 host 记录（check / rotate）
 db/sqlite-dsn                   查改存在 SQLite 里的连接串（scan / sethost / setpass）
+
+# ── openclash/ 路由器（在路由器上 sh 直接运行，不走 opsget）──
+openclash/dns-anti-poison       OpenClash 注入 DoH 分流：国内直连、境外经代理（--check / --uninstall）
