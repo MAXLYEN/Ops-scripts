@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
-# ops/script-inventory.sh — 盘点本机所有运维脚本及其来源
-# VERSION: 1.0.0
-#
-# 回答三个问题：
-#   1. 本机装了哪些脚本
-#   2. 哪些来自云端仓库（有版本管理、可 opsget 更新）
-#   3. 哪些只存在于本地（改坏了没有回退，换机器会丢）
-#
-# 判定依据：/var/lib/ops-scripts/installed.list 台账 + 云端 MANIFEST。
+# ops/script-inventory.sh — 盘点本机脚本并区分仓库来源与本地文件
+# VERSION: 1.0.1
+# 1.0.1: 整理注释并补充目录文档，执行逻辑未变。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env

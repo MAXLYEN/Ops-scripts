@@ -1,19 +1,8 @@
 #!/usr/bin/env bash
-# fix-newapi-fallback-quota.sh
-# VERSION: 1.0.0
-#
-# 修正 new-api 日志中「未设置倍率」兜底价（model_ratio=37.5，折合 $75/百万 token）
-# 产生的虚高消费记录，并同步修正 users 表的已用额度与余额。
-#
-# 用法:
-#   fix-newapi-fallback-quota.sh <库文件>            试运行，只打印将要改什么
-#   fix-newapi-fallback-quota.sh <库文件> --apply    真正写库
-#
-# 注意：
-# - 幂等靠改写 other 里的 model_ratio 实现：改完不再匹配 37.5，重复执行不会二次折算
-# - 单价取该模型已配置记录的「配额总和 ÷ token 总和」，是输入输出混合后的实际均价
-# - users 只改 used_quota>0 的用户；管理员测试记录不计入个人已用，动它会制造新的不一致
-# - 必须在容器停止时执行，避免并发写入与 WAL 冲突
+# ops/fix-newapi-fallback-quota.sh — 修正 new-api 兜底倍率造成的虚高消费
+# VERSION: 1.0.1
+# 1.0.1: 整理注释并补充目录文档，执行逻辑未变。
+
 set -o pipefail
 
 DB="$1"; APPLY=0

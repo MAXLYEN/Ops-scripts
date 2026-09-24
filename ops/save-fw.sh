@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# ops/save-fw.sh — 改防火墙或系统配置前保存现状
-# VERSION: 2.0.0
-#
-# 在跑任何会动 ufw / sshd / iptables 的东西之前跑一次。出事能照着恢复。
+# ops/save-fw.sh — 在修改防火墙前保存当前配置快照
+# VERSION: 2.0.1
+# 2.0.1: 整理注释并补充目录文档，执行逻辑未变。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root

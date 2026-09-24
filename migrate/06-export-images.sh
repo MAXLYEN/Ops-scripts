@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
-# 06-export-images.sh — 导出容器镜像
-# VERSION: 2.0.0
-#
-# 在迁出机运行，逐个打包便于断点续传。
-#
-# 为什么不在新机重新 pull：
-#   1. 新机未必拉得动镜像仓库（出网路径可能和旧机不同）
-#   2. :latest 会漂移 —— 重新拉可能拿到比旧机新的版本。会跑数据库
-#      migration 的应用尤其危险，库是按旧版 schema 迁过来的
+# migrate/06-export-images.sh — 在迁出机导出当前容器镜像
+# VERSION: 2.0.1
+# 2.0.1: 整理注释并补充目录文档，执行逻辑未变。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root

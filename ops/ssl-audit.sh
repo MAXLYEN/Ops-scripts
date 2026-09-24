@@ -1,22 +1,7 @@
 #!/usr/bin/env bash
-# ops/ssl-audit.sh — 证书三方对账
-# VERSION: 2.1.1
-# 2.1.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
-# 2.1.0 变更：
-#   · 第 5 节的域名来源改用 resolve_domains() —— 原来直接 for dom in $DOMAINS，
-#     配置漂移时既会对废域名误报，也会静默漏掉没列进配置的真站点
-#   · 通配符证书覆盖的域名跳过 HTTP-01 目录检查。通配符签发只能走 DNS-01，
-#     对它检查 .well-known 目录必然误报
-# 2.0.1: 结论按实际检测结果分支（原来无条件打印"不会续期"）；
-#        站点根目录改为从 vhost 配置里查，兼容多域名共用一个站点的情况
-#
-# 证书文件正常 != 会自动续期。这两件事由不同的东西驱动：
-#   nginx 直接读文件 -> 所以站点当下是好的
-#   续期任务读面板记录 -> 记录丢了就不会续，到期那天全站一起挂
-#
-# 迁移后这是最典型的"静默失效"，本脚本把三方摆到一起看。
-#
-# 依赖 lib/common.sh >= 1.1.0（resolve_domains）
+# ops/ssl-audit.sh — 核对证书文件、站点引用与续期记录
+# VERSION: 2.1.2
+# 2.1.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: PANEL_CERT_DIR WWWROOT
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"

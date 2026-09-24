@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# ops/preflight-backup.sh — 首次手动跑备份脚本前的检查
-# VERSION: 2.0.1
-# 2.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
-#
-# 备份脚本通常有一串 need <命令> 的前置断言，缺一个就中途 die。
-# 与其跑到一半失败，不如先全查一遍。
+# ops/preflight-backup.sh — 检查备份脚本运行前的依赖与配置
+# VERSION: 2.0.2
+# 2.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: BACKUP_DIRS BACKUP_SCRIPTS
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"

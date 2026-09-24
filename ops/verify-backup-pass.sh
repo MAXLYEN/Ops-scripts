@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
-# ops/verify-backup-pass.sh — 验证本地密码能打开云端的加密包
-# VERSION: 2.0.1
-# 2.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
-#
-# 从云端取最近的包下来，用本机的密码文件实际解一次。
-# 如果哪天真要靠云端的包重建，密码必须是对的 —— 现在验比那时候验强得多。
-#
-# 建议每季度跑一次，配合还原演练。
+# ops/verify-backup-pass.sh — 验证本地密码能否解开云端备份包
+# VERSION: 2.0.2
+# 2.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: BACKUP_PASS_FILES RCLONE_PATHS RCLONE_REMOTES
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"

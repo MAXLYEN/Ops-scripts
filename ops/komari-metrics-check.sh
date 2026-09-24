@@ -1,17 +1,7 @@
 #!/usr/bin/env bash
-# ops/komari-metrics-check.sh — 指标库的保留期与增速体检
-# VERSION: 2.0.0
-# 2.0.0 变更：不再交互式输入用户名密码（会出现在 shell 历史与终端里），
-#            改用 --defaults-file 读凭据；库名与预期保留期从 env.conf 取
-#
-# 回答四个问题：
-#   A. 各指标的保留期设置对不对
-#   B. 各分辨率档位实际存了多久的数据
-#   C. 清理/汇总任务是不是在跑
-#   D. 体积多大、日均涨多少、稳态会是多少
-#
-# ⚠️ 建库后的头一个保留期内，数据只涨不清是正常的 —— 还没有数据够格被清理。
-#    别在这个阶段误判成保留策略失效。
+# ops/komari-metrics-check.sh — 检查 Komari 指标库的保留期与增长速度
+# VERSION: 2.0.1
+# 2.0.1: 整理注释并补充目录文档，执行逻辑未变。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env

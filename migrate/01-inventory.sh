@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# 01-inventory.sh — 迁移前摸底
-# VERSION: 2.0.0
-#
-# 在新旧机各跑一次，把两份输出逐段对比。重点看：OS 版本、磁盘命名与类型、
-# 时区、出网情况、已装组件版本。
-#
-# 输出同时落盘到 /root/inventory_<主机名>_<时间戳>.txt
+# migrate/01-inventory.sh — 在新旧机器采集迁移前环境清单
+# VERSION: 2.0.1
+# 2.0.1: 整理注释并补充目录文档，执行逻辑未变。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env

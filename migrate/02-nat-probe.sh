@@ -1,18 +1,7 @@
 #!/usr/bin/env bash
-# 02-nat-probe.sh — 入站可达性验证
-# VERSION: 2.0.1
-# 2.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
-#
-# curl ifconfig.me 只证明出网 SNAT 通，不证明外面能连进来。这一步验的是入站。
-#
-#   新机: 02-nat-probe.sh listen          在 PROBE_PORTS 上起监听
-#   旧机: 02-nat-probe.sh probe           从外部探测 NEW_HOST_IP
-#         02-nat-probe.sh probe <IP>      探测指定地址
-#
-# 判据：
-#   全部可达且源 IP 是探测端的真实地址 → 全端口 1:1 DNAT，最理想
-#   只有个别端口可达                   → 端口映射型 NAT，去控制台补映射（别漏 UDP）
-#   全部超时                           → 先查安全组；仍不通说明没有独立入站 IP
+# migrate/02-nat-probe.sh — 从外部验证迁入机的端口入站可达性
+# VERSION: 2.0.2
+# 2.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: PROBE_PORTS
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"

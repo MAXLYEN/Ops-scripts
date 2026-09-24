@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
-# 07-restore-containers.sh — 恢复容器数据并生成启动命令
-# VERSION: 2.0.1
-# 2.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
-#
-# 在迁入机运行。只恢复文件、只生成命令，**不启动任何容器** ——
-# 生成的东西要人工过目再执行。
-#
-# 用法: 07-restore-containers.sh [快照目录]
-#       不给参数则取 SNAPSHOT_ROOT 下最新的 premigrate_*
+# migrate/07-restore-containers.sh — 在迁入机恢复容器数据并生成启动命令
+# VERSION: 2.0.2
+# 2.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: CONTAINER_DATA_DIRS SNAPSHOT_ROOT
+# 只恢复文件并生成命令，不自动启动容器。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root

@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
-# 08-post-start-check.sh — 容器启动后的端到端验收
-# VERSION: 2.1.0
-# 2.1.0: 第 3 节的域名来源改用 resolve_domains()。原来直接遍历 DOMAINS ——
-#        配置漏了哪个站点，那个站点就不会被探测，而输出仍然全绿。
-#        切换前的最后一道验收出这种假绿，代价太大。
-#
-# 第 3 节最有价值：用 --resolve 绕过 DNS 直接走本机 nginx，等于在切换前
-# 完整跑通了外部访问路径（nginx 配置 → 证书 → 反代 → 容器）。全绿就意味着
-# 除了 DNS 之外都通了。
+# migrate/08-post-start-check.sh — 在迁入机执行容器与站点端到端验收
+# VERSION: 2.1.1
+# 2.1.1: 整理注释并补充目录文档，执行逻辑未变。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env

@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
-# newapi-linkcheck.sh
-# VERSION: 1.0.0
+# ops/newapi-linkcheck.sh — 检查 new-api 隧道和公网访问全链路
+# VERSION: 1.0.1
+# 1.0.1: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: NEWAPI_TUNNEL_UNIT NEWAPI_LOCAL_URL NEWAPI_PUBLIC_URL
-#
-# 两层探测：
-#   内层 —— 本机隧道端口。systemd 的 Restart=always 只保证进程活着，
-#           保证不了转发实际通；探不通就重启单元并复探。
-#   外层 —— 公网域名。走 nginx→隧道→落地机全链路，通过才 ping 心跳。
-# cron 每 5 分钟执行。
 
 set -o pipefail
 
@@ -76,7 +71,7 @@ record_restart() {
   wc -l < "$RESTART_STATE" | tr -d ' '
 }
 
-# ---------- 内层：隧道端口 ----------
+# 内层：隧道端口
 RESTARTED=0
 CODE=$(probe "$NEWAPI_LOCAL_URL" "$LOCAL_TIMEOUT")
 
@@ -104,12 +99,12 @@ fi
 INNER_OK=0
 [ "$CODE" = "200" ] && INNER_OK=1
 
-# ---------- 外层：公网全链路 ----------
+# 外层：公网全链路
 PCODE=$(probe "$NEWAPI_PUBLIC_URL" "$PUBLIC_TIMEOUT")
 OUTER_OK=0
 [ "$PCODE" = "200" ] && OUTER_OK=1
 
-# ---------- 结论 ----------
+# 结论
 if [ "$INNER_OK" = 1 ] && [ "$OUTER_OK" = 1 ]; then
   [ "$RESTARTED" = 1 ] \
     && log "正常（本轮重启过隧道）内层=200 外层=200" \

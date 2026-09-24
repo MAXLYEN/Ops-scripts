@@ -1,18 +1,8 @@
 #!/usr/bin/env bash
-# db/sqlite-dsn.sh — 查看/修改存在 SQLite 里的连接串
-# VERSION: 2.0.0
-#
-# 有些应用把数据库连接串存在自己的 SQLite 里，不是环境变量也不是配置文件。
-# 换机器时这类写死的地址是隐藏地雷 —— 尤其是写了宿主机公网 IP 的：
-#
-#   原机公网 IP 直绑网卡 → 容器发往它的包走本地路由，源地址是容器网段，
-#                          既匹配授权也过得了防火墙，所以一直正常
-#   新机公网 IP 在 NAT 后 → 包发到网关就出去了，再也回不来
-#
-# 用法:
-#   sqlite-dsn.sh scan <db文件> [特征串...]     只读扫描，密码掩码
-#   sqlite-dsn.sh sethost <db文件> <旧值> <新值> [容器名]
-#   sqlite-dsn.sh setpass <db文件> <用户名> [容器名]     交互输入新密码
+# db/sqlite-dsn.sh — 扫描和修改 SQLite 中保存的数据库连接串
+# VERSION: 2.0.1
+# 2.0.1: 整理注释与帮助输出，并补充目录文档。
+# 用法: sqlite-dsn.sh scan|sethost|setpass <db文件> [参数...]
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root
@@ -20,7 +10,13 @@ load_env
 require_cmd sqlite3 python3
 
 ACTION=${1:-}; DB=${2:-}
-[ -n "$ACTION" ] && [ -n "$DB" ] || { sed -n '15,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+[ -n "$ACTION" ] && [ -n "$DB" ] || {
+  printf '%s\n' \
+    '用法: sqlite-dsn.sh scan <db文件> [特征串...]' \
+    '      sqlite-dsn.sh sethost <db文件> <旧值> <新值> [容器名]' \
+    '      sqlite-dsn.sh setpass <db文件> <用户名> [容器名]'
+  exit 1
+}
 [ -f "$DB" ] || die "找不到 $DB"
 
 stop_container() {  # 有 WAL，容器跑着改容易冲突

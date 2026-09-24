@@ -1,22 +1,10 @@
 #!/usr/bin/env bash
-# deploy-litellm.sh
-# VERSION: 1.2.0
+# ops/deploy-litellm.sh — 部署 LiteLLM、Postgres 与 Redis 容器
+# VERSION: 1.2.1
+# 1.2.1: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: LITELLM_HOST LITELLM_WORKDIR LITELLM_PORT NEWAPI_PUBLIC_URL
-# 1.2.0: 目标机 IP、工作目录、端口改从 env.conf 读 —— 原来写在头部常量区，
-#        而本仓库公开托管；操作说明里的 new-api 地址也改成按 env 打印。
-#        PG_VERSION / REDIS_VERSION 是技术选型，仍留在脚本内。
-#
-# 在 env.conf 指定的目标机上部署 LiteLLM + Postgres + Redis 三容器。
-# 从汇总机执行，通过 SSH 操作目标机。
-#
-# 注意：
-# - 本脚本只搭骨架，不写入任何上游凭据。模型与凭据部署后在面板添加，
-#   凭据由 LITELLM_SALT_KEY 加密后存入 Postgres。
-# - LITELLM_SALT_KEY 加过模型后不可更改；丢失则库里凭据无法解密，备份等同作废。
-# - 容器全部绑 127.0.0.1，不直接暴露公网；对外走香港前置的 nginx 反代。
-# - 镜像版本在部署时实时查询当前 stable 并锁定，不使用 latest。
-#
-# 1.1.0 凭据改由面板添加：不再询问上游 Key，config.yaml 不再写 model_list
+# 模型加入后须保留 LITELLM_SALT_KEY；丢失将无法解密已有凭据。
+
 set -o pipefail
 
 ENV_FILE=/etc/ops-scripts/env.conf
@@ -51,7 +39,7 @@ rshn() { ssh -n "${SSH_OPTS[@]}" -p "$TPORT" "root@$TARGET_IP" "$@"; }
 log "目标 root@$TARGET_IP:$TPORT"
 rshn true 2>/dev/null || die "SSH 连不上"
 
-# ---------- 预检 ----------
+# 预检
 for P in "$LITELLM_PORT" 5432 6379; do
   if rshn "ss -lntp 2>/dev/null | grep -q ':${P} '"; then
     die "目标机 ${P} 端口已被占用"
@@ -59,7 +47,7 @@ for P in "$LITELLM_PORT" 5432 6379; do
 done
 log "端口 ${LITELLM_PORT} / 5432 / 6379 均空闲"
 
-# ---------- 查询当前 stable 版本 ----------
+# 查询当前 stable 版本
 log "查询 LiteLLM 当前 stable 版本"
 LITELLM_TAG=$(rshn "curl -s -m 25 https://api.github.com/repos/BerriAI/litellm/releases/latest" 2>/dev/null \
   | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
@@ -80,7 +68,7 @@ case "$LITELLM_TAG" in
 esac
 log "锁定镜像版本：ghcr.io/berriai/litellm:${LITELLM_TAG}"
 
-# ---------- 安装 docker ----------
+# 安装 docker
 log "检查并安装 docker"
 rsh "bash -s" <<'REMOTE_DOCKER'
 set -o pipefail
@@ -109,7 +97,7 @@ echo "  安装完成：$(docker --version)"
 REMOTE_DOCKER
 [ $? -ne 0 ] && die "docker 安装失败"
 
-# ---------- 生成凭据 ----------
+# 生成凭据
 log "生成本次部署的凭据"
 MASTER_KEY="sk-$(rshn 'openssl rand -hex 24' 2>/dev/null)"
 SALT_KEY="$(rshn 'openssl rand -hex 32' 2>/dev/null)"
@@ -120,7 +108,7 @@ echo "  LITELLM_MASTER_KEY  $(mask "$MASTER_KEY")"
 echo "  LITELLM_SALT_KEY    $(mask "$SALT_KEY")"
 echo "  POSTGRES_PASSWORD   $(mask "$PG_PASS")"
 
-# ---------- 写入目标机 ----------
+# 写入目标机
 log "写入配置到 $WORKDIR"
 rshn "mkdir -p ${WORKDIR}" || die "建目录失败"
 
@@ -200,7 +188,7 @@ COMPOSEEOF
 
 log "配置已写入"
 
-# ---------- 拉起 ----------
+# 拉起
 log "拉取镜像并启动（首次拉取较慢）"
 rsh "cd ${WORKDIR} && docker compose pull && docker compose up -d" || die "启动失败"
 

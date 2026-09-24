@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
-# ops/mail-doctor.sh — 告警邮件链路诊断
-# VERSION: 1.0.1
-# 1.0.1 修正：失败计数把 exitcode=EX_OK 也算进去了，导致"1 成功 1 失败"被报成"2 次失败"
-#
-# 备份脚本"失败了会发邮件"这件事，只有真发过一次才算数。
-# 本脚本从配置、连通性、实发三个层面查，并打印 msmtp 自己的错误。
-#
-# 用法: mail-doctor.sh          只诊断，不发信
-#       mail-doctor.sh --send   诊断并实际发一封测试邮件
+# ops/mail-doctor.sh — 诊断告警邮件的配置与发送链路
+# VERSION: 1.0.2
+# 1.0.2: 整理注释并补充目录文档，执行逻辑未变。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root

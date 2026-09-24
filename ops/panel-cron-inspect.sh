@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
-# ops/panel-cron-inspect.sh — 查明面板计划任务的真实身份
-# VERSION: 2.0.2
-# 2.0.2: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
-# 2.0.1: 修正"没有日志文件"的措辞 —— 手动触发不会产生日志，日志重定向写在 crontab 行里
-#
-# 面板的计划任务在 crontab 里是一串 hash，看不出干什么。而且迁移后
-# hash 会被重新生成，不能靠 hash 匹配新旧机。必须打开脚本看内容。
-#
-# 典型误判：以为两个任务都是数据库备份，实际一个是证书续期。
-#
-# 用法: panel-cron-inspect.sh [--run <hash>]   带 --run 则手动触发一次
+# ops/panel-cron-inspect.sh — 查看面板计划任务的真实命令与运行状态
+# VERSION: 2.0.3
+# 2.0.3: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: PANEL_CRON_DIR
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"

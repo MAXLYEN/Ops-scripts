@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
-# 05-fix-db-grants.sh — 修正被面板改掉的数据库账号 host
-# VERSION: 2.0.1
-# 2.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
-#
-# 面板类工具在迁移时会按自己记录的"本地服务器"权限重建账号，把 host 从
-# 容器网段通配改成 127.0.0.1。容器经 172.x 连库就匹配不上，全站 503。
-#
-# RENAME USER 会把密码哈希和授权一起搬过去，比删了重建安全。
-#
-# 注意：命令行改绕过了面板，面板自己的记录还是旧值。以后**别在面板的数据库
-# 管理里点这几个库的「权限」设置**，一点就会重置回去。
+# migrate/05-fix-db-grants.sh — 修正迁移后数据库账号的 host 授权
+# VERSION: 2.0.2
+# 2.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: DB_CLIENT_HOST DB_NAMES DOCKER_CIDR
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"

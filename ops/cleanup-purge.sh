@@ -1,16 +1,8 @@
 #!/usr/bin/env bash
-# ops/cleanup-purge.sh — 彻底移除 ops-scripts 及其全部产物
-# VERSION: 1.0.0
-#
-# 用于：这台机器不再需要这套脚本（例如迁出机退役前、或换用别的方案）。
-#
-# 删除范围严格限定在 ops-scripts 自己装的和自己产生的东西。
-# **业务数据一概不动** —— 备份产物、容器数据、数据库、面板、云端文件
-# 都不在删除范围内，且有受保护路径的二次拦截。
-#
-#   cleanup-purge.sh              预演，列出会删什么
-#   cleanup-purge.sh --apply      执行（需要输入 yes 二次确认）
-#   KEEP_ENV=1 cleanup-purge.sh --apply   保留 /etc/ops-scripts/env.conf
+# ops/cleanup-purge.sh — 按安装台账移除 ops-scripts 及其产物
+# VERSION: 1.0.1
+# 1.0.1: 整理注释并补充目录文档，执行逻辑未变。
+# 默认预演，--apply 才执行移除并要求确认。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root

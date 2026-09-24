@@ -1,6 +1,6 @@
 # ops-scripts
 
-服务器迁移与日常运维脚本集。所有环境相关的值（域名、IP、端口、容器名、路径、库名）都在 `config/env.conf` 里，**脚本本身不含任何环境信息**，因此可以公开托管。
+服务器迁移与日常运维脚本集。环境相关的值通过本机 `/etc/ops-scripts/env.conf` 配置，仓库只保存 [配置模板](config/env.example.conf)；真实域名、IP 和凭据不进入公开仓库。`init/`、`vpsscore/` 等自包含脚本可在没有配置文件的新机上运行。
 
 ## 快速开始
 
@@ -9,8 +9,8 @@
 curl -fsSL https://raw.githubusercontent.com/MAXLYEN/ops-scripts/main/bin/opsget \
   -o /usr/local/bin/opsget && chmod +x /usr/local/bin/opsget
 
-# 2. 生成配置（首次）
-opsget -c            # 拉取 env.example.conf 到 /etc/ops-scripts/env.conf
+# 2. 按已安装脚本的需求生成或补齐配置
+opsget -c            # 只补当前需要的配置键
 vi /etc/ops-scripts/env.conf
 
 # 3. 用
@@ -25,25 +25,26 @@ opsget -i ops/preflight-backup     # 只安装到 /usr/local/bin，不执行
 
 ## 脚本清单
 
-**看 [MANIFEST](MANIFEST)，或在机器上跑 `opsget -l`。**
+**看 [MANIFEST](MANIFEST)，或在机器上跑 `opsget -l`。** 这两处列出通过引导器展示的脚本；目录介绍包含该目录全部文件的作用与版本。
 
 这里不再重复列表——两处维护必然漂移，实测过：README 的编号和实际差了一位，两个脚本改过名，整个 `vpsscore/` 目录漏掉了，照 README 敲会 404。
 
 ## 目录
 
-```
-bin/opsget              引导器：拉取、安装、执行
-lib/common.sh           公共函数库
-config/env.example.conf 配置模板
-init/                   新机初始化，按编号顺序执行
-migrate/                整机迁移流程，按编号顺序执行
-backup/                 生产备份（每天 cron 跑）
-ops/                    日常运维
-db/                     数据库相关维护
-vpsscore/               VPS 质量评估：采集 + 打分
-```
+| 目录 | 内容 | 目录文档 |
+| --- | --- | --- |
+| `bin/` | 脚本引导器 | [介绍](bin/README.md) · [版本记录](bin/CHANGELOG.md) |
+| `config/` | 环境配置模板 | [介绍](config/README.md) · [版本记录](config/CHANGELOG.md) |
+| `lib/` | 公共函数库 | [介绍](lib/README.md) · [版本记录](lib/CHANGELOG.md) |
+| `init/` | 新机初始化 | [介绍](init/README.md) · [版本记录](init/CHANGELOG.md) |
+| `migrate/` | 整机迁移流程 | [介绍](migrate/README.md) · [版本记录](migrate/CHANGELOG.md) |
+| `backup/` | 生产备份 | [介绍](backup/README.md) · [版本记录](backup/CHANGELOG.md) |
+| `ops/` | 日常运维 | [介绍](ops/README.md) · [版本记录](ops/CHANGELOG.md) |
+| `db/` | 数据库维护 | [介绍](db/README.md) · [版本记录](db/CHANGELOG.md) |
+| `vpsscore/` | VPS 质量采集与评分 | [介绍](vpsscore/README.md) · [版本记录](vpsscore/CHANGELOG.md) |
+| `openclash/` | OpenClash DNS 分流 | [介绍](openclash/README.md) · [版本记录](openclash/CHANGELOG.md) |
 
-`init/` 与 `vpsscore/` 有一点不同：**它们不依赖 `lib/common.sh`**。这些脚本要能在一台什么都没有的新机（或刚开的裸机）上单跑，少一个依赖就少一个失败点。它们也不强制要求 `env.conf` —— 没有就用内置默认值，有就以配置为准。`ops/decommission-archive` 出于同样理由是自包含的：它的使用场景就是「机器即将退役」，不该假设它装了什么。
+`init/` 与 `vpsscore/` 不依赖 `lib/common.sh`，方便在新机上单独运行，也不强制要求 `env.conf`。`ops/decommission-archive` 同样自包含，以适应机器即将退役的场景。
 
 ## 两个顺序执行的流程
 
@@ -56,13 +57,13 @@ opsget init/run 03       # 执行指定阶段
 
 **跑 03 之前务必确认带外控制台能进。** 脚本布置了 5 分钟自动回滚兜底，但那是最后一道保险，不是第一道。调度器在 03 之前也会强制确认第二个 SSH 窗口已就绪。
 
-**整机迁移**：`migrate/` 下按编号顺序，配合《服务器整机迁移教程》使用。每个脚本头部写明了该在哪台机器跑（迁出机 / 迁入机 / 两台各一次），MANIFEST 里也有一句话说明。
+**整机迁移**：`migrate/` 下按编号顺序，执行机器与各阶段产物见 [迁移目录介绍](migrate/README.md)。
 
 ## 配置文件
 
 真实配置在 **`/etc/ops-scripts/env.conf`**，权限 `600`，**永远不进仓库**（`.gitignore` 已排除）。
 
-脚本在缺少配置项时会直接 `die`，不会回落到任何默认值——这是刻意的：宁可报错，也不要用错误的值静默执行。
+需要配置的脚本在头部声明 `# ENV-REQUIRED:`；`opsget -e <路径>` 可查看所需和缺失的键，`opsget -c <路径>` 可按需补齐。声明为 `A|B` 时任一有值即可。对这些必填项，缺失时脚本会报错退出，避免用错值静默执行。
 
 ### 清单类配置优先留空
 
@@ -144,7 +145,7 @@ KEEP_ENV=1 opsget ops/cleanup-purge --apply   # 保留 env.conf
 
 ## 约定
 
-所有脚本遵循同一套规则：
+仓库采用以下通用约定，具体以各脚本的实现为准：
 
 - **幂等安装**：写入前比对，内容相同直接执行，不同则备份旧版后替换
 - **危险操作需确认**，且尽量提供回滚路径
@@ -152,7 +153,9 @@ KEEP_ENV=1 opsget ops/cleanup-purge --apply   # 保留 env.conf
 - **日志时间戳在调用时计算**，不用启动时冻结的变量
 - **`set -o pipefail`**，管道错误不吞
 - **告警计数要值钱**：正常配置引发的提示用 `log` 不用 `warn`。如果"1 条告警"永远消不掉，很快就没人看这个计数了
-- 每个脚本头部有 `# VERSION:`，改动时递增，并在下面写一行**为什么改**——一年后你只会记得改了，不会记得为什么
+- 每个脚本头部保留作用、`# VERSION:`、本版改动原因和必要的运行约束；旧版本的详细说明写入所在目录的 `CHANGELOG.md`
+- 脚本正文保留解释关键判断和回滚条件的注释；会写入目标配置文件的注释属于输出内容，不能随意删除
+- 各脚本独立编号；修改时递增相应版本，并同步目录版本记录
 
 ## 安全边界
 

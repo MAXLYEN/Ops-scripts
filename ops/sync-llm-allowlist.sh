@@ -1,26 +1,9 @@
 #!/usr/bin/env bash
-# sync-llm-allowlist.sh
-# VERSION: 2.0.2
+# ops/sync-llm-allowlist.sh — 同步 LLM 站点白名单与 fail2ban 规则
+# VERSION: 2.0.3
+# 2.0.3: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: LITELLM_SITE NEWAPI_SITE ALLOW_EXTRA_IPS
-#
-# 以 ~/.vps-hosts.txt 为唯一来源，同步 LLM 两站的访问控制：
-#   1. LiteLLM 站整站白名单（名单外一律 403，.well-known 由 vhost 内 location 自带 allow all）
-#   2. 清理 LiteLLM 站失效的 blocklist（白名单的 deny all 之后它永不生效）
-#   3. fail2ban 配置合并为单一 jail.local（含 ignoreip 与 sshd 严格规则）
-#   4. new-api 站 401 封禁 jail
-# 机群增减后重跑即可。
-#
-# 2.0.2: 401 过滤规则里补注释，说明为何不能匹配 [日期]（便于日后改动时不踩回去）。
-# 2.0.1: ① IP 提取不再用 tr 删空白 —— tr 会把换行一并删掉，整份清单粘成一行且末尾
-#           无换行，while read 直接返回非零，循环一次都不执行，机群 IP 静默为 0。
-#        ② failregex 不再匹配 [日期]：fail2ban 匹配前会把识别到的时间戳从行里摘除，
-#           方括号变空，[^\]]+ 必然失配，结果是 0 matched。
-#
-# 注意：
-# - nginx allow/deny 按声明顺序匹配，allowlist.conf 字母序须排在其他 deny 之前
-# - fail2ban 读取顺序 jail.conf -> jail.d/*.conf -> jail.local，后读覆盖先读
-# - 封禁动作 ufw，封的是该 IP 访问本机全部端口，故 ignoreip 必须含全部机群 IP
-# - sshd 参数改动后回读校验，不符自动回滚
+
 set -o pipefail
 
 ENV_FILE=/etc/ops-scripts/env.conf
@@ -64,7 +47,7 @@ put_file() {  # $1=临时文件 $2=目标 $3=权限；返回 0=有变化 1=无�
   install -m "$3" "$1" "$2"; echo "  [+] $2 已写入"; return 0
 }
 
-# ---------- 汇总放行 IP ----------
+# 汇总放行 IP
 log "汇总放行名单"
 TMP=$(mktemp)
 grep -vE '^[[:space:]]*(#|$)' "$HOSTS_FILE" \
@@ -84,7 +67,7 @@ rm -f "$TMP"
 echo "  机群 ${N_FLEET} 台，合计放行 $(printf '%s\n' "$IPS" | grep -c .) 个地址："
 printf '%s\n' "$IPS" | sed 's/^/    /'
 
-# ---------- 1. LiteLLM 白名单 ----------
+# 1. LiteLLM 白名单
 echo; log "1/4 ${LITELLM_SITE} 整站白名单"
 grep -qE "include .*extension/${LITELLM_SITE}/\*\.conf" "$LITELLM_VHOST" \
   || die "vhost 未在 server 级 include extension，白名单不会生效"
@@ -105,7 +88,7 @@ NGX_CHANGED=0
 put_file "$T" "$NGX_F" 644 && NGX_CHANGED=1
 rm -f "$T"
 
-# ---------- 2. 清理失效 blocklist ----------
+# 2. 清理失效 blocklist
 echo; log "2/4 清理 ${LITELLM_SITE} 的失效 blocklist"
 if [ -f "$NGX_BLOCK" ]; then
   cp -a "$NGX_BLOCK" "${BAK_DIR}/blocklist.conf.${LITELLM_SITE}"
@@ -127,7 +110,7 @@ if [ "$NGX_CHANGED" = 1 ]; then
   fi
 fi
 
-# ---------- 3. fail2ban 合并为单一 jail.local ----------
+# 3. fail2ban 合并为单一 jail.local
 echo; log "3/4 fail2ban 配置合并（jail.local 单一来源）"
 cp -a "$JAIL_LOCAL" "${BAK_DIR}/jail.local"
 [ -f "$OLD_JAIL_D" ] && cp -a "$OLD_JAIL_D" "${BAK_DIR}/99-sshd.conf"
@@ -200,7 +183,7 @@ grep ' 401 ' "$NEWAPI_LOG" | tail -2 | cut -c1-120 | sed 's/^/    /' || echo "  
 echo "  过滤规则试跑："
 fail2ban-regex "$NEWAPI_LOG" "$FILTER_F" 2>/dev/null | grep -E '^Lines:|Failregex:' | sed 's/^/    /'
 
-# ---------- 生效与回读校验 ----------
+# 生效与回读校验
 echo; log "重载 fail2ban 并回读校验"
 if ! fail2ban-client reload >/dev/null 2>&1; then
   warn "reload 失败，回滚 fail2ban 配置"
@@ -236,7 +219,7 @@ if [ "$OK" != 1 ]; then
   die "已回滚 fail2ban，备份在 $BAK_DIR"
 fi
 
-# ---------- 自检 ----------
+# 自检
 echo; echo "===== 自检 ====="
 fail2ban-client status 2>/dev/null | sed 's/^/  /'
 echo

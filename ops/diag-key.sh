@@ -1,19 +1,7 @@
 #!/usr/bin/env bash
-# ops/diag-key.sh — 诊断某台机器为什么密钥登录不上
-# VERSION: 1.0.0
-#
-# 密钥下发成功、却依然登不上时用。按 sshd 拒绝密钥的实际原因逐项排查，
-# 而不是猜 —— 这类问题的表现完全一样（Permission denied），成因却有五六种。
-#
-# 用法:
-#   diag-key.sh <ssh目标[:端口]> [密码]
-#   diag-key.sh -h
-#
-# 例:
-#   diag-key.sh root@1.2.3.4:22 'MyPassw0rd'
-#   diag-key.sh root@1.2.3.4:2222          # 已能密钥登录时可省略密码
-#
-# 只读不改。要自动修复用: opsget ops/setup-key-login <IP> <端口> <密码>
+# ops/diag-key.sh — 诊断指定主机的 SSH 密钥登录失败原因
+# VERSION: 1.0.1
+# 1.0.1: 整理注释并补充目录文档，执行逻辑未变。
 
 set -o pipefail
 

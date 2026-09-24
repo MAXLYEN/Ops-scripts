@@ -1,26 +1,8 @@
 #!/usr/bin/env bash
-# ops/cleanup-tidy.sh — 清理 ops-scripts 产生的冗余文件
-# VERSION: 1.1.0
-# 1.1.0: ① 只列出真正会被删的类别。原来「共 2，保留最新 2」这种行照样打印，
-#           看着像要清理、实际删 0 个 —— 一眼分不出该不该跑 --apply。
-#           无需清理的类别折叠成末尾一行。
-#        ② 汇总打印可回收数量与体积。TOTAL 一直在累加却从没输出过，
-#           预演最该回答的问题（能腾出多少）反而看不到。
-#        ③ 新增 vpsscore 采集产物一节：collect.sh 每跑一次就新增一批
-#           JSON 与 route.txt，原来完全不在扫描范围，只能手工清。
-#
-# 只清"同一类东西的旧副本"：历史快照、旧版脚本备份、多次运行的输出。
-# 每类都保留最近若干份，不会清空。
-#
-# 默认只列不删，加 --apply 才动手。
-#
-#   cleanup-tidy.sh                预演，列出会删什么
-#   cleanup-tidy.sh --apply        执行
-#   KEEP=3 cleanup-tidy.sh --apply 改保留份数（默认 2）
-#
-# 绝不触碰（这些是业务数据，不是 ops 的产物）：
-#   备份产物目录 BACKUP_DIRS、容器数据 CONTAINER_DATA_DIRS、
-#   面板目录、云端的任何东西
+# ops/cleanup-tidy.sh — 清理历史输出、旧版备份与中间产物
+# VERSION: 1.1.1
+# 1.1.1: 整理注释并补充目录文档，执行逻辑未变。
+# 默认预演，--apply 才执行清理。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root

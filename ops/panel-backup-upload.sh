@@ -1,26 +1,7 @@
 #!/usr/bin/env bash
-# ops/panel-backup-upload.sh — 把面板自带的整机备份包上传到网盘
-# VERSION: 1.0.2
-# 1.0.2: 上传那行原本写成 if rclone copy ...; then :; fi —— 两个分支都不做事，
-#        退出码被丢弃，这个 if 写了等于没写。判据本就是下面的 rclone check，
-#        直接调用即可，少一层会让人误以为这里在判成功与否的壳。
-# 1.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
-#
-# 面板自带的备份功能会在本地产生一个 tar.gz，可以在**另一台面板**上直接恢复。
-# 它和 backup/ 那套按服务粒度的备份不是一回事：
-#   服务粒度备份 → 精确、体积小、恢复要一步步来
-#   面板整机包   → 粗放、体积大、恢复一键完成，适合换机器 / 重装兜底
-# 两者互补，都留着。
-#
-# 本脚本不做定时，需要时手动跑。
-#
-#   panel-backup-upload.sh              上传最新的一个包
-#   panel-backup-upload.sh --list       只看本地和云端各有什么
-#   panel-backup-upload.sh --file <路径> 上传指定的包
-#   panel-backup-upload.sh --raw        不加密，原样上传
-#   panel-backup-upload.sh --prune N    上传后云端只保留最新 N 个
-#
-# 默认会用备份密码把包再套一层 7z 加密后上传，理由见脚本内说明。
+# ops/panel-backup-upload.sh — 加密并上传面板生成的整机备份包
+# VERSION: 1.0.3
+# 1.0.3: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: RCLONE_REMOTES
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"

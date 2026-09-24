@@ -1,14 +1,8 @@
 #!/usr/bin/env bash
-# ops/panel-data-locate.sh — 在面板目录里定位某项数据的真实存储位置
-# VERSION: 2.0.0
-# 2.0.0 变更：特征串与面板路径改为参数/配置驱动，不再写死域名
-#
-# 面板把数据摊在多个 sqlite 模块库里，主库常常只是个空壳。
-# 想知道"某个东西存在哪"时用它：给一个特征串（域名、库名、任务名…），
-# 它会遍历所有 sqlite 的所有表去找，并顺带看续期脚本自己读的是什么。
-#
-# 用法: panel-data-locate.sh [特征串]
-#       不给则取 env.conf 里 DOMAINS 的第一个
+# ops/panel-data-locate.sh — 定位面板数据在磁盘上的存储位置
+# VERSION: 2.0.1
+# 2.0.1: 整理注释并补充目录文档，执行逻辑未变。
+
 set -o pipefail
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env

@@ -1,20 +1,8 @@
 #!/usr/bin/env bash
-# fix-newapi-quota-data.sh
-# VERSION: 1.0.0
-#
-# 把 quota_data（看板用的按小时预聚合表）的 quota 与 token_used 按已修正的 logs 重算。
-# 配套 fix-newapi-fallback-quota.sh：那个改 logs 与 users，这个让看板跟上。
-#
-# 用法:
-#   fix-newapi-quota-data.sh <库文件>            试运行，只打印将要改什么
-#   fix-newapi-quota-data.sh <库文件> --apply    真正写库
-#
-# 注意：
-# - 不引第二套单价，直接从 logs 聚合，保证两表天然一致
-# - 聚合维度：整点时间 + user_id + model_name + channel_id + token_id
-#   （logs 没有 use_group / node_name 两列，故按 id 逐行更新而非整表重建）
-# - count 不动：已验证两表次数完全一致
-# - 必须在容器停止时执行
+# ops/fix-newapi-quota-data.sh — 按已修正的日志重算 new-api 配额统计
+# VERSION: 1.0.1
+# 1.0.1: 整理注释并补充目录文档，执行逻辑未变。
+
 set -o pipefail
 
 DB="$1"; APPLY=0

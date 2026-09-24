@@ -1,23 +1,11 @@
 #!/usr/bin/env bash
-# upgrade-vaultwarden.sh
-# VERSION: 1.2.0
+# ops/upgrade-vaultwarden.sh — 检查并升级 Vaultwarden，锁定镜像 digest
+# VERSION: 1.2.1
+# 1.2.1: 整理注释与帮助输出，并补充目录文档。
 # ENV-REQUIRED: SVC_VW_DIR VW_BACKUP_DIR
-# 1.2.0: compose 路径与备份目录改从 env.conf 读 —— 原来写死，而本仓库公开托管。
-#        GH_REPO / IMAGE_REPO 是上游项目标识、BAK 是脚本自己的工作目录，仍留在脚本内。
-#
-# 升级 vaultwarden 并把 compose 的 image 由 tag 锁定为 digest。
-#
-# 用法:
-#   upgrade-vaultwarden.sh              查询最新版并显示对比，不执行升级
-#   upgrade-vaultwarden.sh -y           查询最新版并直接升级
-#   upgrade-vaultwarden.sh <版本号>     升级到指定版本
-#   upgrade-vaultwarden.sh <版本号> -y  同上（-y 在指定版本时无作用，保留以便统一写法）
-#
-# 注意：
-# - 升级前强制要求 24 小时内有备份产出，否则中止
-# - migration 不可逆：compose 可回滚，库结构不能；失败时以还原备份为准
-# - 锁 digest 而非 tag：digest 在 pull 后从本地镜像读出，保证存在
-# - GitHub API 未认证限流 60 次/小时，被限流时原样打印返回消息，不当作「无新版本」
+# 默认只检查版本，-y 或指定版本才执行升级。
+# 升级前确认近期备份；数据库迁移可能无法随 compose 回滚。
+
 set -o pipefail
 
 GH_REPO="dani-garcia/vaultwarden"
@@ -37,13 +25,17 @@ log()  { printf '%s [INFO] %s\n' "$(date -u '+%F %T')" "$*"; }
 warn() { printf '%s [WARN] %s\n' "$(date -u '+%F %T')" "$*"; }
 die()  { printf '%s [FAIL] %s\n' "$(date -u '+%F %T')" "$*"; exit 1; }
 
-# ---------- 参数 ----------
+# 参数
 TARGET_TAG=""
 ASSUME_YES=0
 for a in "$@"; do
   case "$a" in
     -y|--yes) ASSUME_YES=1 ;;
-    -h|--help) sed -n '5,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)
+      printf '%s\n' \
+        '用法: upgrade-vaultwarden.sh [-y]' \
+        '      upgrade-vaultwarden.sh <版本号> [-y]'
+      exit 0 ;;
     -*) die "未知参数: $a" ;;
     *) TARGET_TAG="$a" ;;
   esac
@@ -55,7 +47,7 @@ docker inspect vaultwarden >/dev/null 2>&1 || die "容器 vaultwarden 不存在"
 OLD_ID=$(docker inspect vaultwarden --format '{{.Image}}')
 OLD_VER=$(docker image inspect "$OLD_ID" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null)
 
-# ---------- 查询最新版本 ----------
+# 查询最新版本
 if [ -z "$TARGET_TAG" ]; then
   log "查询上游最新版本"
   RESP=$(curl -s -m 20 -H 'Accept: application/vnd.github+json' \
@@ -106,7 +98,7 @@ EOF2
   log "已指定 -y，继续升级到 ${TARGET_TAG}"
 fi
 
-# ---------- 前置检查 ----------
+# 前置检查
 log "前置检查"
 LATEST_BAK=$(ls -t $BACKUP_GLOB 2>/dev/null | head -1)
 [ -n "$LATEST_BAK" ] || die "找不到任何备份包，中止"
@@ -135,7 +127,7 @@ rollback() {
   exit 1
 }
 
-# ---------- 1. 拉取 ----------
+# 1. 拉取
 log "1/5 拉取 ${IMAGE_REPO}:${TARGET_TAG}"
 docker pull "${IMAGE_REPO}:${TARGET_TAG}" >/dev/null || die "拉取失败，未做任何改动"
 
@@ -148,14 +140,14 @@ echo "  镜像版本标签：${NEW_VER}"
 echo "  digest：${NEW_DIGEST}"
 [ "$NEW_VER" = "$TARGET_TAG" ] || warn "镜像标签 ${NEW_VER} 与目标 ${TARGET_TAG} 不一致，请确认"
 
-# ---------- 2. 改 compose ----------
+# 2. 改 compose
 log "2/5 compose 锁定 digest"
 N=$(grep -cE "^[[:space:]]*image:.*${IMAGE_REPO}" "$COMPOSE")
 [ "$N" = 1 ] || die "compose 里匹配到 ${N} 行 image，未自动修改"
 sed -i -E "s|^([[:space:]]*image:[[:space:]]*).*${IMAGE_REPO}.*|\1${NEW_DIGEST}  # ${TARGET_TAG}|" "$COMPOSE"
 grep -nE '^[[:space:]]*image:' "$COMPOSE" | sed 's/^/  /'
 
-# ---------- 3. 重建 ----------
+# 3. 重建
 log "3/5 重建容器"
 docker compose -f "$COMPOSE" up -d || rollback
 
@@ -171,7 +163,7 @@ for i in $(seq 1 24); do
   sleep 5
 done
 
-# ---------- 4. 校验 ----------
+# 4. 校验
 log "4/5 校验"
 echo "  --- 启动日志 ---"
 docker logs vaultwarden --since 3m 2>&1 | grep -iE 'Version |migrat|panic' | tail -10 | sed 's/^/    /'
@@ -188,7 +180,7 @@ echo "  运行版本：${RUN_VER}"
 
 [ "$OK" = 1 ] && [ "$RUN_VER" = "$TARGET_TAG" ] || { warn "校验未通过"; rollback; }
 
-# ---------- 5. 收尾 ----------
+# 5. 收尾
 log "5/5 收尾提示"
 echo "  旧镜像仍带 tag，确认客户端正常后可删："
 echo "    docker rmi ${IMAGE_REPO}:${OLD_VER}"

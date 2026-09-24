@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
-# newapi-fullbackup.sh
-# VERSION: 1.0.1
-# 1.0.1 rclone check 两边都必须是目录，原先传单个文件路径导致 "is a file not a directory" 误报失败
+# backup/newapi-fullbackup.sh — 从汇总机拉取 new-api 数据，生成一致性快照并加密上传
+# VERSION: 1.0.2
+# 1.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_BAK_DIR BACKUP_PASS_FILE MAIL_TO
-#
-# 从汇总机拉取落地机上的 new-api 数据并打包加密上传。
-# 注意：SQLite 开着 WAL，直接 cp 会拿到未 checkpoint 的旧数据；
-#       本脚本在落地机上用 sqlite3 在线备份 API 生成一致性快照，不停容器。
+# 定时任务调用已安装的本地脚本；SQLite 使用在线备份生成一致性快照。
 
 set -o pipefail
 
-# ---------- 配置载入 ----------
+# 配置载入
 ENV_FILE=/etc/ops-scripts/env.conf
 [ -r "$ENV_FILE" ] && . "$ENV_FILE"
 
@@ -26,7 +23,7 @@ ALERT_FALLBACK_FILE="${ALERT_FALLBACK_FILE:-/var/log/backup-alerts.log}"
 WARN=0
 FAIL=0
 
-# ---------- 日志与告警 ----------
+# 日志与告警
 # 时间戳在调用时计算，不用启动时冻结的变量
 log()  { printf '%s [INFO] %s\n' "$(date -u '+%F %T')" "$*" | tee -a "$LOG"; }
 warn() { printf '%s [WARN] %s\n' "$(date -u '+%F %T')" "$*" | tee -a "$LOG"; WARN=$((WARN+1)); }
@@ -91,7 +88,7 @@ log "===== new-api 备份开始 $TS ====="
 
 require_env NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_BAK_DIR BACKUP_PASS_FILE MAIL_TO
 
-# ---------- 预检 ----------
+# 预检
 for c in 7z rclone ssh tar sha256sum; do
   command -v "$c" >/dev/null 2>&1 || { fail "本机缺少命令：$c"; finish 1; }
 done
@@ -112,7 +109,7 @@ mkdir -p "$STAGE/payload" || { fail "建不了暂存目录"; finish 1; }
 cleanup() { rm -rf "$STAGE"; }
 trap cleanup EXIT
 
-# ---------- 在落地机生成一致性快照并流式拉回 ----------
+# 在落地机生成一致性快照并流式拉回
 log "在落地机生成 SQLite 一致性快照并打包"
 
 REMOTE_SNAP=$(cat <<REMOTE_EOF
@@ -195,7 +192,7 @@ except Exception: print('?')" "$STAGE/payload/one-api.db" 2>/dev/null)
   log "options 表条目数：$N"
 fi
 
-# ---------- 清单与还原说明 ----------
+# 清单与还原说明
 {
   echo "new-api backup manifest"
   echo "打包时间(UTC): $(date -u '+%F %T')"
@@ -283,7 +280,7 @@ if [ -r "$ENV_FILE" ]; then
     > "$STAGE/payload/system/env.conf.sample" 2>/dev/null || true
 fi
 
-# ---------- 打包 ----------
+# 打包
 ARCHIVE="$NEWAPI_BAK_DIR/newapi_${TS}.7z"
 log "打包为 $ARCHIVE"
 if ! 7z a -t7z -m0=lzma2 -mx=5 -mhe=on -p"$PASS" "$ARCHIVE" "$STAGE/payload/"* \
@@ -304,7 +301,7 @@ log "打包完成并自检通过，体积 ${PKGSIZE} 字节"
 ( cd "$NEWAPI_BAK_DIR" && sha256sum "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256" )
 log "已生成 .sha256 旁注文件"
 
-# ---------- 上传 ----------
+# 上传
 UPLOADED=0
 for R in $RCLONE_REMOTES; do
   log "上传到 ${R}:/${CLOUD_DIR}"
@@ -325,7 +322,7 @@ for R in $RCLONE_REMOTES; do
 done
 [ "$UPLOADED" -eq 0 ] && fail "所有云端目标都没上传成功"
 
-# ---------- 保留策略 ----------
+# 保留策略
 log "清理本地超过 ${LOCAL_KEEP_DAYS} 天的包"
 find "$NEWAPI_BAK_DIR" -maxdepth 1 -name 'newapi_*.7z*' -mtime "+${LOCAL_KEEP_DAYS}" \
   -print -delete >>"$LOG" 2>&1

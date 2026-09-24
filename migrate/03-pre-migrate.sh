@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
-# 03-pre-migrate.sh — 迁移前冷快照
-# VERSION: 2.0.1
-# 2.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
-#
-# 在迁出机运行。停服 → 全量导出（不排除任何表）→ 打包关键路径。
-#
-# 为什么不用日常备份脚本：日常备份为"日常"设计，通常排除了大表以控制包体，
-# 而迁移恰恰要把大表带走。
-#
-# 执行后服务处于停止状态，恢复方式见脚本末尾提示。
+# migrate/03-pre-migrate.sh — 在迁出机停服并制作完整冷快照
+# VERSION: 2.0.2
+# 2.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: CONTAINER_DATA_DIRS DB_NAMES SNAPSHOT_ROOT
+# 执行后服务保持停止，恢复方式见脚本末尾提示。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root

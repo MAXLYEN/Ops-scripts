@@ -1,33 +1,13 @@
 #!/bin/bash
-#
-# 全服务备份：Vaultwarden + Komari + SubConverter + 系统配置
-# 打包 → 7z AES-256 加密 → 上传两个网盘
-#
-# VERSION: 2.3.2
-# 2.3.1: ENV-REQUIRED 里的密码键改写成 BACKUP_PASS_FILE|VW_PASS_FILE 二选一 ——
-#        脚本内部本就有回落，声明按字面写会让 opsget 把能跑的机器拦下来。
-# 2.3.0: 备份加密密码改读 BACKUP_PASS_FILE，VW_PASS_FILE 作回落。原来两个备份
-#        脚本共用 VW_PASS_FILE，一台只跑 Xboard、根本没有 Vaultwarden 的机器
-#        也被要求填一个名字里带 VW 的键，报错时人会先去找 Vaultwarden 在哪。
-#        老机器的 env.conf 不用改。
-# 2.2.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
-# 2.2.0 变更：加反向监控心跳（dead man's switch）。正向告警盖不住「脚本压根没跑」
-#            —— 宕机、cron 挂掉、crontab 被面板重写，这三种情况一封邮件都不会有。
-#            心跳由外部观察者盯着：约定时间没收到就由它告警。
-# 2.1.0 变更：告警发送加重试与落盘兜底 —— 实测遇到过一次瞬时 ENETUNREACH，
-#            单次网络抖动不该让告警丢掉（告警丢了 = 静默失效）
-# 2.0.0 变更：环境相关的值全部外置到 /etc/ops-scripts/env.conf，**主体逻辑一行未动**。
-#            RESTORE.md 里的账号 host 从写死的 '%' 改为按配置生成，并补了三处提醒。
-#
-# 依赖：p7zip-full rclone sqlite3 mysql-client(或面板自带) tar
-#
-# ⚠️ cron 里调用本地路径 /usr/local/bin/vw-fullbackup.sh，**不要写成 opsget**。
-#    不能让备份依赖外网才能启动。更新用 `opsget -i backup/vw-fullbackup` 显式安装。
-#
+# backup/vw-fullbackup.sh — 备份 Vaultwarden、Komari、SubConverter 与系统配置
+# VERSION: 2.3.3
+# 2.3.3: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: VW_BACKUP_DIR BACKUP_PASS_FILE|VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
+# 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
+
 set -o pipefail
 
-########## 配置（全部来自 env.conf，本文件不含任何域名/路径硬编码） ##########
+# 配置（全部来自 env.conf，本文件不含任何域名/路径硬编码）
 ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 [ -r "$ENV_FILE" ] || { echo "[FATAL] 缺少配置文件 $ENV_FILE（从 config/env.example.conf 复制）"; exit 1; }
 # shellcheck disable=SC1090
@@ -69,7 +49,7 @@ STAGE="${STAGE_ROOT}/.staging_${TS}"
 ARCHIVE="${OUT_DIR}/${NAME}.7z"
 
 WARNINGS=0
-########## 工具函数 ##########
+# 工具函数
 log()  { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"; }
 warn() { WARNINGS=$((WARNINGS+1)); echo "[$(date '+%F %T')] [WARN] $*" | tee -a "$LOG_FILE"; }
 die()  { echo "[$(date '+%F %T')] [FATAL] $*" | tee -a "$LOG_FILE"; hb /fail; notify "备份失败: $*"; rm -rf "$STAGE"; exit 1; }
@@ -112,7 +92,7 @@ hb() {
         || echo "[$(date '+%F %T')] [WARN] 心跳上报失败${1:-}" >> "$LOG_FILE"
 }
 
-########## 前置检查 ##########
+# 前置检查
 log "========== 开始备份 ${NAME} =========="
 hb /start
 need tar; need 7z; need rclone; need sqlite3
@@ -125,7 +105,7 @@ PASS="$(head -n1 "$PASS_FILE")"
 mkdir -p "$STAGE"/{db,vaultwarden,komari,subconverter,system} "$OUT_DIR" || die "无法创建暂存目录"
 trap 'rm -rf "$STAGE"' EXIT
 
-########## 1. Vaultwarden 数据库 ##########
+# 1. Vaultwarden 数据库
 # 直接从 env 解析连接串，不重复保存密码
 DBURL="$(grep -m1 '^DATABASE_URL=' "$VW_DIR/vaultwarden.env" 2>/dev/null | cut -d= -f2-)"
 if [ -n "$DBURL" ]; then
@@ -161,7 +141,7 @@ elif [ -n "$METRICS_DIR" ]; then
     warn "未找到 metrics 的本地备份，检查面板的数据库备份任务（可用 opsget ops/panel-cron-inspect 手动触发一次）"
 fi
 
-########## 2. Vaultwarden 数据与配置 ##########
+# 2. Vaultwarden 数据与配置
 log "收集 Vaultwarden 数据 ..."
 tar cf - -C "$VW_DIR" --exclude='icon_cache' --exclude='*.log' --exclude='tmp' data 2>/dev/null \
     | tar xf - -C "$STAGE/vaultwarden" || warn "Vaultwarden data 复制异常"
@@ -170,7 +150,7 @@ for f in vaultwarden.env compose.yaml; do
     [ -f "$VW_DIR/$f" ] && cp -a "$VW_DIR/$f" "$STAGE/vaultwarden/" || warn "缺少 $f"
 done
 
-########## 3. Komari ##########
+# 3. Komari
 log "收集 Komari 数据 ..."
 if [ -n "$KOMARI_DATA" ] && [ -f "$KOMARI_DATA/komari.db" ]; then
     # 必须用 .backup，直接 cp 会丢 WAL 里的近期数据
@@ -190,7 +170,7 @@ done
 [ -n "$KOMARI_DATA" ] && [ -d "$KOMARI_DATA/theme" ] && ls "$KOMARI_DATA/theme" > "$STAGE/komari/theme-list.txt"
 [ -n "$KOMARI_DATA" ] && [ -f "$(dirname "$KOMARI_DATA")/compose.yaml" ] && cp -a "$(dirname "$KOMARI_DATA")/compose.yaml" "$STAGE/komari/"
 
-########## 4. SubConverter ##########
+# 4. SubConverter
 log "收集 SubConverter 配置 ..."
 if [ -n "$SUBCONV_DIR" ] && [ -d "$SUBCONV_DIR" ]; then
     cp -a "$SUBCONV_DIR/." "$STAGE/subconverter/" 2>/dev/null || warn "SubConverter 复制异常"
@@ -198,7 +178,7 @@ else
     warn "未找到 SubConverter 目录: ${SUBCONV_DIR:-未配置}"
 fi
 
-########## 5. 系统配置 ##########
+# 5. 系统配置
 log "收集系统配置 ..."
 mkdir -p "$STAGE/system"/{nginx,cert,docker}
 cp -a "$BT_VHOST"/*.conf "$STAGE/system/nginx/" 2>/dev/null || warn "站点配置复制异常"
@@ -235,7 +215,7 @@ for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null); do
     } >> "$STAGE/system/docker/run-commands.sh" 2>/dev/null
 done
 
-########## 6. 清单与还原说明 ##########
+# 6. 清单与还原说明
 log "生成清单 ..."
 {
     echo "备份时间   : $(date '+%F %T %Z')"
@@ -357,7 +337,7 @@ RESTOREEOF
 sed -i "s|{{DB_CLIENT_HOST}}|${DB_CLIENT_HOST}|g; s|{{DOCKER_CIDR}}|${DOCKER_CIDR}|g" \
     "$STAGE/RESTORE.md"
 
-########## 7. 打包加密 ##########
+# 7. 打包加密
 log "打包 ..."
 tar czf "$STAGE/../payload_${TS}.tar.gz" -C "$STAGE" . || die "tar 打包失败"
 mv "$STAGE/../payload_${TS}.tar.gz" "$STAGE/../payload.tar.gz.tmp"
@@ -381,7 +361,7 @@ rm -rf "${STAGE_ROOT}/.pack_${TS}"
 log "  ✓ 加密包自检通过"
 sha256sum "$ARCHIVE" | tee -a "$LOG_FILE" > "${ARCHIVE}.sha256"
 
-########## 8. 上传 ##########
+# 8. 上传
 UPLOAD_FAIL=0
 for remote in "${REMOTES[@]}"; do
     name="${remote%%:*}"
@@ -403,7 +383,7 @@ for remote in "${REMOTES[@]}"; do
     fi
 done
 
-########## 9. 保留策略 ##########
+# 9. 保留策略
 log "清理本地超过 ${KEEP_LOCAL_DAYS} 天的备份 ..."
 find "$OUT_DIR" -maxdepth 1 -name 'srvbak_*.7z*' -type f -mtime +$KEEP_LOCAL_DAYS -print -delete | tee -a "$LOG_FILE"
 
@@ -412,7 +392,7 @@ for remote in "${REMOTES[@]}"; do
         >>"$LOG_FILE" 2>&1 && log "  ✓ ${remote%%:*} 已清理 ${KEEP_CLOUD_DAYS} 天前的备份"
 done
 
-########## 收尾 ##########
+# 收尾
 if [ "$UPLOAD_FAIL" -ne 0 ]; then
     hb /fail
     notify "备份已生成但上传失败，请检查 $LOG_FILE"

@@ -1,38 +1,13 @@
 #!/usr/bin/env bash
-#
-# xboard-fullbackup.sh —— Xboard 面板单包备份
-#
-# VERSION: 2.3.1
-# 2.3.1: ENV-REQUIRED 里的密码键改写成 BACKUP_PASS_FILE|VW_PASS_FILE 二选一 ——
-#        脚本内部本就有回落，声明按字面写会让 opsget 把能跑的机器拦下来。
-# 2.3.0: 备份加密密码改读 BACKUP_PASS_FILE，VW_PASS_FILE 作回落。这台机器可能
-#        根本没有 Vaultwarden，却被要求填一个名字里带 VW 的键 —— 报错时人会
-#        先去找 Vaultwarden 在哪。老机器的 env.conf 不用改。
-# 2.2.2: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
-# 2.2.1 变更：XBOARD_SITES 留空时改为**自动扫描 vhost 目录**收集全部站点与证书。
-#            写死列表的毛病是：每次在面板增删域名都要记得同步改配置，
-#            忘了就报假警（或更糟——静默漏备份一个站）。
-# 2.2.0 变更：加反向监控心跳（同 vw-fullbackup）
-# 2.1.0 变更：告警发送加重试与落盘兜底（同 vw-fullbackup，实测遇到过瞬时 ENETUNREACH）
-# 2.0.1 变更：vhost 改为按 server_name 反查，不再假设文件名等于域名
-#            （实测漏了一个站点的 vhost —— 面板给它的文件名带了前缀）
-# 2.0.0 变更：环境相关的值全部外置到 /etc/ops-scripts/env.conf，**主体逻辑一行未动**。
-#            RESTORE.md 里的域名与 host 段改为按配置生成；补 sleep 10 再校验；
-#            7z 自检加 </dev/null（-mhe=on 的包缺密码会交互式等输入）。
-#
-# 与 vw-fullbackup.sh 保持同一套约定：
-#   · 单包、7z AES-256、-mhe=on 连文件名一起加密
-#   · 密码从文件读，不出现在命令行
-#   · 打包后 7z t 自检，双云上传后 rclone check 校验
-#   · 任何一步失败都发邮件告警，退出码非零
-#
-# ⚠️ cron 里调用本地路径 /usr/local/bin/xboard-fullbackup.sh，**不要写成 opsget**。
-#    更新用 `opsget -i backup/xboard-fullbackup` 显式安装。
-#
+# backup/xboard-fullbackup.sh — 生成 Xboard 加密备份包并上传云端
+# VERSION: 2.3.2
+# 2.3.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: SVC_XBOARD_DIR XBOARD_DB_NAME XBOARD_DB_USER XBOARD_DB_PASS_FILE XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH RCLONE_REMOTES BACKUP_PASS_FILE|VW_PASS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
+# 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
+
 set -uo pipefail
 
-# ==================== 配置（全部来自 env.conf） ====================
+# 配置（全部来自 env.conf）
 ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 [ -r "$ENV_FILE" ] || { echo "[FATAL] 缺少配置文件 $ENV_FILE（从 config/env.example.conf 复制）"; exit 1; }
 # shellcheck disable=SC1090
@@ -85,7 +60,7 @@ else
 fi
 ASSETS_SITE="${XBOARD_ASSETS_SITE:-}"
 
-# ==================== 内部 ====================
+# 内部
 STAMP=$(date -u +%Y%m%d_%H%M%S)
 WORK=$(mktemp -d /tmp/xboard-bak.XXXXXX)
 ARCHIVE="$BACKUP_DIR/xboard_${STAMP}.7z"
@@ -140,7 +115,7 @@ hb() {
         || printf '[%s] [WARN] 心跳上报失败%s\n' "$(date -u '+%F %T')" "${1:-}" >&2
 }
 
-# ==================== 前置检查 ====================
+# 前置检查
 log "=== Xboard 备份开始 ==="
 hb /start
 
@@ -169,7 +144,7 @@ host=$DB_HOST
 port=$DB_PORT
 EOF
 
-# ==================== 1. 数据库 ====================
+# 1. 数据库
 log "--- 导出数据库 $DB_NAME ---"
 
 mkdir -p "$WORK/db"
@@ -216,7 +191,7 @@ grep -q "Dump completed" "$WORK/db/${DB_NAME}.sql" \
     || warn "dump 末尾没有 'Dump completed' 标记，文件可能被截断"
 log "dump 大小: $(numfmt --to=iec "$DUMP_SIZE")"
 
-# ==================== 2. 应用文件 ====================
+# 2. 应用文件
 log "--- 打包应用文件 ---"
 
 mkdir -p "$WORK/app"
@@ -239,7 +214,7 @@ for d in .docker/.data storage/theme plugins; do
     fi
 done
 
-# ==================== 3. nginx 与证书 ====================
+# 3. nginx 与证书
 log "--- 打包 nginx 配置与证书 ---"
 
 mkdir -p "$WORK/nginx/vhost" "$WORK/nginx/cert"
@@ -271,7 +246,7 @@ fi
 [ -d "${WWWROOT}/${ASSETS_SITE}" ] \
     && cp -a "${WWWROOT}/${ASSETS_SITE}" "$WORK/nginx/assets-site"
 
-# ==================== 4. 部署元数据 ====================
+# 4. 部署元数据
 log "--- 打包部署元数据 ---"
 
 mkdir -p "$WORK/deploy"
@@ -280,7 +255,7 @@ mkdir -p "$WORK/deploy"
 # 配置本身也进包：换机器时照着它填（里面没有密码，只有路径与名称）
 cp -a "$ENV_FILE" "$WORK/deploy/env.conf" 2>/dev/null
 
-# ==================== 5. 清单 ====================
+# 5. 清单
 cat > "$WORK/MANIFEST.txt" <<EOF
 Xboard 备份包
 ================================
@@ -430,7 +405,7 @@ sed -i "s|{{DB_NAME}}|${DB_NAME}|g; s|{{DB_USER}}|${DB_USER}|g;
         s|{{PANEL_CERT_DIR}}|${PANEL_CERT_DIR}|g; s|{{WWWROOT}}|${WWWROOT}|g;
         s|{{ASSETS_SITE}}|${ASSETS_SITE}|g" "$WORK/RESTORE.md"
 
-# ==================== 6. 打包加密 ====================
+# 6. 打包加密
 log "--- 7z 打包（AES-256，文件名一并加密）---"
 
 7z a -t7z -m0=lzma2 -mx=6 -mhe=on -p"$BACKUP_PASS" \
@@ -449,7 +424,7 @@ sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
 log "包体: $ARCHIVE ($(numfmt --to=iec "$ARCHIVE_SIZE"))"
 log "校验和: $(cut -d' ' -f1 < "${ARCHIVE}.sha256")"
 
-# ==================== 7. 上传 ====================
+# 7. 上传
 if command -v rclone >/dev/null 2>&1; then
     for remote in "${RCLONE_TARGETS[@]}"; do
         log "--- 上传到 $remote ---"
@@ -470,7 +445,7 @@ else
     warn "未安装 rclone，跳过云端上传（备份只存在于本机）"
 fi
 
-# ==================== 8. 保留策略 ====================
+# 8. 保留策略
 log "--- 清理过期备份 ---"
 
 DELETED=$(find "$BACKUP_DIR" -name 'xboard_*.7z*' -mtime "+$LOCAL_KEEP_DAYS" -print -delete | wc -l)
@@ -483,7 +458,7 @@ if command -v rclone >/dev/null 2>&1; then
     done
 fi
 
-# ==================== 9. 汇总 ====================
+# 9. 汇总
 log "--- 数据库体积 Top10 ---"
 sed 's/^/    /' "$WORK/db/table-sizes.txt" 2>/dev/null || true
 

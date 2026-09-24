@@ -1,15 +1,8 @@
 #!/usr/bin/env bash
-# ops/bind-localhost.sh — 把容器端口从 0.0.0.0 收到 127.0.0.1
-# VERSION: 2.0.0
-#
-# 为什么必须做：Docker 会自己往 iptables 里插规则，**绕过 ufw**。
-# 也就是说 0.0.0.0 绑定的容器端口，即使 ufw 里没放行，也是对全网敞开的。
-# 只该走反向代理的服务不应该直接暴露。
-#
-# 端口映射不能热改，容器要重建。数据在 bind mount 里，不受影响。
-#
-# 用法: bind-localhost.sh            扫描并生成新的 run 命令（不执行）
-#       bind-localhost.sh --apply    生成并执行
+# ops/bind-localhost.sh — 将容器端口映射从公网绑定改为本机绑定
+# VERSION: 2.0.1
+# 2.0.1: 整理注释并补充目录文档，执行逻辑未变。
+# 默认只生成命令，--apply 才执行容器重建。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root

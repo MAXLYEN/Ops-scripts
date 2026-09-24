@@ -1,26 +1,7 @@
 #!/usr/bin/env bash
-# ops/compare-backup-content.sh — 比对两个备份包的内容清单
-# VERSION: 1.0.3
-# 1.0.3: 结尾那句「只有体积差、清单一致 = 等价」原本无条件打印，有差异时会和
-#        上面的差异列表一起出现，同屏两个相反结论，看的人容易被后一句带偏。
-#        改为按清单是否有差异分别给结论。
-# 1.0.2: 差异判定不再把 diff 放进 if 的管道 —— lib/common.sh 设了 pipefail，
-#        管道退出码取最右边的非零值，而 diff 在「有差异」时返回 1（这是它的正常
-#        结果，不是错误），于是有差异反而走 else，打印「文件清单完全一致」。
-#        结论方向正好是反的，最危险。改为先把差异落成文件，按文件是否为空判定。
-# 1.0.1: ① 密码键跟上 backup/*.sh 2.3.x：BACKUP_PASS_FILE 优先，VW_PASS_FILE 回落。
-#           原来只认 VW_PASS_FILE，旧键一旦清掉就会掉到 BACKUP_PASS_FILES（复数，
-#           是另一个键——密码文件**列表**）取第一项，多半是别的密码文件，
-#           于是报「解包失败」，人会以为是备份包坏了，而不是脚本取错了密码。
-#        ② 补 -h/--help；原来给任何非法参数都只吐一行 die，看不到用法。
-#
-# 改动备份脚本后验证等价性用：文件路径列表必须一致，只允许你预期的那几项差异。
-# 自动识别两种结构：包内直接铺开、或内容在 payload.tar.gz 里。
-#
-# 用法: compare-backup-content.sh <旧包> <新包>    顺序是旧在前、新在后
-#       compare-backup-content.sh <目录>          取该目录下最新的两个包比
-#       compare-backup-content.sh -h
-#
+# ops/compare-backup-content.sh — 比对两个加密备份包的内容清单
+# VERSION: 1.0.4
+# 1.0.4: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: BACKUP_PASS_FILE|VW_PASS_FILE
 
 usage() {

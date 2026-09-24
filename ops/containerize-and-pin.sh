@@ -1,17 +1,9 @@
 #!/usr/bin/env bash
-# containerize-and-pin.sh
-# VERSION: 1.1.0
+# ops/containerize-and-pin.sh — 把服务改为 compose 管理并锁定镜像 digest
+# VERSION: 1.1.1
+# 1.1.1: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: SVC_KOMARI_DATA SVC_SUBCONV_DIR SVC_XBOARD_DIR KOMARI_SITE SUBCONV_SITE
-# 1.1.0: 三个服务目录与两个自检域名改从 env.conf 读 —— 原来写死，而本仓库公开托管。
-#
-# 把 komari 与 SubConverter-Extended 从 docker run 转为 compose 管理，
-# 并将四个容器的镜像由 latest 锁定为当前正在运行的 digest。不升级版本。
-#
-# 注意：
-# - 锁 digest 而非 tag：digest 取自本地镜像的 RepoDigests，必定存在，不依赖 registry 上 tag 是否可用
-# - container_name 显式写死：compose 默认名为 <项目>-<服务>-1，会导致按容器名查找的脚本失效
-# - 旧容器停止后改名保留（不删除），compose 起不来时可改回
-# - xboard 与 vaultwarden 已是 compose 管理，只改 image 行
+
 set -o pipefail
 
 ENV_FILE=/etc/ops-scripts/env.conf
@@ -41,7 +33,7 @@ digest_of() {  # $1=镜像引用
   docker image inspect "$1" --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' 2>/dev/null
 }
 
-# ---------- 0. 预检 ----------
+# 0. 预检
 log "预检"
 docker compose version >/dev/null 2>&1 || die "docker compose v2 不可用"
 for c in komari SubConverter-Extended xboard-xboard-1 vaultwarden; do
@@ -63,13 +55,13 @@ echo "    xboard        $D_XBOARD"
 mkdir -p "$BAK" || die "建不了 $BAK"
 log "备份目录：$BAK"
 
-# ---------- 1. 留存原容器参数 ----------
+# 1. 留存原容器参数
 log "1/6 导出原容器完整参数（回滚依据）"
 for c in komari SubConverter-Extended xboard-xboard-1 vaultwarden; do
   docker inspect "$c" > "${BAK}/inspect-${c}.json" && echo "  [+] inspect-${c}.json"
 done
 
-# ---------- 2. 停机冷备 ----------
+# 2. 停机冷备
 log "2/6 停止 komari 与 SubConverter-Extended 并冷备数据"
 docker stop komari SubConverter-Extended >/dev/null || die "停止容器失败"
 
@@ -84,7 +76,7 @@ if [ -d ${SUBCONV_DIR} ]; then
   echo "  [+] subconverter.tar.gz  $(du -h "${BAK}/subconverter.tar.gz" | cut -f1)"
 fi
 
-# ---------- 3. 搬迁 komari 数据目录 ----------
+# 3. 搬迁 komari 数据目录
 log "3/6 komari 数据目录 /root/data -> ${SVC_KOMARI_DATA}"
 if [ -d ${SVC_KOMARI_DATA} ]; then
   echo "  [=] 目标已存在，跳过搬迁"
@@ -96,7 +88,7 @@ else
   die "/root/data 不存在，无法搬迁"
 fi
 
-# ---------- 4. 生成 compose ----------
+# 4. 生成 compose
 log "4/6 生成 compose 文件"
 T=$(mktemp)
 cat > "$T" <<EOF
@@ -140,7 +132,7 @@ EOF
 put_file "$T" ${SUBCONV_DIR}/compose.yaml 644
 rm -f "$T"
 
-# ---------- 5. 切换 ----------
+# 5. 切换
 log "5/6 旧容器改名保留并用 compose 接管"
 docker rename komari "komari-preswitch-${TS}" || die "改名失败"
 docker rename SubConverter-Extended "SubConverter-preswitch-${TS}" || die "改名失败"
@@ -149,7 +141,7 @@ echo "  [~] 旧容器已改名保留（确认无误后再手动 docker rm）"
 docker compose -f ${KOMARI_DIR}/compose.yaml up -d || die "komari 启动失败，旧容器名为 komari-preswitch-${TS}"
 docker compose -f ${SUBCONV_DIR}/compose.yaml up -d || die "SubConverter 启动失败，旧容器名为 SubConverter-preswitch-${TS}"
 
-# ---------- 6. xboard 锁版本 ----------
+# 6. xboard 锁版本
 log "6/6 xboard compose 锁定 digest"
 N=$(grep -cE '^[[:space:]]*image:.*cedar2025/xboard' ${XBOARD_DIR}/compose.yaml)
 if [ "$N" != 1 ]; then
@@ -161,7 +153,7 @@ else
   docker compose -f ${XBOARD_DIR}/compose.yaml up -d || die "xboard 启动失败，原文件在 ${BAK}/xboard-compose.yaml"
 fi
 
-# ---------- 自检 ----------
+# 自检
 echo; echo "===== 自检 ====="
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
 echo

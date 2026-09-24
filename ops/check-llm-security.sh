@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# check-llm-security.sh
-# VERSION: 1.0.1
-# 1.0.1: 第 2 项的 find 补上 *block* —— 原来只匹配文件名含 allow/deny 的，
-#        blocklist.conf 两个词都不占，内容打不出来，等于漏看了真正生效的封禁配置。
+# ops/check-llm-security.sh — 只读盘点 LiteLLM 与 new-api 的访问控制
+# VERSION: 1.0.2
+# 1.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: LITELLM_SITE NEWAPI_SITE ALLOW_EXTRA_IPS
-# 只读盘点 LiteLLM / new-api 两站的访问控制现状。不修改任何配置文件。
+
 set -o pipefail
 
 ENV_FILE=/etc/ops-scripts/env.conf

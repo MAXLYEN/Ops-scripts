@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
-# 09-restore-backup-stack.sh — 重建备份体系
-# VERSION: 2.0.0
-#
-# 在迁入机运行。装依赖、归位配置与脚本、验证云端可达与密码可用。
-# **不自动安装 cron** —— 等切换并观察正常后再用 ops/restore-cron 恢复。
-#
-# 用法: 09-restore-backup-stack.sh [暂存目录]
-#       默认取 RESTORE_STAGE（07 解出来的那个）
+# migrate/09-restore-backup-stack.sh — 在迁入机重建备份依赖和配置
+# VERSION: 2.0.1
+# 2.0.1: 整理注释并补充目录文档，执行逻辑未变。
+# 不自动安装 cron；业务切换并观察正常后再恢复。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root

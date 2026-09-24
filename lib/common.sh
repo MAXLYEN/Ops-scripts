@@ -1,20 +1,12 @@
 #!/usr/bin/env bash
-# lib/common.sh — ops-scripts 公共函数库
-# VERSION: 1.1.1
-# 1.1.1: server_name 里的 IP 字面量、localhost、通配符不再被当成域名 ——
-#        面板会给站点的 server_name 带上 127.0.0.1，它进不了 wwwroot 也申不了证书。
-#        这类跳过项会列出来但不计告警：它是正常配置，不该污染告警计数。
-# 1.1.0: 新增 scan_vhost_domains / resolve_domains —— 手维护的域名清单会双向漂移
-#        （多出废域名 = 噪音，漏掉真站点 = 静默不检查），统一在这里处理
-#
-# 用法：每个脚本开头
-#   . "$(dirname "$0")/../lib/common.sh"   # 本地布局
-#   . /usr/local/lib/ops-common.sh          # opsget 安装后的位置
+# lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
+# VERSION: 1.1.2
+# 1.1.2: 整理注释并补充目录文档，执行逻辑未变。
 
 set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
-OPS_COMMON_VERSION="1.1.1"
+OPS_COMMON_VERSION="1.1.2"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志

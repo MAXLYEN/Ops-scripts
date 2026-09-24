@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
-# 04-verify-migration.sh — 迁移后逐项比对
-# VERSION: 2.0.1
-# 2.0.1: 头部加 ENV-REQUIRED 声明，供 opsget 按需预检配置项（脚本逻辑未变）
-#
-# 在新旧机各跑一次，diff 两份输出。比对四项：
-#   1. 每张表的精确行数（不是 information_schema 的估算值）
-#   2. 站点配置清单
-#   3. 证书及到期日
-#   4. 数据库账号授权
-#
-# 输出刻意不含主机名，diff 才干净。
+# migrate/04-verify-migration.sh — 对比新旧机数据库、站点、证书与账号授权
+# VERSION: 2.0.2
+# 2.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: DB_NAMES
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"

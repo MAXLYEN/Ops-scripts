@@ -1,16 +1,8 @@
 #!/usr/bin/env bash
-# db/rotate-db-pass.sh — 轮换数据库账号密码
-# VERSION: 2.0.0
-#
-# 一个账号常有多条 host 记录（如 172.% 和 localhost）。面板改密码时
-# **只会改它自己记录的那个 host**，另一条会留着旧密码 —— 状态不一致，
-# 且下游改完连接串后立刻挂。所以改完必须核对所有 host 的密码哈希一致。
-#
-# 用法:
-#   rotate-db-pass.sh check <用户名>              只读核对（改前改后各跑一次）
-#   rotate-db-pass.sh rotate <用户名> [下游sqlite] [容器名]
-#
-# 只用字母数字生成密码：user:pass@host 形式的连接串里 @ : / 都是分隔符。
+# db/rotate-db-pass.sh — 轮换数据库密码并核对所有 host 记录
+# VERSION: 2.0.1
+# 2.0.1: 整理注释与帮助输出，并补充目录文档。
+# 用法: rotate-db-pass.sh check|rotate <用户名> [下游sqlite] [容器名]
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root
@@ -18,7 +10,12 @@ load_env
 mysql_ready
 
 ACTION=${1:-}; USER=${2:-}
-[ -n "$ACTION" ] && [ -n "$USER" ] || { sed -n '12,15p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+[ -n "$ACTION" ] && [ -n "$USER" ] || {
+  printf '%s\n' \
+    '用法: rotate-db-pass.sh check <用户名>' \
+    '      rotate-db-pass.sh rotate <用户名> [下游sqlite] [容器名]'
+  exit 1
+}
 
 show_state() {
   section "$USER 的 host 记录与密码哈希"

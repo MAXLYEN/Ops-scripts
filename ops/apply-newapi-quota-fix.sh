@@ -1,20 +1,9 @@
 #!/usr/bin/env bash
-# apply-newapi-quota-fix.sh
-# VERSION: 1.2.0
+# ops/apply-newapi-quota-fix.sh — 停止 new-api 后修正消费统计并校验回传
+# VERSION: 1.2.1
+# 1.2.1: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_CONTAINER NEWAPI_PUBLIC_URL
-# 1.2.0: 落地机地址、端口、数据目录、容器名改从 env.conf 读 —— 原来写死在脚本里，
-#        而本仓库公开托管，等于把落地机 IP 与 SSH 端口一起推了上去。
-#        ssh 用户沿用 backup/newapi-fullbackup 的约定，固定 root@，不另设键。
-# 1.1.0: 第 3 步补上 quota_data 的重算 —— logs 与 users 改了之后，看板读的是
-#        按小时预聚合的 quota_data，不跟着改就会一直显示旧的虚高金额。
-#
-# 在落地机上停 new-api、把 SQLite 库拉回本机修正兜底计价、再传回并启动。
-# 修正逻辑见 fix-newapi-fallback-quota.sh 与 fix-newapi-quota-data.sh。
-#
-# 注意：
-# - 库拉回本机改：落地机没有 sqlite3，且本地留改动前后各一份便于回退
-# - 停容器后必须删除 -wal/-shm 再拷，否则传回的库与残留 WAL 不匹配
-# - 传回前校验 integrity_check 与两表总额一致，不通过则中止，不动落地机上的库
+
 set -o pipefail
 
 ENV_FILE=/etc/ops-scripts/env.conf
@@ -43,13 +32,13 @@ log "工作目录：$W"
 
 SSH="ssh -p ${JP_PORT} ${JP_HOST}"
 
-# ---------- 1. 备份 ----------
+# 1. 备份
 log "1/5 落地机上跑一次完整备份"
 $SSH 'ls -x /usr/local/bin/newapi-fullbackup.sh >/dev/null 2>&1' \
   && $SSH '/usr/local/bin/newapi-fullbackup.sh' \
   || log "  [i] 落地机上没有该脚本，备份由汇总机侧的 cron 负责，跳过"
 
-# ---------- 2. 停容器并拉库 ----------
+# 2. 停容器并拉库
 log "2/5 停 new-api 并拉回库文件"
 $SSH "docker stop ${CT}" >/dev/null || die "停容器失败"
 $SSH "ls -l ${JP_DIR}/one-api.db*" | sed 's/^/  /'
@@ -59,7 +48,7 @@ scp -P "$JP_PORT" "${JP_HOST}:${JP_DIR}/one-api.db" "${W}/one-api.db" || {
 cp -a "${W}/one-api.db" "${W}/one-api.db.before"
 log "  拉回 $(du -h "${W}/one-api.db" | cut -f1)，改动前副本已留存"
 
-# ---------- 3. 修正 ----------
+# 3. 修正
 log "3/5 执行修正（logs + users）"
 "$FIXER" "${W}/one-api.db" --apply || {
   $SSH "docker start ${CT}"; die "修正失败，落地机上的库未被改动，容器已重启"
@@ -70,7 +59,7 @@ log "3b/5 执行修正（quota_data 看板聚合表）"
   $SSH "docker start ${CT}"; die "看板表修正失败，落地机上的库未被改动，容器已重启"
 }
 
-# ---------- 4. 校验后传回 ----------
+# 4. 校验后传回
 log "4/5 校验并传回"
 R=$(sqlite3 "${W}/one-api.db" 'PRAGMA integrity_check;')
 [ "$R" = "ok" ] || { $SSH "docker start ${CT}"; die "完整性校验失败：$R，未传回"; }
@@ -84,7 +73,7 @@ $SSH "cp -a ${JP_DIR}/one-api.db ${JP_DIR}/one-api.db.bak-${TS} && rm -f ${JP_DI
 scp -P "$JP_PORT" "${W}/one-api.db" "${JP_HOST}:${JP_DIR}/one-api.db" \
   || { $SSH "docker start ${CT}"; die "传回失败，落地机上旧库仍在 one-api.db.bak-${TS}"; }
 
-# ---------- 5. 启动并验证 ----------
+# 5. 启动并验证
 log "5/5 启动容器"
 $SSH "docker start ${CT}" >/dev/null || die "启动失败"
 sleep 8

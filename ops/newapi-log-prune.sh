@@ -1,22 +1,10 @@
 #!/usr/bin/env bash
-# newapi-log-prune.sh
-# VERSION: 1.0.1
+# ops/newapi-log-prune.sh — 清理超过保留期的 new-api 消费日志
+# VERSION: 1.0.2
+# 1.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: NEWAPI_PUBLIC_URL NEWAPI_ROOT_PAT NEWAPI_LOG_KEEP_DAYS
-# 1.0.1: 终止状态补 succeeded —— 接口实际返回的就是这个词，原来只判
-#        completed/success/finished，任务早已成功却一直轮询到 300 秒超时。
-#
-# 清理 new-api 中早于保留期的消费日志。rc.38 没有「自动保留天数」设置，
-# 只能调管理接口按时间戳删除，本脚本把这件事做成可 cron 的形式。
-#
-# 用法:
-#   newapi-log-prune.sh            执行清理
-#   newapi-log-prune.sh --dry-run  只打印截止时间与目标地址，不发请求
-#
-# 注意：
-# - 凭据是 root 用户的「访问令牌」（PAT），不是 /v1 用的令牌，两者是不同的表与校验路径
-# - 该令牌可调用全部管理接口，只放在 env.conf（600 权限）里，不要写进脚本
-# - 保留天数下限 30：低于此值视为误配，直接中止，避免一次清空全部日志
-# - 任务是异步的，发起后轮询 task_id 直到终止状态或超时
+# 按配置保留期清理；低于 30 天将中止。
+
 set -o pipefail
 
 ENV_FILE=/etc/ops-scripts/env.conf

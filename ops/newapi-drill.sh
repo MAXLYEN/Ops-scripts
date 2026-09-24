@@ -1,21 +1,14 @@
 #!/usr/bin/env bash
-# newapi-drill.sh
-# VERSION: 1.0.1
-# 1.0.1 状态文件的值加引号（含空格的时间戳 source 时被当成命令）；脱敏改为按值判断，
-#       原先按 key 名匹配会把 false/true/5 这类布尔与短数字也打码，看着像有值其实没有
+# ops/newapi-drill.sh — 在备用机演练 new-api 备份的恢复与清理
+# VERSION: 1.0.2
+# 1.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: NEWAPI_HOST BACKUP_PASS_FILE NEWAPI_CLOUD_DIR
-#
-# 灾难恢复演练：假设主落地机彻底不可用，只剩云端备份，
-# 在一台备用机上把 new-api 恢复出来并校验，演练完把这台机还原成动手前的样子。
-#
-# 全程不修改隧道单元、不修改 env.conf、不触碰生产落地机。
-# 恢复实例用独立的容器名与数据目录，与正式部署不共用任何路径。
-#
+# 在备用机运行；禁止指向生产落地机。
 # 用法：
-#   newapi-drill.sh restore  <目标IP>   从云端最新备份恢复
-#   newapi-drill.sh verify   <目标IP>   与线上实例对比数据
-#   newapi-drill.sh teardown <目标IP>   清理并还原
-#   newapi-drill.sh status   <目标IP>   看当前演练状态
+#   newapi-drill.sh restore <目标IP>
+#   newapi-drill.sh verify <目标IP>
+#   newapi-drill.sh teardown <目标IP>
+#   newapi-drill.sh status <目标IP>
 
 set -o pipefail
 
@@ -43,7 +36,7 @@ usage() {
 [ -z "$ACTION" ] && usage
 [ -z "$TARGET" ] && usage
 
-# ---------- 硬拦截：绝不对生产落地机动手 ----------
+# 硬拦截：绝不对生产落地机动手
 guard_target() {
   [ "$TARGET" = "${NEWAPI_HOST:-}" ] && \
     die "拒绝执行：$TARGET 是 env.conf 里的生产落地机 NEWAPI_HOST"
@@ -64,7 +57,7 @@ rsh_n() { ssh -n "${SSH_OPTS[@]}" -p "$TPORT" "root@$TARGET" "$@"; }
 log "目标 root@$TARGET:$TPORT  动作 $ACTION"
 rsh_n true 2>/dev/null || die "SSH 连不上 $TARGET:$TPORT"
 
-# ================= restore =================
+# restore
 do_restore() {
   log "----- 预检 -----"
 
@@ -183,7 +176,7 @@ REMOTE_RUN
   log "恢复完成。下一步：newapi-drill.sh verify $TARGET"
 }
 
-# ================= verify =================
+# verify
 db_counts() {  # $1=ssh端口 $2=主机 $3=db路径 $4=容器名
   ssh -n "${SSH_OPTS[@]}" -p "$1" "root@$2" "
     T=\$(mktemp -d)
@@ -252,7 +245,7 @@ for k,v in sorted(c.execute('SELECT key,value FROM options')):
   log "校验完毕。确认无误后：newapi-drill.sh teardown $TARGET"
 }
 
-# ================= teardown =================
+# teardown
 do_teardown() {
   log "----- 清理恢复实例 -----"
   DOCKER_PREEXISTING=1
@@ -302,7 +295,7 @@ REMOTE_CHECK
   log "演练结束，目标机已还原"
 }
 
-# ================= status =================
+# status
 do_status() {
   [ -r "$STATE_FILE" ] && { echo "--- 演练状态文件 ---"; cat "$STATE_FILE"; } \
                        || echo "没有进行中的演练（无状态文件）"

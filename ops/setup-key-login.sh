@@ -1,29 +1,7 @@
 #!/usr/bin/env bash
-# ops/setup-key-login.sh — 给新机器配置密钥登录（一条命令）
-# VERSION: 1.0.0
-#
-# 把本机的 ~/.ssh/id_ed25519.pub 装到目标机，验证密钥登录可用，
-# 需要时自动打开服务端的 PubkeyAuthentication，失败自动回滚。
-#
-# 用法:
-#   setup-key-login.sh <IP> <端口> <密码>
-#   setup-key-login.sh <IP> <端口> <密码> --user root
-#   setup-key-login.sh -h
-#
-# 例:
-#   setup-key-login.sh 1.2.3.4 22 'MyPassw0rd'
-#   setup-key-login.sh 1.2.3.4 2222 'MyPassw0rd' --user administrator
-#
-# 做的事，按顺序：
-#   1. 用密码连上去，追加公钥到 ~/.ssh/authorized_keys（去重，可重复跑）
-#   2. 修正 ~ 与 ~/.ssh 权限（sshd 对权限极严，过宽会静默拒绝密钥）
-#   3. 验证密钥登录
-#   4. 不通则查 sshd -T；若 PubkeyAuthentication no，写 drop-in 打开并 reload
-#   5. 再验；仍不通则回滚 drop-in，并打印诊断信息
-#   6. 成功后把这台追加进 ~/.vps-hosts.txt（去重），供 collect.sh 使用
-#
-# 全程不动 PasswordAuthentication —— 密码登录始终保留，作为退路。
-# 非 root 用户会自动尝试 sudo -n 把公钥同时装到 root。
+# ops/setup-key-login.sh — 配置新机器的 SSH 密钥登录并验证
+# VERSION: 1.0.1
+# 1.0.1: 整理注释并补充目录文档，执行逻辑未变。
 
 set -o pipefail
 
