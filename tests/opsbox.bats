@@ -374,3 +374,21 @@ daily_stubs() {  # 一键巡检里的其余几项都放成通过的桩
   lacks "直接编辑 env.conf"
   has "还没有任何配置项"
 }
+
+# ── 输入容错（真机第三轮：第一次按 a 菜单只是默默刷新） ─────
+@test "输入容错：首尾空格、全角字母和问号都能识别" {
+  drive opsbox " ？ " 0 "ｑ"
+  [ "$status" -eq 0 ]
+  has "按要办的事找"
+}
+
+@test "输入容错：认不出的输入明确提示，不默默刷新" {
+  drive opsbox zz q
+  has "没有这个选项：「zz」"
+}
+
+@test "说明卡片上全角０也是返回，不会误执行" {
+  stub ops/ssl-audit 0
+  drive opsbox 1 3 "０" 0 q
+  [ -z "$(calls)" ]
+}

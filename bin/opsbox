@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/opsbox — ops-scripts 中文菜单：按场景挑功能，常用组合自动串联
 # VERSION: 1.1.0
-# 1.1.0: 缺配置时执行前就地逐项填写（显示模板说明、凭据不回显、原样保存），不再打开编辑器；配置管理可逐项填写与查看；头部提示未填项数；一键巡检里本机没有的服务记为「不适用」；提交号缩短显示。
+# 1.1.0: 缺配置时执行前就地逐项填写（显示模板说明、凭据不回显、原样保存），不再打开编辑器；配置管理可逐项填写与查看；头部提示未填项数；一键巡检里本机没有的服务记为「不适用」；选项输入容错（首尾空格、全角），认不出时明确提示；提交号缩短显示。
 # 用法: opsbox（或在终端里不带参数运行 opsget）。随 opsget -u 一起更新。
 
 set -o pipefail
@@ -137,6 +137,24 @@ tagc() {
 note() { printf '%s%s%s\n' "$Y" "$*" "$N"; }
 
 # ── 输入 ────────────────────────────────────────────────────
+# 选项输入容错：中文输入法常处在全角状态（ａ、０、？），也常多敲空格。
+# 认不出就只能默默刷新，看起来像「按了没反应」—— 真机上就这样丢过一次按键
+FW='０１２３４５６７８９ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ？'
+HW='0123456789abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz?'
+norm() {  # norm <输入>：去首尾空白、全角转半角、转小写
+  local s=$1 i
+  s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"
+  s=${s//　/}   # 全角空格
+  for ((i = 0; i < ${#FW}; i++)); do s=${s//"${FW:i:1}"/"${HW:i:1}"}; done
+  printf '%s' "${s,,}"
+}
+bad_choice() { MSG="没有这个选项：「$1」—— 输入方括号里的编号或字母"; }
+show_msg() { [ -n "${MSG:-}" ] && { note "$MSG"; MSG=""; }; }
+
+ask_choice() {  # ask_choice <提示> [默认值]：选项用的 ask，结果做容错处理
+  ask "$@"; ANS=$(norm "$ANS")
+}
+
 ask() {  # ask <提示> [默认值]；结果放在 ANS
   local p=$1
   [ -n "${2:-}" ] && p="$p [$2]"
@@ -147,7 +165,8 @@ confirm() {  # confirm <问题> [y|n，默认 n]
   local a def=${2:-n} hint='[y/N]'
   [ "$def" = y ] && hint='[Y/n]'
   read -r -p "$1 $hint " a </dev/tty || a=""
-  case "${a:-$def}" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+  a=$(norm "$a")
+  case "${a:-$def}" in y|yes) return 0 ;; *) return 1 ;; esac
 }
 gate_host() {  # 高危操作手输主机名：防止在错的机器上顺手回车
   local h a; h=$(hostname)
@@ -489,7 +508,7 @@ do_now() {
   fi
   for i in "${!opts[@]}"; do printf '  [%d] %s\n' $((i + 1)) "${opts[i]}"; done
   printf '  [a] 全部依次执行\n'
-  ask "选择" 1
+  ask_choice "选择" 1
   if [ "$ANS" = a ]; then
     flow_begin "立即备份"
     for n in "${opts[@]}"; do step "$n" backup_run "$n"; done
@@ -713,14 +732,16 @@ do_wizard() {
     printf '  顺序：00 →(需要则重启)→ 01 → 02 → 03 →(重启)→ 04\n'
     printf '  %s阶段 03 之前：先另开一个 SSH 窗口连着，并确认带外控制台（VNC）能进%s\n\n' "$Y" "$N"
     printf '  回车 执行下一步%s   输入编号 单独执行该阶段   r 重置进度   0 返回\n' "${next:+ $next}"
+    show_msg
     read -r -p "请选择 > " sel </dev/tty || return
+    sel=$(norm "$sel")
     case "$sel" in
       0|q) return ;;
       r)   state_set INIT_DONE ""; state_set INIT_BOOT ""; continue ;;
       '')  [ -n "$next" ] || { note "所有阶段都已完成；要重跑请输入编号"; pause; continue; }
            sel=$next ;;
     esac
-    [[ "$sel" =~ ^0?[0-4]$ ]] || continue
+    [[ "$sel" =~ ^0?[0-4]$ ]] || { bad_choice "$sel"; continue; }
     sel=$(printf '%02d' "$((10#$sel))")
     init_stage "$sel"
     pause
@@ -730,7 +751,7 @@ do_wizard() {
 # ── 功能：VPS 质量评估 ──────────────────────────────────────
 do_probe() {
   printf '  [1] 快速（约 1 分钟，跳过耗时的测试）\n  [2] 完整\n  [3] 完整 + IP 质量深度检测（再加 1-2 分钟）\n'
-  ask "选择" 1
+  ask_choice "选择" 1
   case "$ANS" in
     1) run_ops vpsscore/probe --quick ;;
     2) run_ops vpsscore/probe ;;
@@ -741,7 +762,7 @@ do_probe() {
 do_collect() {
   printf '  [1] 汇总各机已有的结果并打分\n  [2] 每台重新采集后打分（约 1-2 分钟/台）\n'
   printf '  [3] 重新采集 + IP 质量深度检测\n  [4] 只列出会连接哪些主机，不实际连接\n'
-  ask "选择" 1
+  ask_choice "选择" 1
   case "$ANS" in
     1) run_ops vpsscore/collect ;;
     2) run_ops vpsscore/collect -p ;;
@@ -755,7 +776,7 @@ do_score() {
   ask "结果目录" "$HOME/vpsscore-baseline"; dir=$ANS
   [ -e "$dir" ] || { note "不存在：$dir（先跑「多机汇总评分」或「本机质量采集」）"; return 1; }
   printf '  [1] 全部角色\n  [2] relay 中转   看重带宽、丢包\n  [3] web 建站     看重 CPU、磁盘\n  [4] land 落地    看重直连延迟\n'
-  ask "选择" 1
+  ask_choice "选择" 1
   case "$ANS" in
     2) run_ops vpsscore/score -r relay "$dir" ;;
     3) run_ops vpsscore/score -r web "$dir" ;;
@@ -812,7 +833,7 @@ do_migrate() {
     if [ -z "$role" ]; then
       cls
       printf '%s── 整机迁移向导 ──%s\n\n  这台机器是？\n  [1] 迁出机（旧机器）\n  [2] 迁入机（新机器）\n  [0] 返回\n' "$H" "$N"
-      ask "选择"
+      ask_choice "选择"
       case "$ANS" in 1) role=out ;; 2) role=in ;; *) return ;; esac
       state_set MIG_ROLE "$role"
     fi
@@ -822,15 +843,17 @@ do_migrate() {
     while IFS='|' read -r n t; do printf '  [%s] %s\n' "$n" "$t"; done <<<"$steps"
     printf '\n  %s按编号从小到大做；每一步的执行机器和产物见 migrate/README.md%s\n' "$D" "$N"
     printf '  输入编号执行   c 切换角色   0 返回\n'
+    show_msg
     read -r -p "请选择 > " sel </dev/tty || return
+    sel=$(norm "$sel")
     case "$sel" in
       0|q|'') return ;;
       c)      role=""; state_set MIG_ROLE ""; continue ;;
       cron)   ;;
-      *)      [[ "$sel" =~ ^[0-9]+$ ]] || continue
+      *)      [[ "$sel" =~ ^[0-9]+$ ]] || { bad_choice "$sel"; continue; }
               sel=$(printf '%02d' "$((10#$sel))") ;;
     esac
-    grep -q "^$sel|" <<<"$steps" || continue
+    grep -q "^$sel|" <<<"$steps" || { bad_choice "$sel"; continue; }
     mig_run "$role" "$sel"
     pause
   done
@@ -851,7 +874,7 @@ do_update() {
 do_pin() {
   opsget --pin
   printf '\n  [1] 固定到新的 tag\n  [2] 取消固定（回到 main）\n  [0] 返回\n'
-  ask "选择" 0
+  ask_choice "选择" 0
   case "$ANS" in
     1) ask "tag（如 v2026.09.25）"
        [ -n "$ANS" ] || return 0
@@ -867,7 +890,7 @@ do_config() {
   printf '  [2] 查看当前配置（密码类只显示前几位）\n'
   printf '  [3] 查看某个脚本需要哪些配置\n'
   printf '  [4] 用编辑器打开 env.conf（高级）\n  [0] 返回\n'
-  ask "选择" 1
+  ask_choice "选择" 1
   case "$ANS" in
     1) cfg_fill_all ;;
     2) cfg_show ;;
@@ -931,6 +954,7 @@ open_item() {  # 先给说明卡片，再执行
   esac
   echo
   read -r -p "回车开始，0 返回 > " a </dev/tty || return
+  a=$(norm "$a")
   case "$a" in 0|q) return ;; esac
   if declare -F "do_$1" >/dev/null; then "do_$1"; else run_ops "$I_PATHS"; fi
   echo
@@ -952,10 +976,15 @@ cat_menu() {  # cat_menu <分类ID> <分类名>
       printf '      %s%s%s\n' "$D" "$I_WHEN" "$N"
     done
     printf '\n  [0] 返回\n'
+    show_msg
     read -r -p "请选择 > " sel </dev/tty || return
+    sel=$(norm "$sel")
     case "$sel" in 0|'') return ;; q) exit 0 ;; esac
-    [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#keys[@]} ] \
-      && open_item "${keys[sel-1]}"
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#keys[@]} ]; then
+      open_item "${keys[sel-1]}"
+    else
+      bad_choice "$sel"
+    fi
   done
 }
 
@@ -970,10 +999,15 @@ scene_menu() {
       printf '  %s%s%s %s %s→ %s%s\n' "$H" "$(pad "[$i]" 5)" "$N" "$(pad "$s" 34)" "$D" "$I_TITLE" "$N"
     done <<<"$SCENES"
     printf '\n  [0] 返回\n'
+    show_msg
     read -r -p "请选择 > " sel </dev/tty || return
+    sel=$(norm "$sel")
     case "$sel" in 0|'') return ;; q) exit 0 ;; esac
-    [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#keys[@]} ] \
-      && open_item "${keys[sel-1]}"
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#keys[@]} ]; then
+      open_item "${keys[sel-1]}"
+    else
+      bad_choice "$sel"
+    fi
   done
 }
 
@@ -1047,13 +1081,16 @@ main_menu() {
     printf '\n  %s[a]%s 一键巡检    %s[b]%s 备份体检    %s[?]%s 不知道用哪个？按场景找\n' \
       "$B" "$N" "$B" "$N" "$B" "$N"
     printf '  [q] 退出\n\n'
+    show_msg
     read -r -p "请选择 > " sel </dev/tty || exit 0
+    sel=$(norm "$sel")
     case "$sel" in
-      q|Q|0) exit 0 ;;
+      q|0) exit 0 ;;
       a) open_item daily ;;
       b) open_item health ;;
-      \?|？) scene_menu ;;
-      [1-9]) [ "$sel" -le ${#ids[@]} ] && cat_menu "${ids[sel-1]}" "${names[sel-1]}" ;;
+      \?) scene_menu ;;
+      [1-9]) cat_menu "${ids[sel-1]}" "${names[sel-1]}" ;;
+      *) bad_choice "$sel" ;;
     esac
   done
 }
