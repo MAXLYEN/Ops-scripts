@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # db/rotate-db-pass.sh — 轮换数据库密码并核对所有 host 记录
-# VERSION: 2.0.4
-# 2.0.4: 校验经 NEWPASS 传入的密码字符，含 ' \ @ : / 时拒绝。
+# VERSION: 2.0.5
+# 2.0.5: 声明 ENV-REQUIRED 的 MYSQL_DEFAULTS_FILE：mysql_ready 需要它，原先漏声明，预检放行后才在运行时报错。执行逻辑未变。
+# ENV-REQUIRED: MYSQL_DEFAULTS_FILE
 # 用法: rotate-db-pass.sh check|rotate <用户名> [下游sqlite] [容器名]
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"

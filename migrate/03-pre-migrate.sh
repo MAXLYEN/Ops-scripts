@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # migrate/03-pre-migrate.sh — 在迁出机停服并制作完整冷快照
-# VERSION: 2.0.3
-# 2.0.3: umask 077，快照目录与文件不再对其他用户可读；临时用户列表改用 mktemp。
-# ENV-REQUIRED: CONTAINER_DATA_DIRS DB_NAMES SNAPSHOT_ROOT
+# VERSION: 2.0.4
+# 2.0.4: 声明 ENV-REQUIRED 的 MYSQL_DEFAULTS_FILE：mysql_ready 需要它，原先漏声明，预检放行后才在运行时报错。执行逻辑未变。
+# ENV-REQUIRED: CONTAINER_DATA_DIRS DB_NAMES SNAPSHOT_ROOT MYSQL_DEFAULTS_FILE
 # 执行后服务保持停止，恢复方式见脚本末尾提示。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"

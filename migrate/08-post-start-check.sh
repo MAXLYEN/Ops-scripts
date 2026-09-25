@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # migrate/08-post-start-check.sh — 在迁入机执行容器与站点端到端验收
-# VERSION: 2.1.1
-# 2.1.1: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 2.1.2
+# 2.1.2: 声明 ENV-REQUIRED 的 MYSQL_DEFAULTS_FILE：mysql_ready 需要它，原先漏声明，预检放行后才在运行时报错。执行逻辑未变。
+# ENV-REQUIRED: MYSQL_DEFAULTS_FILE
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env

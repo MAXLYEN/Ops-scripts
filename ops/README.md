@@ -9,7 +9,7 @@
 | `check-llm-security.sh` | 1.0.3 | 只读盘点 LiteLLM 与 new-api 的访问控制 |
 | `compare-backup-content.sh` | 1.0.5 | 比对两个加密备份包的内容清单 |
 | `diag-key.sh` | 1.1.0 | 诊断指定主机的 SSH 密钥登录失败原因 |
-| `komari-metrics-check.sh` | 2.0.1 | 检查 Komari 指标库的保留期与增长速度 |
+| `komari-metrics-check.sh` | 2.0.2 | 检查 Komari 指标库的保留期与增长速度 |
 | `mail-doctor.sh` | 1.0.3 | 诊断告警邮件的配置与发送链路 |
 | `panel-cron-inspect.sh` | 2.0.5 | 查看面板计划任务的真实命令与运行状态 |
 | `panel-data-locate.sh` | 2.0.2 | 定位面板数据在磁盘上的存储位置 |
