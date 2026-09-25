@@ -38,7 +38,7 @@
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `apply-newapi-quota-fix.sh` | 1.2.1 | 停止 new-api 后修正消费统计并校验回传 |
+| `apply-newapi-quota-fix.sh` | 1.2.2 | 停止 new-api 后修正消费统计并校验回传 |
 | `fix-newapi-fallback-quota.sh` | 1.0.1 | 修正 new-api 兜底倍率造成的虚高消费 |
 | `fix-newapi-quota-data.sh` | 1.0.1 | 按已修正的日志重算 new-api 配额统计 |
 | `newapi-drill.sh` | 1.0.3 | 在备用机演练 new-api 备份的恢复与清理 |

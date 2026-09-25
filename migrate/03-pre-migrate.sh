@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # migrate/03-pre-migrate.sh — 在迁出机停服并制作完整冷快照
-# VERSION: 2.0.2
-# 2.0.2: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 2.0.3
+# 2.0.3: umask 077，快照目录与文件不再对其他用户可读；临时用户列表改用 mktemp。
 # ENV-REQUIRED: CONTAINER_DATA_DIRS DB_NAMES SNAPSHOT_ROOT
 # 执行后服务保持停止，恢复方式见脚本末尾提示。
 
@@ -11,6 +11,10 @@ load_env
 require_env SNAPSHOT_ROOT DB_NAMES CONTAINER_DATA_DIRS
 require_cmd tar gzip mysqldump docker
 mysql_ready
+
+# 快照里是全部库的明文 dump，files.tar.gz 里还有备份密码文件、MySQL root 凭据、
+# rclone token。它会一直留到迁移结束，默认 umask 下是 755/644，本机任何用户都能读。
+umask 077
 
 TS=$(date -u +%Y%m%d%H%M%S)
 DEST="$SNAPSHOT_ROOT/premigrate_$TS"
@@ -81,16 +85,17 @@ section "5. 数据库账号授权"
 # 面板类工具在迁移时可能按自己的记录重建账号，把 host 改掉。
 # 有这份记录才能改回来。
 : > "$DEST/grants.txt"
+USERS_TMP=$(mktemp) || die "mktemp 失败"
 myq "SELECT CONCAT(\"'\",user,\"'@'\",host,\"'\") FROM mysql.user
      WHERE user NOT IN ('mysql.sys','mysql.session') ORDER BY user,host" \
-  > /tmp/.ops_users.$$
+  > "$USERS_TMP"
 while IFS= read -r u; do
   [ -z "$u" ] && continue
   printf -- '-- %s\n' "$u" >> "$DEST/grants.txt"
   myq "SHOW GRANTS FOR $u" 2>/dev/null | sed 's/$/;/' >> "$DEST/grants.txt"
   printf '\n' >> "$DEST/grants.txt"
-done < /tmp/.ops_users.$$
-rm -f /tmp/.ops_users.$$
+done < "$USERS_TMP"
+rm -f "$USERS_TMP"
 ok "账号数 $(grep -c '^-- ' "$DEST/grants.txt")，其中含 ${DB_CLIENT_HOST} 的授权 $(grep -cF "$DB_CLIENT_HOST" "$DEST/grants.txt")"
 
 section "6. 打包文件"
