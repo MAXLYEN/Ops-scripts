@@ -172,6 +172,8 @@ else
     else
       echo "  已写入 fstab（备份 $FBK）: $PROC_LINE"
     fi
+    # systemd 按 fstab 生成挂载单元，改完要 reload，否则它还拿着旧版
+    systemctl daemon-reload 2>/dev/null || true
   fi
   if findmnt -no OPTIONS /proc | grep -q 'hidepid='; then
     echo "  ✅ 当前生效: $(findmnt -no OPTIONS /proc | grep -o 'hidepid=[a-z0-9]*')"

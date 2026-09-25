@@ -38,7 +38,7 @@ mount -o remount,hidepid=invisible /proc          # 临时启用，重启即失�
 ```
 
 ```bash
-cp -a /etc/fstab /etc/fstab.bak.$(date +%Y%m%d%H%M%S) && echo 'proc /proc proc nosuid,nodev,noexec,relatime,hidepid=invisible 0 0' >> /etc/fstab && mount -o remount /proc && findmnt -no OPTIONS /proc
+cp -a /etc/fstab /etc/fstab.bak.$(date +%Y%m%d%H%M%S) && echo 'proc /proc proc nosuid,nodev,noexec,relatime,hidepid=invisible 0 0' >> /etc/fstab && systemctl daemon-reload && mount -o remount /proc && findmnt -no OPTIONS /proc
 ```
 
 写入前先确认 fstab 里没有 `/proc` 条目（`grep ' /proc ' /etc/fstab`）。不要写 `defaults`：remount 时会把 `/proc` 原有的 `nosuid,nodev,noexec` 冲掉。内核低于 5.8 时把 `invisible` 换成 `2`。

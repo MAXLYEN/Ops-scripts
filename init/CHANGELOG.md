@@ -6,7 +6,7 @@
 
 | 文件 | 原版本 → 当前版本 | 变更 |
 | --- | --- | --- |
-| `02-system-network.sh` | 1.1.1 → 1.2.0 | 新增第 3b 节：以 `hidepid`（内核 ≥5.8 用 `invisible`，否则 `2`）挂载 `/proc`，普通用户看不到其他用户的进程与命令行，堵住 7z 在命令行传备份密码的暴露。写入 fstab 前备份并校验，按 fstab 选项 remount 失败或引入新错误即还原；fstab 已有 `/proc` 条目时不改。显式写出 `nosuid,nodev,noexec` 而非 `defaults`。`PROC_HIDEPID=0` 关闭。已在生产机临时启用，当晚三个备份均正常、云端包可解开 |
+| `02-system-network.sh` | 1.1.1 → 1.2.0 | 新增第 3b 节：以 `hidepid`（内核 ≥5.8 用 `invisible`，否则 `2`）挂载 `/proc`，普通用户看不到其他用户的进程与命令行，堵住 7z 在命令行传备份密码的暴露。写入 fstab 前备份并校验，按 fstab 选项 remount 失败或引入新错误即还原；fstab 已有 `/proc` 条目时不改；写入后 `systemctl daemon-reload`。显式写出 `nosuid,nodev,noexec` 而非 `defaults`。`PROC_HIDEPID=0` 关闭。已在生产机临时启用，当晚三个备份均正常、云端包可解开 |
 
 ## 2026-09-24：fail2ban 封禁白名单
 
