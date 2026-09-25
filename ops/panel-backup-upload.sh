@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/panel-backup-upload.sh — 加密并上传面板生成的整机备份包
-# VERSION: 1.0.4
-# 1.0.4: 删除未使用的 FAILED（告警已由 finish 统计），执行逻辑未变。
+# VERSION: 1.0.5
+# 1.0.5: --prune 只清理本机上传台账里、校验通过的包，不再按名字删掉整个云端目录里的其他文件。
 # ENV-REQUIRED: RCLONE_REMOTES
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -13,6 +13,10 @@ require_cmd rclone
 SRCDIR="${PANEL_BACKUP_DIR:-/www/backup/backup_restore}"
 DEST="${PANEL_BACKUP_REMOTE_PATH:-BTBackup-AllServer}"
 MODE=upload; RAW=0; PRUNE=0; FILE=""
+# 本机上传且校验通过的包，一行「远端<TAB>文件名」，按上传先后排列。
+# --prune 只按它删：云端目录（默认名就叫 AllServer）可能是多台机器共用的，
+# 按目录列表删会连别的服务器的备份一起删掉。
+UP_LEDGER=/var/lib/ops-scripts/panel-backup-uploaded.list
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -25,6 +29,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+case "$PRUNE" in ''|*[!0-9]*) die "--prune 需要非负整数: $PRUNE" ;; esac
 [ -d "$SRCDIR" ] || die "面板备份目录不存在: $SRCDIR（在配置里设 PANEL_BACKUP_DIR）"
 
 section "本地面板备份包"
@@ -90,21 +95,29 @@ for r in $RCLONE_REMOTES; do
   sleep 10
   if rclone check "$UPDIR" "$r:/$DEST" --include "$NAME" --one-way >/dev/null 2>&1; then
     ok "$r 校验通过"
+    mkdir -p "$(dirname "$UP_LEDGER")"
+    grep -qxF "$r"$'\t'"$NAME" "$UP_LEDGER" 2>/dev/null || printf '%s\t%s\n' "$r" "$NAME" >> "$UP_LEDGER"
   else
     warn "$r 校验未通过"
   fi
 done
 
 if [ "$PRUNE" -gt 0 ]; then
-  section "云端保留最新 $PRUNE 个"
+  section "云端保留本机最近上传的 $PRUNE 个"
+  echo "  只处理 $UP_LEDGER 里记录的包；其他服务器的、台账建立前上传的，一律不动"
   for r in $RCLONE_REMOTES; do
-    OLD=$(rclone lsf "$r:/$DEST" 2>/dev/null | sort | head -n -"$PRUNE")
+    OLD=$(awk -F'\t' -v r="$r" '$1==r {print $2}' "$UP_LEDGER" 2>/dev/null | head -n -"$PRUNE")
     if [ -z "$OLD" ]; then echo "  $r: 无需清理"; continue; fi
-    echo "$OLD" | while IFS= read -r f; do
+    while IFS= read -r f; do
       [ -n "$f" ] || continue
-      rclone deletefile "$r:/$DEST/$f" >/dev/null 2>&1 \
-        && echo "  $r 已删 $f" || echo "  $r 删除失败 $f"
-    done
+      if rclone deletefile "$r:/$DEST/$f" >/dev/null 2>&1; then
+        echo "  $r 已删 $f"
+        awk -F'\t' -v r="$r" -v f="$f" '!($1==r && $2==f)' "$UP_LEDGER" > "$UP_LEDGER.tmp" \
+          && mv "$UP_LEDGER.tmp" "$UP_LEDGER"
+      else
+        echo "  $r 删除失败 $f"
+      fi
+    done <<< "$OLD"
   done
 fi
 

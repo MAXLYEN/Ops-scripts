@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/sync-llm-allowlist.sh — 同步 LLM 站点白名单与 fail2ban 规则
-# VERSION: 2.0.3
-# 2.0.3: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 2.0.4
+# 2.0.4: sshd jail 端口改从 sshd -T 读取（原写死 59967）；jail.local 里有本脚本不管理的 jail 时中止，不再整文件覆盖掉它们。
 # ENV-REQUIRED: LITELLM_SITE NEWAPI_SITE ALLOW_EXTRA_IPS
 
 set -o pipefail
@@ -36,6 +36,17 @@ LITELLM_VHOST="${VHOST_DIR}/${LITELLM_SITE}.conf"
 [ -f "$LITELLM_VHOST" ] || die "读不到 vhost $LITELLM_VHOST"
 [ -r "$NEWAPI_LOG" ]    || die "读不到 $NEWAPI_LOG（401 jail 需要它，先确认站点日志路径）"
 
+# sshd jail 的端口必须是本机真实的 SSH 端口：写错的话封禁只作用在错的端口上，
+# 真实端口静默失去防爆破，而下面的回读校验只看次数与时长，发现不了。
+# 与 init/03 一致：sshd 配置的端口加上当前连接的端口。
+SSH_PORTS=$({ sshd -T 2>/dev/null | awk '/^port /{print $2}'
+              echo "${SSH_CONNECTION:-}" | awk '{print $4}'; } | grep -E '^[0-9]+$' | sort -un | paste -sd, -)
+[ -n "$SSH_PORTS" ] || die "无法确定 SSH 端口（sshd -T 失败？）"
+
+# jail.local 会被整文件重写：里面若有本脚本不管理的 jail，重写会把它们悄悄删掉
+FOREIGN=$(grep -oE '^\[[^]]+\]' "$JAIL_LOCAL" | tr -d '[]' | grep -vxE 'DEFAULT|sshd|nginx-llm-401' | paste -sd' ' -)
+[ -z "$FOREIGN" ] || die "$JAIL_LOCAL 里有本脚本不管理的 jail：$FOREIGN —— 先把它们移到 /etc/fail2ban/jail.d/ 再运行"
+
 mkdir -p "$BAK_DIR" || die "建不了备份目录 $BAK_DIR"
 log "本次备份目录：$BAK_DIR"
 
@@ -48,6 +59,7 @@ put_file() {  # $1=临时文件 $2=目标 $3=权限；返回 0=有变化 1=无�
 }
 
 # 汇总放行 IP
+log "SSH 端口：$SSH_PORTS"
 log "汇总放行名单"
 TMP=$(mktemp)
 grep -vE '^[[:space:]]*(#|$)' "$HOSTS_FILE" \
@@ -140,7 +152,7 @@ ignoreip           = 127.0.0.1/8 ::1 $(printf '%s\n' "$IPS" | grep -v '^127\.0\.
 [sshd]
 enabled  = true
 mode     = normal
-port     = 59967
+port     = ${SSH_PORTS}
 logpath  = %(sshd_log)s
 maxretry = 3
 findtime = 1h

@@ -14,7 +14,7 @@
 | `panel-cron-inspect.sh` | 2.0.3 | 查看面板计划任务的真实命令与运行状态 |
 | `panel-data-locate.sh` | 2.0.2 | 定位面板数据在磁盘上的存储位置 |
 | `preflight-backup.sh` | 2.0.2 | 检查备份脚本运行前的依赖与配置 |
-| `save-fw.sh` | 2.0.1 | 在修改防火墙前保存当前配置快照 |
+| `save-fw.sh` | 2.0.2 | 在修改防火墙前保存当前配置快照 |
 | `script-inventory.sh` | 1.0.2 | 盘点本机脚本并区分仓库来源与本地文件 |
 | `ssl-audit.sh` | 2.1.2 | 核对证书文件、站点引用与续期记录 |
 | `verify-backup-pass.sh` | 2.0.2 | 验证本地密码能否解开云端备份包 |
@@ -27,11 +27,11 @@
 | `containerize-and-pin.sh` | 1.1.1 | 把服务改为 compose 管理并锁定镜像 digest |
 | `decommission-archive.sh` | 2.0.1 | 在机器退役前归档最终状态与数据 |
 | `deploy-litellm.sh` | 1.2.4 | 部署 LiteLLM、Postgres 与 Redis 容器 |
-| `panel-backup-upload.sh` | 1.0.4 | 加密并上传面板生成的整机备份包 |
+| `panel-backup-upload.sh` | 1.0.5 | 加密并上传面板生成的整机备份包 |
 | `push-keys.sh` | 1.0.3 | 按主机清单批量下发 SSH 公钥 |
 | `restore-cron.sh` | 2.0.2 | 从快照恢复仓库管理的 cron 任务 |
 | `setup-key-login.sh` | 1.0.2 | 配置新机器的 SSH 密钥登录并验证 |
-| `sync-llm-allowlist.sh` | 2.0.3 | 同步 LLM 站点白名单与 fail2ban 规则 |
+| `sync-llm-allowlist.sh` | 2.0.4 | 同步 LLM 站点白名单与 fail2ban 规则 |
 | `upgrade-vaultwarden.sh` | 1.2.1 | 检查并升级 Vaultwarden，锁定镜像 digest |
 
 ## new-api 数据与链路
@@ -49,14 +49,14 @@
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `cleanup-purge.sh` | 1.0.3 | 按安装台账移除 ops-scripts 及其产物 |
+| `cleanup-purge.sh` | 1.0.4 | 按安装台账移除 ops-scripts 及其产物 |
 | `cleanup-tidy.sh` | 1.1.1 | 清理历史输出、旧版备份与中间产物 |
 
 ## 操作约定
 
 `cleanup-tidy.sh`、`cleanup-purge.sh` 和 `bind-localhost.sh` 默认先预演，带 `--apply` 才执行。涉及数据库修正的 `fix-newapi-*.sh` 应在容器停止并完成备份后使用；`apply-newapi-quota-fix.sh` 串联停服、拉库、修正、校验和恢复。灾难恢复演练 `newapi-drill.sh` 只在备用机运行，并拒绝生产目标。
 
-`containerize-and-pin.sh` 保留改名前的旧容器以便回滚，并锁定当前镜像 digest，不执行升级。`deploy-litellm.sh` 将容器端口绑定本机；加入模型后 `LITELLM_SALT_KEY` 必须保持不变，丢失该密钥将无法解开已加密的凭据。`panel-backup-upload.sh` 默认用 7z 加密，`--raw` 会上传未加密原包。
+`containerize-and-pin.sh` 保留改名前的旧容器以便回滚，并锁定当前镜像 digest，不执行升级。`deploy-litellm.sh` 将容器端口绑定本机；加入模型后 `LITELLM_SALT_KEY` 必须保持不变，丢失该密钥将无法解开已加密的凭据。`panel-backup-upload.sh` 默认用 7z 加密，`--raw` 会上传未加密原包；`--prune N` 只清理本机上传台账 `/var/lib/ops-scripts/panel-backup-uploaded.list` 里的包，不碰其他服务器的文件。`cleanup-purge.sh` 默认保留 crontab 正在调用的脚本、`BACKUP_SCRIPTS` 及它们依赖的 `env.conf` 与 `ops-common.sh`，`PURGE_CRON_SCRIPTS=1` 才一并删除。
 
 `sync-llm-allowlist.sh` 的 fail2ban/ufw 封禁会影响所有端口，`ignoreip` 需覆盖整组可信机器，并检查 nginx 的 allow/deny 顺序。`upgrade-vaultwarden.sh` 即使回退 compose 配置也未必能回退数据库迁移，升级前须有近期备份。
 

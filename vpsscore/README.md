@@ -4,8 +4,8 @@
 
 | 脚本 | 版本 | 跑在哪 | 干什么 |
 | --- | --- | --- | --- |
-| `probe.sh` | 1.1.6 | 每台被评估的机器 | 采一份 JSON 到 `/var/lib/vpsscore/` |
-| `collect.sh` | 1.2.4 | 汇总机（一台） | ssh 到各机重采、收集 JSON、自动打分 |
+| `probe.sh` | 1.1.7 | 每台被评估的机器 | 采一份 JSON 到 `/var/lib/vpsscore/` |
+| `collect.sh` | 1.2.5 | 汇总机（一台） | ssh 到各机重采、收集 JSON、自动打分 |
 | `score.sh` | 1.3.1 | 汇总机 | 读一批 JSON，按角色权重打分并分组排名 |
 
 `collect.sh` 和 `score.sh` **只装在汇总机一台上**。

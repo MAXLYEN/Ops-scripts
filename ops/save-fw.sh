@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/save-fw.sh — 在修改防火墙前保存当前配置快照
-# VERSION: 2.0.1
-# 2.0.1: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 2.0.2
+# 2.0.2: 修正 ufw 恢复命令（原命令会让防火墙停在关闭状态）；另存 ufw status verbose 以保留默认策略。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 require_root
@@ -11,6 +11,7 @@ D="/root/fwstate_$(date -u +%Y%m%d%H%M%S)"
 mkdir -p "$D"
 
 ufw status numbered  > "$D/ufw-numbered.txt" 2>&1
+ufw status verbose   > "$D/ufw-verbose.txt"  2>&1
 ufw show added       > "$D/ufw-added.txt"    2>&1
 iptables-save        > "$D/iptables.rules"   2>&1
 ip6tables-save       > "$D/ip6tables.rules"  2>&1
@@ -28,11 +29,17 @@ ss -lntup            > "$D/listen.txt"       2>&1
 sha_write "$D"
 ok "已保存: $D"
 ls -1 "$D" | sed 's/^/  /'
+SSHP=$(awk '/^port /{print $2; exit}' "$D/sshd-effective.txt" 2>/dev/null)
 
+# ufw show added 的每行本身就以 "ufw " 开头，首行是标题。reset 会关掉防火墙，
+# 所以恢复分三步，确认 SSH 端口已在规则里才重新启用 —— 否则要么一直敞着，要么把自己锁外面。
 cat <<EOF
 
   恢复参考：
-    ufw:      ufw --force reset && bash <(sed -n 's/^/ufw /p' $D/ufw-added.txt)
+    ufw:      ufw --force reset
+              grep '^ufw ' $D/ufw-added.txt | sh     # 逐条重加，留意有无报错
+              ufw show added | grep -q ' ${SSHP:-<SSH端口>}/tcp' && ufw --force enable
+              ufw status verbose                      # 与 $D/ufw-verbose.txt 对照默认策略
     iptables: iptables-restore < $D/iptables.rules
     sshd:     对照 $D/sshd.txt 与 $D/sshd_config.d/
     crontab:  crontab $D/crontab.txt

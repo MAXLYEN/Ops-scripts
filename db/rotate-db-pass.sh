@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # db/rotate-db-pass.sh — 轮换数据库密码并核对所有 host 记录
-# VERSION: 2.0.2
-# 2.0.2: ALTER USER 语句改经 stdin 交给 mysql，新密码不再出现在进程命令行。
+# VERSION: 2.0.3
+# 2.0.3: 任一 host 改密失败即中止，不再继续改下游连接串（原先会把服务改成连不上库）。
 # 用法: rotate-db-pass.sh check|rotate <用户名> [下游sqlite] [容器名]
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -57,13 +57,25 @@ rotate)
   [ -n "$CT" ] && { docker stop "$CT" >/dev/null 2>&1 && log "已停止容器 $CT"; sleep 2; }
 
   section "改 MySQL（所有 host 记录）"
-  myq "SELECT host FROM mysql.user WHERE user='$USER'" | while read -r h; do
+  # 用进程替换而不是管道：管道里的 while 是子 shell，失败记录传不出来
+  FAILED_HOSTS=""
+  while read -r h; do
     [ -z "$h" ] && continue
     # SQL 走 stdin 而不是 -e：-e 的参数（含新密码）同机任何用户都能从 /proc 读到
-    printf "ALTER USER '%s'@'%s' IDENTIFIED BY '%s';\n" "$USER" "$h" "$NEWPASS" | my \
-      && ok "$USER@'$h'" || warn "$USER@'$h' 失败"
-  done
+    if printf "ALTER USER '%s'@'%s' IDENTIFIED BY '%s';\n" "$USER" "$h" "$NEWPASS" | my; then
+      ok "$USER@'$h'"
+    else
+      warn "$USER@'$h' 失败"; FAILED_HOSTS="$FAILED_HOSTS '$h'"
+    fi
+  done < <(myq "SELECT host FROM mysql.user WHERE user='$USER'")
   my -e "FLUSH PRIVILEGES"
+
+  # 有 host 没改成就停在这里：继续改下游，服务会拿新密码去连一个还是旧密码的账号
+  if [ -n "$FAILED_HOSTS" ]; then
+    [ -n "$CT" ] && { docker start "$CT" >/dev/null 2>&1 && log "已启动容器 $CT"; }
+    show_state
+    die "以下 host 改密失败:$FAILED_HOSTS —— 下游连接串未改动。排查后用同一个密码重跑：NEWPASS='<上面显示的新密码>' $(basename "$0") rotate $USER ${DOWNSTREAM:+$DOWNSTREAM }$CT"
+  fi
 
   if [ -n "$DOWNSTREAM" ] && [ -f "$DOWNSTREAM" ]; then
     section "改下游连接串 $DOWNSTREAM"

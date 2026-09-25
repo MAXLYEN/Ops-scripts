@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsscore/probe.sh — 采集 VPS 硬件、线路和 IP 质量指标
-# VERSION: 1.1.6
-# 1.1.6: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.1.7
+# 1.1.7: 磁盘测试前检查剩余空间，不足 2GB 跳过；测试文件改进独立临时目录并随退出清理（fio 原先会在当前目录留下 64MB 文件）；JSON 的 probe_ver 取自本文件头。
 # 可在裸机运行，不依赖 lib/common.sh 或 env.conf。
 
 set -o pipefail
@@ -23,7 +23,10 @@ TS=$(date -u +%Y%m%d%H%M%S)
 HOST=$(hostname)
 mkdir -p "$OUTDIR"
 JSON="$OUTDIR/${HOST}_${TS}.json"
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+TMP=$(mktemp -d); DISK_DIR=""
+trap 'rm -rf "$TMP" ${DISK_DIR:+"$DISK_DIR"}' EXIT
+# 被 SSH 断开或 Ctrl-C 打断时也走 EXIT 清理，别把 512MB 测试文件留在磁盘上
+trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 
 # ── 中国三网骨干测试点（besttrace 常用）──────────────────────
 # 可用 VPSSCORE_PING_TARGETS 覆盖，格式: "标签=IP 标签=IP"
@@ -92,7 +95,7 @@ VIRT=$(systemd-detect-virt 2>/dev/null || echo unknown)
 say "系统 ${PRETTY_NAME:-?} | 内核 $(uname -r) | 虚拟化 $VIRT"
 add host        "$(str "$HOST")"
 add probed_at   "$(str "$(date -u +%FT%TZ)")"
-add probe_ver   "$(str '1.1.5')"
+add probe_ver   "$(str "$(grep -m1 -oE '^# VERSION: *[0-9.]+' "$0" 2>/dev/null | grep -oE '[0-9.]+$')")"
 add os          "$(str "${PRETTY_NAME:-unknown}")"
 add kernel      "$(str "$(uname -r)")"
 add virt        "$(str "$VIRT")"
@@ -143,8 +146,23 @@ add steal_pct "$STEAL_PCT"
 add steal_confidence "$(str 'medium')"   # 10 秒只是快照，长期趋势要看监控
 
 # 磁盘
+# 探针会被 collect.sh 推到整个机群跑，包括生产机：写 512MB 前先看剩余空间，
+# 快满的机器上这一步会把盘写满，期间数据库等服务的写入全部失败。
+DISK_NEED_MB=2048
+DISK_SKIP=""
 if [ "$QUICK" -eq 0 ]; then
-  DD_FILE=/var/tmp/.vpsscore_dd
+  DISK_FREE_MB=$(df -Pm /var/tmp 2>/dev/null | awk 'NR==2{print $4}')
+  if [ "${DISK_FREE_MB:-0}" -lt "$DISK_NEED_MB" ]; then
+    DISK_SKIP="lowspace"
+    say "/var/tmp 所在分区仅剩 ${DISK_FREE_MB:-?}MB（< ${DISK_NEED_MB}MB），跳过磁盘测试，免得把盘写满"
+  # 放 /var/tmp 而不是 $TMP：/tmp 常是 tmpfs，测的是内存且不支持 O_DIRECT
+  elif ! DISK_DIR=$(mktemp -d /var/tmp/.vpsscore.XXXXXX); then
+    DISK_DIR=""; DISK_SKIP="mktemp"
+    say "无法在 /var/tmp 建临时目录，跳过磁盘测试"
+  fi
+fi
+if [ "$QUICK" -eq 0 ] && [ -z "$DISK_SKIP" ]; then
+  DD_FILE="$DISK_DIR/dd"
   DISK_W=$(dd if=/dev/zero of="$DD_FILE" bs=1M count=512 conv=fdatasync 2>&1 \
     | awk '/copied|bytes/{print $(NF-1)" "$NF}' | tail -1)
   sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
@@ -159,7 +177,7 @@ if [ "$QUICK" -eq 0 ]; then
   add disk_seq_read_mbs  "$(num "$(to_mbs "${DISK_R:-}")")"
   # 4K 随机要 fio，没装就如实标注缺失，不用顺序读写去糊弄
   if have fio; then
-    FIO=$(fio --name=r --rw=randread --bs=4k --size=64M --numjobs=1 --runtime=8 \
+    FIO=$(fio --name=r --directory="$DISK_DIR" --rw=randread --bs=4k --size=64M --numjobs=1 --runtime=8 \
               --time_based --direct=1 --group_reporting --minimal 2>/dev/null | cut -d';' -f8)
     add disk_4k_read_iops "${FIO:-null}"
   else
@@ -167,10 +185,13 @@ if [ "$QUICK" -eq 0 ]; then
     say "未装 fio，跳过 4K 随机（apt install fio 后可测）"
   fi
   add disk_confidence "$(str 'high')"
+  rm -rf "$DISK_DIR"; DISK_DIR=""
 else
   add disk_seq_write "$(nul)"; add disk_seq_read "$(nul)"
   add disk_4k_read_iops "$(nul)"; add disk_confidence "$(str 'skipped')"
 fi
+[ "$QUICK" -eq 1 ] && DISK_SKIP=quick
+if [ -n "$DISK_SKIP" ]; then add disk_skip_reason "$(str "$DISK_SKIP")"; else add disk_skip_reason "$(nul)"; fi
 
 # 3. 网络形态
 step "3/6 网络形态"
@@ -658,13 +679,11 @@ printf '{%s}\n' "$J" > "$JSON"
 # 自校验：产出不可解析的 JSON 是这个脚本最糟的失败方式 —— 下游 score.sh 拿到
 # 一堆坏文件，而人只会看到「完成」。宁可这里就红着脸报错。
 if command -v python3 >/dev/null 2>&1; then
-  if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$JSON" 2>/tmp/.vpsjson.err; then
+  if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$JSON" 2>"$TMP/json.err"; then
     echo "[致命] 生成的 JSON 不合法，文件保留供排查: $JSON" >&2
-    sed 's/^/       /' /tmp/.vpsjson.err >&2
-    rm -f /tmp/.vpsjson.err
+    sed 's/^/       /' "$TMP/json.err" >&2
     exit 1
   fi
-  rm -f /tmp/.vpsjson.err
 fi
 [ -s "$TMP/mtr.txt" ] && cp "$TMP/mtr.txt" "${JSON%.json}.route.txt"
 ln -sf "$(basename "$JSON")" "$OUTDIR/latest.json"

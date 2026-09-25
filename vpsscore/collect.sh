@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vpsscore/collect.sh — 从多台机器收集探针 JSON 并触发评分
-# VERSION: 1.2.4
-# 1.2.4: ssh 调用收进 rssh()；提示写出实际路径。
+# VERSION: 1.2.5
+# 1.2.5: 推送的探针在远端改用 mktemp 落地；探针版本改为与本机固定的 ref 比对（原写死 main）。
 
 set -o pipefail
 
@@ -69,8 +69,12 @@ check_probe_version() {
   [ -r /usr/local/bin/probe.sh ] || return 0
   local_v=$(probe_ver_of /usr/local/bin/probe.sh)
   tmp=$(mktemp)
+  # 与 opsget 同一 ref：OPS_REF > /etc/ops-scripts/ref > main。本脚本自包含，不加载 common.sh，
+  # 所以在这里照抄 ops_base() 的判定；写死 main 会让固定了版本的机器每次都误报不一致
+  local ref=${OPS_REF:-}
+  [ -n "$ref" ] || ref=$(head -n1 /etc/ops-scripts/ref 2>/dev/null)
   if curl -fsSL --max-time 20 \
-       "https://raw.githubusercontent.com/MAXLYEN/ops-scripts/main/vpsscore/probe.sh?_=$(date +%s)" \
+       "${OPS_REPO:-https://raw.githubusercontent.com/MAXLYEN/ops-scripts}/${ref:-main}/vpsscore/probe.sh?_=$(date +%s)" \
        -o "$tmp" 2>/dev/null; then
     cloud_v=$(probe_ver_of "$tmp")
   fi
@@ -236,7 +240,9 @@ if [ "$DO_PROBE" -eq 1 ] && [ -n "$HOSTS" ]; then
       if rssh "$h" 'command -v opsget >/dev/null 2>&1' </dev/null 2>/dev/null; then
         rssh "$h" "${pfx}opsget vpsscore/probe $PROBE_ARGS" </dev/null > "$out" 2>&1
       elif [ -r /usr/local/bin/probe.sh ]; then
-        rssh "$h" "cat > /tmp/.probe.sh && ${pfx}bash /tmp/.probe.sh $PROBE_ARGS; rc=\$?; rm -f /tmp/.probe.sh; exit \$rc" \
+        # 远端用 mktemp 而非固定的 /tmp/.probe.sh：固定名可被本地普通用户抢先建成
+        # 符号链接或在写入与执行之间替换，接着以 root 身份执行
+        rssh "$h" "T=\$(mktemp) && cat > \"\$T\" && ${pfx}bash \"\$T\" $PROBE_ARGS; rc=\$?; rm -f \"\$T\"; exit \$rc" \
           < /usr/local/bin/probe.sh > "$out" 2>&1
       else
         echo "对方没有 opsget，本机也没有 /usr/local/bin/probe.sh 可推送" > "$out"

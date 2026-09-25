@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/cleanup-purge.sh — 按安装台账移除 ops-scripts 及其产物
-# VERSION: 1.0.3
-# 1.0.3: 待删清单直接传 glob，不再用 ls 分词。
+# VERSION: 1.0.4
+# 1.0.4: crontab 正在调用的脚本与 BACKUP_SCRIPTS 默认不删（原先会删掉却声称不删）；PURGE_CRON_SCRIPTS=1 才一并删除。
 # 默认预演，--apply 才执行移除并要求确认。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -25,11 +25,29 @@ is_protected() {
   return 1
 }
 
+# 备份脚本也是经 opsget 装的、在台账里。删掉它们 cron 仍会照常调用，
+# 找不到脚本就什么都不执行，连失败告警都发不出 —— 备份就此静默停摆。
+# 默认保留 crontab 在用的与 BACKUP_SCRIPTS 列出的，PURGE_CRON_SCRIPTS=1 才删。
+IN_USE=" $(crontab -l 2>/dev/null | grep -v '^[[:space:]]*#' | grep -oE '/usr/local/bin/[A-Za-z0-9._-]+' | sort -u | tr '\n' ' ')"
+for s in ${BACKUP_SCRIPTS:-}; do IN_USE="$IN_USE/usr/local/bin/$s "; done
+# 留下的脚本还要读 env.conf、加载 ops-common.sh：只留脚本不留它们，照样跑不起来
+for s in $IN_USE; do
+  [ -f "$s" ] || continue
+  IN_USE="$IN_USE/etc/ops-scripts /usr/local/lib/ops-common.sh "
+  break
+done
+is_in_use() {
+  [ "${PURGE_CRON_SCRIPTS:-0}" = 1 ] && return 1
+  case "$IN_USE" in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
 TARGETS=$(mktemp); trap 'rm -f "$TARGETS"' EXIT
 add() {
   for p in "$@"; do
     [ -e "$p" ] || continue
     if is_protected "$p"; then echo "  [跳过·受保护] $p"; continue; fi
+    if is_in_use "$p"; then echo "  [跳过·crontab/备份在用] $p"; continue; fi
     printf '%s\n' "$p" >> "$TARGETS"
   done
 }
@@ -101,7 +119,7 @@ cat <<EOF
   容器数据    ${CONTAINER_DATA_DIRS:-未配置}
   凭据文件    ${BACKUP_PASS_FILES:-未配置} ${MYSQL_DEFAULTS_FILE:-}
   面板目录    ${PANEL_ROOT:-未配置}
-  你自己的备份脚本  ${BACKUP_SCRIPTS:-未配置}
+  crontab 正在调用的脚本与 BACKUP_SCRIPTS（上面标了「在用」的；PURGE_CRON_SCRIPTS=1 才删）
   云端的任何文件
 EOF
 
