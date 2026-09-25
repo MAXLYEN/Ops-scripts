@@ -7,3 +7,4 @@ env.conf
 
 # 本地工具目录
 .codex/
+__pycache__/
