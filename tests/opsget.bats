@@ -66,3 +66,47 @@ setup() { reset_host; }
   [ "$status" -eq 1 ]
   has "路径不合法"
 }
+
+# 多数 ops 脚本没声明配置键，但开头 load_env 要求 env.conf 存在。
+# 预检要如实反映这一点：否则会放行一个必然立刻退出的脚本（真机上发现的问题）
+@test "会读 env.conf 的脚本：没有 env.conf 时预检拦下" {
+  stub_loadenv ops/script-inventory
+  run opsget ops/script-inventory
+  [ "$status" -eq 1 ]
+  has "需要 /etc/ops-scripts/env.conf"
+  has "opsget -c ops/script-inventory"
+  [ -z "$(calls)" ]
+}
+
+@test "会读 env.conf 的脚本：-e 说明要有 env.conf 文件" {
+  stub_loadenv ops/script-inventory
+  run opsget -e ops/script-inventory
+  [ "$status" -eq 1 ]
+  has "不需要配置键"
+  has "还没有 /etc/ops-scripts/env.conf"
+}
+
+@test "会读 env.conf 的脚本：-c 建出空的 env.conf，之后能执行" {
+  stub_loadenv ops/script-inventory
+  run opsget -c ops/script-inventory
+  [ "$status" -eq 0 ]
+  [ "$(stat -c %a /etc/ops-scripts/env.conf)" = 600 ]
+  run opsget ops/script-inventory
+  [ "$status" -eq 0 ]
+  calls_are "ops/script-inventory"
+}
+
+@test "-c 不带参数：已装脚本不要键但要文件时，也建出 env.conf" {
+  stub_loadenv ops/script-inventory
+  opsget -i ops/script-inventory >/dev/null
+  run opsget -c
+  [ "$status" -eq 0 ]
+  [ -f /etc/ops-scripts/env.conf ]
+}
+
+@test "真正裸机可跑的脚本：-e 仍说不需要任何配置" {
+  stub vpsscore/probe 0
+  run opsget -e vpsscore/probe
+  [ "$status" -eq 0 ]
+  has "不需要任何配置"
+}

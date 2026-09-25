@@ -102,19 +102,23 @@ state() { cat /var/lib/ops-scripts/opsbox.state 2>/dev/null; }
 }
 
 # ── 缺配置引导 ──────────────────────────────────────────────
-@test "缺配置：引导补齐、打开编辑器、再重新执行" {
+@test "缺配置：执行前当场逐项填写（显示模板说明），填完直接执行" {
   stub ops/preflight-backup 0 BACKUP_DIRS
-  cat > /tmp/fake-editor <<'EOF'
-#!/bin/sh
-echo editor >> /tmp/calls
-sed -i 's|^BACKUP_DIRS=.*|BACKUP_DIRS="/bak"|' "$1"
-EOF
-  chmod +x /tmp/fake-editor
-  export EDITOR=/tmp/fake-editor
-  drive opsbox 1 2 "" y y y "" 0 q
-  has "缺少配置：BACKUP_DIRS"
-  calls_are "editor" "ops/preflight-backup"
-  grep -q '^BACKUP_DIRS="/bak"' /etc/ops-scripts/env.conf
+  drive opsbox 1 2 "" y "/bak" "" 0 q
+  has "这个功能还缺配置：BACKUP_DIRS"
+  lacks "配置未就绪"                # 执行前就问，不先报一屏错
+  has "本地备份落盘目录"          # 模板里的行尾说明
+  has "/bak 现在不存在"          # 路径类填错提醒
+  calls_are "ops/preflight-backup"
+  grep -qx "BACKUP_DIRS='/bak'" /etc/ops-scripts/env.conf
+  [ "$(stat -c %a /etc/ops-scripts/env.conf)" = 600 ]
+}
+
+@test "缺配置：不想现在填，告诉以后去哪补，不执行" {
+  stub ops/preflight-backup 0 BACKUP_DIRS
+  drive opsbox 1 2 "" n "" 0 q
+  has "以后要补：主菜单 9 工具箱设置"
+  [ -z "$(calls)" ]
 }
 
 # ── 联动 ────────────────────────────────────────────────────
@@ -251,4 +255,78 @@ EOF
   local_stub verify-backup-pass
   drive opsbox 9 4 "" y "" 0 q
   crontab -l | grep -q 'verify-backup-pass.sh --cron'
+}
+
+# ── 会读 env.conf 的脚本（真机上发现：没 env.conf 时巡检里直接报错退出） ──
+@test "一键巡检：会读 env.conf 的项在没有 env.conf 时算未配置跳过" {
+  stub ops/preflight-backup 0 BACKUP_DIRS
+  stub ops/ssl-audit 0 WWWROOT
+  stub ops/check-llm-security 0 LITELLM_SITE
+  stub_loadenv ops/komari-metrics-check
+  stub_loadenv ops/script-inventory
+  drive opsbox a "" "" q
+  [ -z "$(calls)" ]
+  [ "$(grep -c '^  未配置' <<<"$output")" -eq 5 ]
+}
+
+@test "缺 env.conf 文件：引导建好后重新执行" {
+  stub_loadenv ops/script-inventory
+  drive opsbox 1 7 "" y "" 0 q
+  has "还缺配置：env.conf"
+  [ -f /etc/ops-scripts/env.conf ]
+  calls_are "ops/script-inventory"
+}
+
+@test "头部：用提交号覆盖时缩短显示，不撑出一行" {
+  export OPS_REF=b49ee19df100dec0ef13230b8f676617e0a320c7
+  drive opsbox q
+  has "b49ee19df100…（环境变量覆盖）"
+  lacks "b49ee19df100dec0ef13230b8f676617e0a320c7"
+}
+
+# ── 逐项填写配置（新机器上少敲命令） ──────────────────────
+@test "头部提示已装功能还有几项配置没填、去哪填" {
+  stub ops/preflight-backup 0 BACKUP_DIRS BACKUP_SCRIPTS
+  opsget -i ops/preflight-backup >/dev/null
+  drive opsbox q
+  has "还有 2 项配置没填 → 9 工具箱设置 → 3 配置管理"
+}
+
+@test "配置管理：逐项填写已装功能缺的配置，回车跳过" {
+  stub ops/preflight-backup 0 BACKUP_DIRS BACKUP_SCRIPTS
+  opsget -i ops/preflight-backup >/dev/null
+  drive opsbox 9 3 "" 1 "/a /b" "" "" 0 q
+  has "还有 2 项没填"
+  has "已跳过"
+  has "还没填：BACKUP_SCRIPTS"
+  grep -qx "BACKUP_DIRS='/a /b'" /etc/ops-scripts/env.conf
+  ls /etc/ops-scripts/env.conf.bak.* >/dev/null   # 改之前留了备份
+}
+
+@test "填写的值原样保存：引号、$、反斜杠、空格都不走样" {
+  stub ops/preflight-backup 0 BACKUP_DIRS
+  opsget -i ops/preflight-backup >/dev/null
+  local v='it'"'"'s $HOME "x" a\b'
+  drive opsbox 9 3 "" 1 "$v" "" 0 q
+  got=$(bash -c '. /etc/ops-scripts/env.conf; printf %s "$BACKUP_DIRS"')
+  [ "$got" = "$v" ]
+}
+
+@test "凭据类输入不回显，查看配置时打码" {
+  stub ops/newapi-log-prune 0 NEWAPI_ROOT_PAT
+  opsget -i ops/newapi-log-prune >/dev/null
+  drive opsbox 9 3 "" 1 sekret-token-123 "" 0 q
+  lacks "sekret-token-123"
+  grep -q "sekret-token-123" /etc/ops-scripts/env.conf
+  drive opsbox 9 3 "" 2 "" 0 q
+  has "sekr***"
+  lacks "sekret-token-123"
+}
+
+@test "一键巡检有跳过项时，提示怎么启用" {
+  stub ops/preflight-backup 0 BACKUP_DIRS
+  stub ops/ssl-audit 0; stub ops/check-llm-security 0
+  stub ops/komari-metrics-check 0; stub ops/script-inventory 0
+  drive opsbox a "" "" q
+  has "要启用哪一项，就在「日常巡检」里单独选它执行"
 }

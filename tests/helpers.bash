@@ -53,6 +53,13 @@ stub() {  # stub <仓库路径> [退出码] [ENV-REQUIRED 键...]：把模拟仓
   local p=$1 rc=${2:-0}; shift; [ $# -gt 0 ] && shift
   _stub_body "$p" "$rc" "$@" > "$MOCK/main/$p.sh"
 }
+stub_loadenv() {  # stub_loadenv <仓库路径> [退出码]：像多数 ops 脚本那样先 load_env（没有 env.conf 就退出）再干活
+  local p=$1 rc=${2:-0}
+  { printf '#!/usr/bin/env bash\n# VERSION: 0.0.0-stub\n'
+    printf '. /usr/local/lib/ops-common.sh\nload_env\n'
+    _stub_body "$p" "$rc" | tail -n +3
+  } > "$MOCK/main/$p.sh"
+}
 local_stub() {  # local_stub <脚本名> [退出码]：直接放一个已安装的本地脚本（备份类不经 opsget）
   _stub_body "local/$1" "${2:-0}" > "/usr/local/bin/$1.sh"; chmod 755 "/usr/local/bin/$1.sh"
 }
@@ -61,6 +68,11 @@ calls() { cat "$CALLS" 2>/dev/null; }
 # ── 伪终端驱动与断言 ────────────────────────────────────────
 drive() {  # drive <命令> [输入行...]：在伪终端里跑，结果放在 $output / $status
   run timeout 120 python3 "$SRC/tests/drive.py" --idle 0.3 "$@"
+  # 按键没用完 = 用例写的步骤和界面对不上，只是碰巧通过；当失败处理
+  if grep -q '^\[drive\] 还有' <<<"$output"; then
+    printf '%s\n──── 输出末尾 ────\n%s\n' "$(grep '^\[drive\] 还有' <<<"$output")" "$(tail -n 30 <<<"$output")" >&2
+    return 1
+  fi
 }
 has() {  # has <文本>：$output 里必须有
   grep -qF -- "$1" <<<"$output" && return 0
