@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/opsget — 从仓库拉取、安装和执行运维脚本
-# VERSION: 1.5.0
-# 1.5.0: 新增中文菜单 opsbox：-u 一并更新；在终端里不带参数运行时打开菜单。
+# VERSION: 1.5.1
+# 1.5.1: 不声明配置键但会 load_env 的脚本，预检、-e、-c 都按「需要 env.conf 文件」处理，-c 可建空文件。
 # 配置依赖以目标脚本的 ENV-REQUIRED 声明为准。
 
 set -o pipefail
@@ -142,6 +142,12 @@ env_keys_of() {  # $1=脚本文件路径；输出键名，每行一个
     | tr ' \t' '\n\n' | sed '/^$/d' | sort -u
 }
 
+# 不声明键 ≠ 裸机能跑：多数 ops 脚本开头 load_env，没有 env.conf 就直接退出。
+# 这类脚本至少要有这个文件（可以一个键都不填）；预检照实拦，别放行一个必然失败的执行。
+needs_env_file() {  # $1=脚本文件路径
+  grep -qE '^[[:space:]]*load_env([[:space:]]|;|$)' "$1" 2>/dev/null
+}
+
 # 声明 token 可写成 `A|B`：任一有值即算满足，报缺时报首选（第一个）。
 # 这是给「新键 + 旧键回落」用的 —— 脚本内部有回落，预检就不该按字面拦。
 env_missing_keys() {  # $@=声明 token；输出缺失项的首选键名
@@ -197,6 +203,20 @@ installed_keys() {  # 已装脚本（含台账）声明的键的并集
       done | sort -u
 }
 
+installed_need_file() {  # 已装脚本里有没有「不要键、但要 env.conf 文件」的
+  local f
+  { [ -f "$LEDGER" ] && cat "$LEDGER"
+    ls "$BIN_DIR"/*.sh 2>/dev/null
+  } | sort -u | while read -r f; do
+        needs_env_file "$f" && { echo 1; break; }
+      done | grep -q 1
+}
+
+env_touch() {  # $1=模板；没有 env.conf 时建一个只有说明头的空文件
+  [ -f "$ENV_FILE" ] && return 0
+  env_merge "$1"
+}
+
 env_merge() {  # $1=模板 $2...=要写入的键
   local tpl=$1; shift
   local want=" $* " added=0 buf="" line k sec="" sec_done=""
@@ -240,22 +260,24 @@ env_merge() {  # $1=模板 $2...=要写入的键
 # 云端优先：-e / -c 回答的是「即将拉下来执行的那份脚本要什么」。
 # 本地已装副本可能是旧版，旧版少一行声明就会得出「不需要配置」——
 # 而这个方向的错答（该拦没拦）比误报缺配置危险得多。
+# 结果放进 DECL_KEYS（声明的键）与 DECL_FILE（1=会读取 env.conf）。
+# 不用 $(...) 取值：那样里面的 die 只退出子 shell，调用方会拿着空结果当「不需要配置」。
 get_env_required() {  # $1=仓库内路径（不带 .sh）
-  local p=$1 name tmp keys=""
+  local p=$1 name tmp src
   valid_path "$p" || die "路径不合法: $p"
   name=$(basename "$p")
-  tmp=$(mktemp)
+  tmp=$(mktemp) || die "mktemp 失败"
   if curl_retry "$BASE/$p.sh" "$tmp" >/dev/null 2>&1 && [ -s "$tmp" ]; then
-    keys=$(env_keys_of "$tmp")
+    src=$tmp
   elif [ -f "$BIN_DIR/$name.sh" ]; then
     log "[警告] 拉取失败，改读本地已装版本 —— 它可能是旧版，声明未必是最新的"
-    keys=$(env_keys_of "$BIN_DIR/$name.sh")
+    src="$BIN_DIR/$name.sh"
   else
-    die "拉取失败且本地没有: $p.sh"
+    rm -f "$tmp"; die "拉取失败且本地没有: $p.sh"
   fi
+  DECL_KEYS=$(env_keys_of "$src")
+  DECL_FILE=""; needs_env_file "$src" && DECL_FILE=1
   rm -f "$tmp"
-  [ -n "$keys" ] && printf '%s\n' "$keys"
-  return 0
 }
 
 case "${1:-}" in
@@ -275,6 +297,11 @@ case "${1:-}" in
         log "写入完整模板（所有键）" ;;
       "")
         WANT=$(installed_keys)
+        if [ -z "$WANT" ] && installed_need_file; then
+          env_touch "$TPL"; rm -f "$TPL"
+          log "[✓] 已装的脚本不需要填键，但有的会读取 $ENV_FILE —— 文件已就绪（可以为空）"
+          exit 0
+        fi
         if [ -z "$WANT" ]; then
           rm -f "$TPL"
           log "本机已装的脚本都不需要配置 —— 不用建 env.conf。"
@@ -283,7 +310,12 @@ case "${1:-}" in
         fi
         log "按已装脚本的实际需要补齐" ;;
       *)
-        WANT=$(get_env_required "${1%.sh}")
+        get_env_required "${1%.sh}"; WANT=$DECL_KEYS
+        if [ -z "$WANT" ] && [ -n "$DECL_FILE" ]; then
+          env_touch "$TPL"; rm -f "$TPL"
+          log "[✓] $1 不需要填键，但会读取 $ENV_FILE —— 文件已就绪（可以为空）"
+          exit 0
+        fi
         if [ -z "$WANT" ]; then
           rm -f "$TPL"; log "$1 不需要任何配置，裸机可跑。"; exit 0
         fi
@@ -305,13 +337,15 @@ case "${1:-}" in
   -e|--env)
     shift
     [ -n "${1:-}" ] || die "用法: opsget -e <路径>"
-    KEYS=$(get_env_required "${1%.sh}")
-    if [ -z "$KEYS" ]; then log "$1 不需要任何配置，裸机可跑。"; exit 0; fi
-    log "$1 需要: $(echo $KEYS)"
+    get_env_required "${1%.sh}"; KEYS=$DECL_KEYS
+    if [ -z "$KEYS" ] && [ -z "$DECL_FILE" ]; then log "$1 不需要任何配置，裸机可跑。"; exit 0; fi
+    if [ -n "$KEYS" ]; then log "$1 需要: $(echo $KEYS)"
+    else log "$1 不需要配置键，但会读取 $ENV_FILE（文件要存在，可以为空）"; fi
     if [ ! -f "$ENV_FILE" ]; then
       log "[缺配置] 还没有 $ENV_FILE —— 跑 opsget -c $1"
       exit 1
     fi
+    [ -n "$KEYS" ] || { log "[✓] $ENV_FILE 已存在"; exit 0; }
     MISS=$(env_missing_keys $KEYS | tr '\n' ' ')
     if [ -n "$MISS" ]; then log "[缺配置] 待填: $MISS"; log "         补齐: opsget -c $1"; exit 1
     else log "[✓] 都已有值"; fi
@@ -337,6 +371,8 @@ case "${1:-}" in
     # 只提示不拦截：装完先看一眼要什么，等真执行时才强制
     MISS=$(env_missing "$BIN_DIR/$NAME.sh")
     [ -n "$MISS" ] && log "[提示] 执行前需补配置: $(echo $MISS)（opsget -c $P）"
+    [ -z "$MISS" ] && [ ! -f "$ENV_FILE" ] && needs_env_file "$BIN_DIR/$NAME.sh" \
+      && log "[提示] 执行前需要 $ENV_FILE，可以为空（opsget -c $P）"
     exit 0 ;;
 
   --pin)
@@ -403,6 +439,11 @@ fetch "$P.sh" "$BIN_DIR/$NAME.sh"
 MISS=$(env_missing "$BIN_DIR/$NAME.sh")
 if [ -n "$MISS" ]; then
   log "[缺配置] $NAME 需要但未填: $(echo $MISS)"
+  log "         补齐: opsget -c $P"
+  die "配置未就绪，已停止执行（脚本已装好在 $BIN_DIR/$NAME.sh）"
+fi
+if [ ! -f "$ENV_FILE" ] && needs_env_file "$BIN_DIR/$NAME.sh"; then
+  log "[缺配置] $NAME 需要 $ENV_FILE（不用填键，文件存在即可）"
   log "         补齐: opsget -c $P"
   die "配置未就绪，已停止执行（脚本已装好在 $BIN_DIR/$NAME.sh）"
 fi

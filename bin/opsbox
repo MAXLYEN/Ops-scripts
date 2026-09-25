@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # bin/opsbox — ops-scripts 中文菜单：按场景挑功能，常用组合自动串联
-# VERSION: 1.0.0
-# 1.0.0: 首版。菜单只负责挑选、说明、确认与串联；拉取、版本固定和配置预检仍交给 opsget。
+# VERSION: 1.1.0
+# 1.1.0: 缺配置时执行前就地逐项填写（显示模板说明、凭据不回显、原样保存），不再打开编辑器；配置管理可逐项填写与查看；头部提示未填项数；提交号缩短显示。
 # 用法: opsbox（或在终端里不带参数运行 opsget）。随 opsget -u 一起更新。
 
 set -o pipefail
 
-OPSBOX_VERSION=1.0.0
+OPSBOX_VERSION=1.1.0
 BIN_DIR=/usr/local/bin
 ENV_FILE=/etc/ops-scripts/env.conf
 REF_FILE=/etc/ops-scripts/ref
@@ -163,16 +163,9 @@ env_get() {  # env_get <键>：读 env.conf 里的值（子 shell，不污染菜
   ( [ -f "$ENV_FILE" ] && . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${!1:-}" )
 }
 
-# 按本机已装副本的 ENV-REQUIRED 输出缺的键；未安装返回 2。
-# 只用来显示状态和执行失败后的引导 —— 执行前的权威预检仍是 opsget 读云端声明。
-cfg_missing() {
-  local f keys
-  f="$BIN_DIR/$(basename "$1").sh"
-  [ -f "$f" ] || return 2
-  keys=$(sed -n 's/^#[[:space:]]*ENV-REQUIRED:[[:space:]]*//p' "$f")
-  [ -n "$keys" ] || return 0
+keys_missing() {  # keys_missing <声明 token...>：按 env.conf 输出缺的键（A|B 任一有值即可，报首选）
   ( [ -f "$ENV_FILE" ] && . "$ENV_FILE" >/dev/null 2>&1
-    for k in $keys; do
+    for k in "$@"; do
       ok=""
       for a in ${k//|/ }; do [ -n "${!a:-}" ] && { ok=1; break; }; done
       [ -n "$ok" ] || printf '%s ' "${k%%|*}"
@@ -180,26 +173,152 @@ cfg_missing() {
     true )
 }
 
+# 按本机已装副本的 ENV-REQUIRED 输出缺的键；未安装返回 2。
+# 只用来显示状态和执行失败后的引导 —— 执行前的权威预检仍是 opsget 读云端声明。
+cfg_missing() {
+  local f keys
+  f="$BIN_DIR/$(basename "$1").sh"
+  [ -f "$f" ] || return 2
+  # 不声明键但开头 load_env 的脚本，没有 env.conf 会直接退出（与 opsget 的 needs_env_file 同一判断）
+  [ ! -f "$ENV_FILE" ] && grep -qE '^[[:space:]]*load_env([[:space:]]|;|$)' "$f" && printf 'env.conf '
+  keys=$(sed -n 's/^#[[:space:]]*ENV-REQUIRED:[[:space:]]*//p' "$f")
+  [ -n "$keys" ] || return 0
+  # shellcheck disable=SC2086  # 声明是空格分隔的列表
+  keys_missing $keys
+}
+
+installed_missing() {  # 本机已装的脚本合起来还缺哪些键
+  local keys
+  keys=$(sed -n 's/^#[[:space:]]*ENV-REQUIRED:[[:space:]]*//p' "$BIN_DIR"/*.sh 2>/dev/null \
+         | tr ' ' '\n' | sed '/^$/d' | sort -u)
+  [ -n "$keys" ] || return 0
+  # shellcheck disable=SC2086
+  keys_missing $keys
+}
+
+key_help() {  # key_help <键>：env.conf 里这一项上方的说明与行尾注释（opsget -c 从模板一并搬来的）
+  [ -f "$ENV_FILE" ] || return 0
+  awk -v k="$1" '
+    /^[[:space:]]*$/ { n = 0; next }
+    /^[[:space:]]*#/ {
+      if ($0 ~ /──/) { n = 0; next }
+      line = $0; sub(/^[[:space:]]*#[[:space:]]?/, "", line); gsub(/\*\*/, "", line)
+      if (line != "") buf[++n] = line
+      next
+    }
+    {
+      name = $0; sub(/^[[:space:]]*(export[[:space:]]+)?/, "", name); sub(/=.*/, "", name)
+      if (name == k) {
+        for (i = 1; i <= n; i++) print buf[i]
+        rest = $0; sub(/^[^=]*=/, "", rest)
+        if (rest ~ /^"/) sub(/^"[^"]*"/, "", rest); else sub(/^[^[:space:]#]*/, "", rest)
+        if (rest ~ /^[[:space:]]*#/) { sub(/^[[:space:]]*#[[:space:]]*/, "", rest); print rest }
+        exit
+      }
+      n = 0
+    }' "$ENV_FILE"
+}
+
+is_secret() {  # 凭据类：输入不回显，查看时打码
+  case "$1" in *_PAT|*TOKEN*|*SECRET*|*_PASS|*_KEY|*HEARTBEAT_URL|*WEBHOOK*) return 0 ;; esac
+  return 1
+}
+
+ENV_BACKED=""
+set_key() {  # set_key <键> <值>：写进 env.conf；用单引号原样保存，不做变量展开
+  local tmp line
+  if [ -z "$ENV_BACKED" ]; then
+    cp -a "$ENV_FILE" "$ENV_FILE.bak.$(date -u +%Y%m%d%H%M%S)" && ENV_BACKED=1
+  fi
+  line="$1='${2//\'/\'\\\'\'}'"
+  tmp=$(mktemp) || return 1
+  LINE=$line awk -v k="$1" '
+    !done && $0 ~ "^[[:space:]]*(export[[:space:]]+)?" k "=" { print ENVIRON["LINE"]; done = 1; next }
+    { print }
+    END { if (!done) print ENVIRON["LINE"] }' "$ENV_FILE" > "$tmp" \
+    && cat "$tmp" > "$ENV_FILE"   # cat 覆盖：保留原文件的 600 权限
+  rm -f "$tmp"
+}
+
+fill_key() {  # fill_key <键>：显示说明，读一个值写进 env.conf；回车跳过（返回 1）
+  local k=$1 v p help
+  printf '\n%s── %s ──%s\n' "$H" "$k" "$N"
+  help=$(key_help "$k")
+  if [ -n "$help" ]; then printf '%s\n' "$help" | sed 's/^/  /'
+  else printf '  %s（没有说明，见仓库 config/env.example.conf）%s\n' "$D" "$N"; fi
+  if is_secret "$k"; then
+    read -r -s -p "  填写（输入不显示，回车跳过）: " v </dev/tty; echo
+  else
+    read -r -p "  填写（回车跳过）: " v </dev/tty
+  fi
+  [ -n "$v" ] || { printf '  %s已跳过%s\n' "$D" "$N"; return 1; }
+  set_key "$k" "$v" || { note "  写入 $ENV_FILE 失败"; return 1; }
+  printf '  %s✓ 已保存%s\n' "$G" "$N"
+  # 路径类填错最常见：不拦，只提醒
+  case "$k" in
+    *_DIR|*_FILE|*_ROOT|*_DIRS|*_FILES)
+      for p in $v; do [ -e "$p" ] || note "  ⚠ $p 现在不存在，确认没写错"; done ;;
+  esac
+  return 0
+}
+
+cfg_later() { printf '%s以后要补：主菜单 9 工具箱设置 → 3 配置管理 → 1 逐项填写%s\n' "$D" "$N"; }
+
+cfg_guide() {  # 执行失败后：若是缺配置，就地逐项带着填。补齐返回 0
+  local p=$1 miss left k
+  miss=$(cfg_missing "$p")
+  [ -n "$miss" ] || return 1
+  printf '\n%s这个功能还缺配置：%s%s\n' "$Y" "$miss" "$N"
+  if ! confirm "现在逐项填写？（每项都有中文说明，不知道的可以回车跳过）" y; then
+    cfg_later; return 1
+  fi
+  # 建出 env.conf，并把缺的键连同模板里的说明搬进去，下面才有说明可显示
+  opsget -c "$p" >/dev/null || return 1
+  for k in $miss; do [ "$k" = env.conf ] || fill_key "$k"; done
+  left=$(cfg_missing "$p")
+  [ -z "$left" ] && { printf '%s✓ 这个功能需要的配置都齐了%s\n' "$G" "$N"; return 0; }
+  note "还没填：$left"
+  cfg_later
+  return 1
+}
+
+cfg_fill_all() {  # 已装功能缺的配置一次问完
+  local miss k n=0
+  opsget -c >/dev/null || return 1
+  miss=$(installed_missing)
+  if [ -z "$miss" ]; then
+    printf '%s✓ 本机已装的功能需要的配置都填好了%s\n' "$G" "$N"
+    printf '%s还没用过的功能，第一次执行时缺什么会当场问你%s\n' "$D" "$N"
+    return 0
+  fi
+  for k in $miss; do n=$((n + 1)); done
+  printf '本机已装的功能还有 %s 项没填，下面逐项问你；不知道的回车跳过，以后再来\n' "$n"
+  for k in $miss; do fill_key "$k"; done
+  miss=$(installed_missing)
+  if [ -z "$miss" ]; then printf '\n%s✓ 全部填好了%s\n' "$G" "$N"
+  else note "还没填：$miss"; fi
+}
+
+cfg_show() {  # 列出 env.conf 里的键和值；凭据类只露前 4 位
+  [ -f "$ENV_FILE" ] || { note "还没有 $ENV_FILE"; return 1; }
+  printf '%s── %s ──%s\n' "$H" "$ENV_FILE" "$N"
+  ( . "$ENV_FILE" >/dev/null 2>&1
+    grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Z_][A-Z0-9_]*=' "$ENV_FILE" \
+      | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/=$//' | awk '!seen[$0]++' \
+      | while read -r k; do
+          v=${!k:-}
+          if [ -z "$v" ]; then printf '  %s  %s（空）%s\n' "$(pad "$k" 26)" "$D" "$N"
+          elif is_secret "$k"; then printf '  %s  %s***\n' "$(pad "$k" 26)" "${v:0:4}"
+          else printf '  %s  %s\n' "$(pad "$k" 26)" "$v"; fi
+        done )
+}
+
 edit_env() {
   local ed=${EDITOR:-}
   if [ -z "$ed" ]; then
     for ed in nano vim vi; do command -v "$ed" >/dev/null 2>&1 && break; done
   fi
-  confirm "用 $ed 打开 $ENV_FILE 填写？" y && "$ed" "$ENV_FILE"
-}
-
-cfg_guide() {  # 执行失败后：若是缺配置，引导补齐。补齐返回 0
-  local p=$1 miss
-  miss=$(cfg_missing "$p")
-  [ -n "$miss" ] || return 1
-  printf '\n%s这个功能缺少配置：%s%s\n' "$Y" "$miss" "$N"
-  confirm "现在把这些键补进 env.conf（已有的值不动）？" y || return 1
-  opsget -c "$p" || return 1
-  edit_env
-  miss=$(cfg_missing "$p")
-  [ -z "$miss" ] && return 0
-  note "仍未填：$miss"
-  return 1
+  confirm "用 $ed 打开 $ENV_FILE？" y && "$ed" "$ENV_FILE"
 }
 
 # ── 执行 ────────────────────────────────────────────────────
@@ -214,6 +333,11 @@ report_rc() {  # report_rc <退出码> <开始时间>
 
 run_ops() {  # run_ops <仓库路径> [参数...]：经 opsget 执行（遵守版本固定），缺配置时引导补齐后可重跑
   local p=$1 t0 rc; shift
+  # 先装好（不执行）再看缺不缺配置：缺就当场逐项问，填完直接执行，
+  # 不让人先看一屏「[致命] 配置未就绪」再被问要不要重来。装不上（网络）就照常执行，交给 opsget 报错
+  if opsget -i "$p" >/dev/null 2>&1 && [ -n "$(cfg_missing "$p")" ]; then
+    cfg_guide "$p" || return 1
+  fi
   while :; do
     printf '\n%s▶ opsget %s%s\n' "$B" "$p${*:+ $*}" "$N"
     t0=$(date +%s)
@@ -304,6 +428,9 @@ do_daily() {
   check_step "监控指标库体检" ops/komari-metrics-check
   check_step "本机脚本盘点" ops/script-inventory
   flow_end
+  if [[ "$FLOW_LOG" == *未配置* ]]; then
+    printf '\n%s标「未配置」的项被跳过了。要启用哪一项，就在「日常巡检」里单独选它执行，缺的配置会当场逐项问你。%s\n' "$D" "$N"
+  fi
 }
 
 do_panelcron() {
@@ -717,14 +844,17 @@ do_pin() {
 }
 
 do_config() {
-  printf '  [1] 补齐本机已装脚本需要的配置键（opsget -c，已有值不动）\n'
-  printf '  [2] 查看某个脚本需要哪些配置（opsget -e）\n  [3] 编辑 env.conf\n  [0] 返回\n'
-  ask "选择" 0
+  printf '  [1] 逐项填写本机还没填的配置（推荐：每项有中文说明，回车可跳过）\n'
+  printf '  [2] 查看当前配置（密码类只显示前几位）\n'
+  printf '  [3] 查看某个脚本需要哪些配置\n'
+  printf '  [4] 用编辑器打开 env.conf（高级）\n  [0] 返回\n'
+  ask "选择" 1
   case "$ANS" in
-    1) opsget -c && edit_env ;;
-    2) ask "脚本路径（如 ops/ssl-audit）"
+    1) cfg_fill_all ;;
+    2) cfg_show ;;
+    3) ask "脚本路径（如 ops/ssl-audit）"
        [ -n "$ANS" ] && opsget -e "$ANS" ;;
-    3) [ -f "$ENV_FILE" ] || { note "还没有 $ENV_FILE，先选 1 生成"; return 1; }
+    4) [ -f "$ENV_FILE" ] || { note "还没有 $ENV_FILE，先选 1"; return 1; }
        edit_env ;;
   esac
 }
@@ -828,8 +958,12 @@ scene_menu() {
   done
 }
 
+short_ref() {  # 40 位提交号只显示前 12 位，tag 原样
+  if [[ "$1" =~ ^[0-9a-f]{40}$ ]]; then printf '%s…' "${1:0:12}"; else printf '%s' "$1"; fi
+}
+
 banner() {
-  local ref ov os up mem envs next ib
+  local ref ov os up mem envs next ib miss
   printf '%s' "$B"
   printf '%s\n' \
     '    ___  ____  ____     ____   _____  __' \
@@ -839,8 +973,8 @@ banner() {
     '   \___/|_|   |____/   |____/ \___/_/\_\'
   printf '%s' "$N"
   hr
-  if [ -n "${OPS_REF:-}" ]; then ref="$OPS_REF（环境变量覆盖）"
-  elif [ -s "$REF_FILE" ]; then ref="$(head -n1 "$REF_FILE")（已固定）"
+  if [ -n "${OPS_REF:-}" ]; then ref="$(short_ref "$OPS_REF")（环境变量覆盖）"
+  elif [ -s "$REF_FILE" ]; then ref="$(short_ref "$(head -n1 "$REF_FILE")")（已固定）"
   else ref="${Y}main（未固定）${N}"; fi
   ov=$(sed -n 's/^# VERSION: //p' "$(command -v opsget)" 2>/dev/null | head -1)
   os=$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-未知}")
@@ -851,11 +985,16 @@ banner() {
   printf '  负载  %s    磁盘 / %s    内存 %s    已运行 %s\n' \
     "$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)" "$(df -P / 2>/dev/null | awk 'NR == 2 { print $5 }')" \
     "${mem:-?}" "${up:-?}"
-  if [ -f "$ENV_FILE" ]; then
+  miss=$(installed_missing)
+  if [ -n "$miss" ]; then
+    # shellcheck disable=SC2086  # 数一下有几项
+    set -- $miss
+    envs="${Y}已装的功能还有 $# 项配置没填 → 9 工具箱设置 → 3 配置管理${N}"
+  elif [ -f "$ENV_FILE" ]; then
     envs="${G}env.conf ✓${N}"
     [ "$(stat -c %a "$ENV_FILE" 2>/dev/null)" = 600 ] || envs="${Y}env.conf 权限不是 600${N}"
   else
-    envs="${D}还没有 env.conf（用到时会引导生成）${N}"
+    envs="${D}还没有 env.conf（用到哪个功能缺什么，会当场逐项问你）${N}"
   fi
   printf '  配置  %s\n' "$envs"
   [ -f /var/run/reboot-required ] && printf '  %s⚠ 系统标记需要重启%s\n' "$Y" "$N"
