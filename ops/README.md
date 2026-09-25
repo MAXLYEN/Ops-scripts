@@ -61,7 +61,7 @@ opsget -i ops/verify-backup-pass
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `cleanup-purge.sh` | 1.0.5 | 按安装台账移除 ops-scripts 及其产物 |
+| `cleanup-purge.sh` | 1.0.6 | 按安装台账移除 ops-scripts 及其产物 |
 | `cleanup-tidy.sh` | 1.1.2 | 清理历史输出、旧版备份与中间产物 |
 
 ## 操作约定

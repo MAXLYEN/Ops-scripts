@@ -9,7 +9,10 @@
 curl -fsSL https://raw.githubusercontent.com/MAXLYEN/ops-scripts/main/bin/opsget \
   -o /usr/local/bin/opsget && chmod +x /usr/local/bin/opsget
 
-# 2. 按已安装脚本的需求生成或补齐配置
+# 2. 打开中文菜单（首次会自动安装），按分类或「按场景找」挑功能
+opsget               # 之后也可以直接敲 opsbox
+
+# 或者用命令行：按已安装脚本的需求生成或补齐配置
 opsget -c            # 只补当前需要的配置键
 vi /etc/ops-scripts/env.conf
 
@@ -23,6 +26,8 @@ opsget --pin v2026.09.24 && opsget -u
 ```
 
 路径写成 `migrate/03-pre-migrate` 或 `migrate/03-pre-migrate.sh` 都可以，参数直接跟在后面：`opsget ops/cleanup-tidy --apply`。
+
+菜单 `opsbox` 给每个功能写了「什么时候用、会做什么」，改动类操作先预演再确认，常用组合（备份体检、升级前自动备份、改防火墙前自动快照等）自动串联；它背后调用的仍是 `opsget`，遵守同一个固定版本。哪些脚本进了菜单、哪些没进及原因，见 [bin/README.md](bin/README.md)。
 
 注意 `-i` 是 opsget 自己的选项，要写在路径**前面**。`opsget ops/ssl-audit -i` 会把 `-i` 当成传给脚本的参数，照常执行。
 
@@ -117,7 +122,7 @@ cron 只调用本地脚本，挡住的是「云端改动在无人值守时生效
 
 ```bash
 opsget --pin v2026.09.24     # 之后 -i / -u / -l / 执行都只从这个 tag 拉
-opsget -u                    # 引导器和 common.sh 也换成这一版
+opsget -u                    # 引导器、common.sh 和菜单也换成这一版
 opsget --pin                 # 查看当前 ref 与来源
 opsget --unpin               # 取消固定，回到 main
 ```

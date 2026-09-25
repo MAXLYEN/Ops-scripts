@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/cleanup-purge.sh — 按安装台账移除 ops-scripts 及其产物
-# VERSION: 1.0.5
-# 1.0.5: 同一路径只列一次（ops-common.sh 原先会重复显示）。
+# VERSION: 1.0.6
+# 1.0.6: 没有台账时也移除菜单 opsbox（opsget 1.5.0 起随 -u 安装）。
 # 默认预演，--apply 才执行移除并要求确认。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -73,7 +73,7 @@ else
     warn "拉不到 MANIFEST，只能删 opsget 与 common.sh，其余请手工确认"
   fi
 fi
-add /usr/local/bin/opsget /usr/local/lib/ops-common.sh
+add /usr/local/bin/opsget /usr/local/bin/opsbox /usr/local/lib/ops-common.sh
 add /var/lib/ops-scripts
 
 section "2. 脚本的旧版备份"
