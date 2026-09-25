@@ -17,7 +17,7 @@
 | `00-precheck.sh` | 1.0.2 | 探测系统、硬件、网络及软件源，更新系统并判断是否重启 |
 | `01-swap-memory.sh` | 1.1.1 | 按内存与磁盘容量创建 Swap，配置内存参数 |
 | `02-system-network.sh` | 1.1.1 | 配置 UTC、IPv4 优先、磁盘、BBR 和内核参数 |
-| `03-ssh-firewall.sh` | 1.3.2 | 加固 SSH，启用 ufw、fail2ban 和空闲超时 |
+| `03-ssh-firewall.sh` | 1.4.0 | 加固 SSH，启用 ufw、fail2ban 和空闲超时 |
 | `04-verify.sh` | 1.1.1 | 重启后只读核对系统层配置是否生效 |
 
 ## 关键注意事项

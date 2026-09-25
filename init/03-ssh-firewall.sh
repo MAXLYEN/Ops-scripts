@@ -1,7 +1,7 @@
 #!/bin/bash
 # init/03-ssh-firewall.sh — 加固 SSH、启用 ufw 并配置 fail2ban
-# VERSION: 1.3.2
-# 1.3.2: 未使用的循环计数改为 _，执行逻辑未变。
+# VERSION: 1.4.0
+# 1.4.0: fail2ban 写入 ignoreip：本机、当前 SSH 客户端 IP 与 env.conf 的 ADMIN_IPS，避免把管理员自己封掉。
 # 用法: 以 root 执行；先打开第二个 SSH 窗口并确认带外控制台可用。
 # 脚本会设置 5 分钟自动回滚，验证新连接后需明确取消回滚。
 
@@ -19,6 +19,24 @@ EXTRA_TCP="${SVC_TCP_RANGES:-$EXTRA_TCP}"
 # 交互式 SSH 会话空闲多久自动退出（秒）。0 = 不启用。
 IDLE_TIMEOUT="${SSH_IDLE_TIMEOUT:-7200}"
 EXTRA_UDP="${SVC_UDP_RANGES:-$EXTRA_UDP}"
+
+# fail2ban 白名单。封禁 7 天、重犯翻倍到 60 天，而 MaxAuthTries 3 下
+# ssh-agent 里多试几把钥匙也会记成失败 —— 不留白名单，管理员自己被封就只能走带外控制台。
+# 当前 SSH 客户端 IP 自动加入（动态 IP 换了就不再生效），固定出口写进 env.conf 的 ADMIN_IPS。
+CLIENT_IP=$(echo "${SSH_CONNECTION:-}" | awk '{print $1}')
+# 只收像 IP 或网段的写法，并拒绝 /0–/7 这种宽网段：写进 ignoreip 就等于关掉 fail2ban
+valid_ignore() {
+  case "$1" in */0|*/[0-7]) return 1 ;; esac
+  printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$|^[0-9A-Fa-f]*:[0-9A-Fa-f:.]*(/[0-9]{1,3})?$'
+}
+IGNORE_IPS="127.0.0.1/8 ::1"
+for a in $CLIENT_IP ${ADMIN_IPS:-}; do
+  if ! valid_ignore "$a"; then
+    echo "  ⚠️  忽略不合法或网段过宽的白名单地址: $a"
+    continue
+  fi
+  case " $IGNORE_IPS " in *" $a "*) ;; *) IGNORE_IPS="$IGNORE_IPS $a" ;; esac
+done
 
 echo "════════ 03 · SSH 与防火墙 ════════"
 echo "─ 0. 能力探测 ─"
@@ -46,6 +64,7 @@ printf '  %-16s %s\n' \
   SSH单元    "$SSH_UNIT" \
   drop-in    "$([ $DROPIN -eq 1 ] && echo 支持 || echo 不支持)" \
   SSH端口    "$F2B_PORTS" \
+  封禁白名单 "$IGNORE_IPS" \
   放行TCP    "$EXTRA_TCP" \
   放行UDP    "$EXTRA_UDP"
 
@@ -212,6 +231,7 @@ write_jail() {
     echo "banaction = $F2B_ACTION"
     echo "banaction_allports = $F2B_ACTION"
     echo "backend = $F2B_BACKEND"
+    echo "ignoreip = $IGNORE_IPS"
     if [ "$1" = inc ]; then
       echo '# 重复触犯时封禁时长翻倍，上限 60 天'
       echo 'bantime.increment = true'
@@ -253,6 +273,9 @@ for _ in $(seq 1 20); do
 done
 fail2ban-client status sshd 2>/dev/null | sed 's/^/  /' || \
   echo "  ⚠️  未就绪（不影响防火墙）: journalctl -u fail2ban -n 30"
+fail2ban-client get sshd ignoreip 2>/dev/null | grep -qF -- "${CLIENT_IP:-127.0.0.1}" \
+  && echo "  ✅ 封禁白名单已生效（含 ${CLIENT_IP:-本机}）" \
+  || echo "  ⚠️  白名单未确认生效，手动查看: fail2ban-client get sshd ignoreip"
 
 echo
 echo "════════ 8. 连通性验证 ════════"
