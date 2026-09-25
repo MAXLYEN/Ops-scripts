@@ -23,7 +23,7 @@
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `bind-localhost.sh` | 2.0.1 | 将容器端口映射从公网绑定改为本机绑定 |
+| `bind-localhost.sh` | 2.1.0 | 将容器端口映射从公网绑定改为本机绑定 |
 | `containerize-and-pin.sh` | 1.1.1 | 把服务改为 compose 管理并锁定镜像 digest |
 | `decommission-archive.sh` | 2.0.1 | 在机器退役前归档最终状态与数据 |
 | `deploy-litellm.sh` | 1.2.4 | 部署 LiteLLM、Postgres 与 Redis 容器 |
