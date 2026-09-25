@@ -16,7 +16,7 @@
 | `run.sh` | 2.0.2 | 展示阶段和机器状态，通过 `opsget` 启动指定阶段 |
 | `00-precheck.sh` | 1.0.2 | 探测系统、硬件、网络及软件源，更新系统并判断是否重启 |
 | `01-swap-memory.sh` | 1.1.1 | 按内存与磁盘容量创建 Swap，配置内存参数 |
-| `02-system-network.sh` | 1.1.1 | 配置 UTC、IPv4 优先、磁盘、BBR 和内核参数 |
+| `02-system-network.sh` | 1.2.0 | 配置 UTC、IPv4 优先、磁盘、BBR 和内核参数 |
 | `03-ssh-firewall.sh` | 1.4.0 | 加固 SSH，启用 ufw、fail2ban 和空闲超时 |
 | `04-verify.sh` | 1.1.1 | 重启后只读核对系统层配置是否生效 |
 
@@ -28,3 +28,17 @@
 - 04 只检查系统层；容器和数据库还需运行 `migrate/08-post-start-check`。
 
 各脚本的 `VERSION` 独立维护。历史改动及本次整理见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 已初始化的机器补启用 hidepid
+
+`02-system-network.sh` 1.2.0 起会以 `hidepid` 挂载 `/proc` 并写入 fstab。之前初始化的机器不必重跑整个阶段 02，按下面两步手动补上：先临时 remount 观察一两天（面板、站点、每晚备份均正常），再写入 fstab。
+
+```bash
+mount -o remount,hidepid=invisible /proc          # 临时启用，重启即失效；撤回用 hidepid=0
+```
+
+```bash
+cp -a /etc/fstab /etc/fstab.bak.$(date +%Y%m%d%H%M%S) && echo 'proc /proc proc nosuid,nodev,noexec,relatime,hidepid=invisible 0 0' >> /etc/fstab && mount -o remount /proc && findmnt -no OPTIONS /proc
+```
+
+写入前先确认 fstab 里没有 `/proc` 条目（`grep ' /proc ' /etc/fstab`）。不要写 `defaults`：remount 时会把 `/proc` 原有的 `nosuid,nodev,noexec` 冲掉。内核低于 5.8 时把 `invisible` 换成 `2`。

@@ -1,7 +1,7 @@
 #!/bin/bash
 # init/02-system-network.sh — 配置时区、网络、磁盘和内核参数
-# VERSION: 1.1.1
-# 1.1.1: 统一注释与目录文档，执行逻辑未变。
+# VERSION: 1.2.0
+# 1.2.0: 新增 /proc hidepid：普通用户看不到其他用户的进程与命令行（7z 在命令行传备份密码），写入 fstab 并立即生效。
 # 用法: 以 root 执行；已存在的 env.conf 可覆盖服务端口段。
 
 set -e
@@ -144,6 +144,47 @@ done
 echo "  （保留 mount/umount 的 SUID，摘除会破坏 fstab 的 user 选项）"
 
 echo
+echo "─ 3b. /proc 进程隐藏（hidepid）─"
+# 普通用户看不到其他用户的进程，也就读不到它们的命令行。备份脚本经 7z -p 传密码
+# （7z 没有别的可靠传法），没有这层保护时，同机任何用户（如被攻破的 www 站点）
+# 在备份窗口内都能从 ps 读到备份密码。root 与各服务自身不受影响。
+# 用 PROC_HIDEPID=0 关闭。已有 /proc 条目的 fstab 不改，只提示。
+if [ "${PROC_HIDEPID:-1}" = 0 ]; then
+  echo "  已按 PROC_HIDEPID=0 跳过"
+else
+  # 5.8 起用 invisible（连目录都不列出）；更早的内核只认数字写法
+  KV=$(uname -r | awk -F. '{print $1*100+$2}')
+  if [ "${KV:-0}" -ge 508 ]; then HP=invisible; else HP=2; fi
+  # 显式写出 nosuid/nodev/noexec：写 defaults 会在 remount 时把它们冲掉
+  PROC_LINE="proc /proc proc nosuid,nodev,noexec,relatime,hidepid=$HP 0 0"
+  if grep -qE '^[[:space:]]*[^#[:space:]]+[[:space:]]+/proc[[:space:]]' /etc/fstab; then
+    echo "  fstab 已有 /proc 条目，未改动: $(grep -E '^[[:space:]]*[^#[:space:]]+[[:space:]]+/proc[[:space:]]' /etc/fstab | head -1)"
+  else
+    PRE_REAL=$(fstab_verify | sed -n 's/^REAL=//p'); PRE_REAL=${PRE_REAL:-0}
+    FBK=/etc/fstab.bak.$TS
+    cp -a /etc/fstab "$FBK"
+    printf '%s\n' "$PROC_LINE" >> /etc/fstab
+    POST_REAL=$(fstab_verify | sed -n 's/^REAL=//p'); POST_REAL=${POST_REAL:-0}
+    # 不带 hidepid 参数地 remount，逼 mount 按 fstab 的选项来 —— 能过才说明重启后也能生效
+    if [ "$POST_REAL" -gt "$PRE_REAL" ] || ! mount -o remount /proc 2>/dev/null; then
+      cp -a "$FBK" /etc/fstab
+      echo "  ❌ fstab 新条目校验或 remount 失败，已还原自 $FBK"
+    else
+      echo "  已写入 fstab（备份 $FBK）: $PROC_LINE"
+    fi
+  fi
+  if findmnt -no OPTIONS /proc | grep -q 'hidepid='; then
+    echo "  ✅ 当前生效: $(findmnt -no OPTIONS /proc | grep -o 'hidepid=[a-z0-9]*')"
+  else
+    mount -o remount,hidepid=$HP /proc 2>/dev/null \
+      && echo "  ✅ 已临时 remount 为 hidepid=$HP（未写入 fstab，重启后失效）" \
+      || echo "  ⚠️  remount 失败，未启用"
+  fi
+  id polkitd >/dev/null 2>&1 && \
+    echo "  ℹ️  装有 polkit：若出现授权异常，给 /proc 加 gid=<polkitd 的组> 让它能看到进程"
+fi
+
+echo
 echo "─ 4. 磁盘调度器与预读 ─"
 cat > /etc/udev/rules.d/60-disk-tuning.rules << INNER
 # disk tuning $TS
@@ -251,7 +292,7 @@ journalctl --vacuum-size=${LOGMAX}M >/dev/null 2>&1 || true
 echo "  上限 ${LOGMAX}MB"
 
 echo
-echo "─ 8. fstab 校验（只读，本阶段不修改 fstab）─"
+echo "─ 8. fstab 校验（本阶段只在 3b 追加 /proc 条目）─"
 fstab_report "  " || true
 
 echo
