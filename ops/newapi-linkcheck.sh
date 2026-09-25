@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/newapi-linkcheck.sh — 检查 new-api 隧道和公网访问全链路
-# VERSION: 1.0.2
-# 1.0.2: 未使用的重试计数改为 _，执行逻辑未变。
+# VERSION: 1.0.3
+# 1.0.3: webhook 的 JSON 正确转义（正文含引号或换行时原先会发送失败）。
 # ENV-REQUIRED: NEWAPI_TUNNEL_UNIT NEWAPI_LOCAL_URL NEWAPI_PUBLIC_URL
 
 set -o pipefail
@@ -26,6 +26,13 @@ hb() {
   curl -fsS -m 10 --retry 2 "${NEWAPI_LINK_HEARTBEAT_URL}$1" >/dev/null 2>&1 || true
 }
 
+# webhook 的 JSON 要转义：正文是日志尾部，含引号、反斜杠或换行时原样拼进去
+# JSON 就坏了，webhook 静默失败，告警只剩本地落盘那一份
+json_esc() {
+  printf '%s' "$1" | tr -d '\r' \
+    | awk 'BEGIN{ORS=""} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"\\t"); if (NR>1) print "\\n"; print}'
+}
+
 send_mail() {
   local subject="$1" body="$2"
   if command -v msmtp >/dev/null 2>&1 && [ -n "${MAIL_TO:-}" ]; then
@@ -37,7 +44,7 @@ send_mail() {
   fi
   if [ -n "${ALERT_WEBHOOK:-}" ]; then
     curl -fsS -m 15 -X POST "$ALERT_WEBHOOK" -H 'Content-Type: application/json' \
-      --data "$(printf '{"text":"%s\\n%s"}' "$subject" "$body" | tr -d '\r')" \
+      --data "{\"text\":\"$(json_esc "$subject"$'\n'"$body")\"}" \
       >/dev/null 2>&1 && return 0
   fi
   printf '%s %s\n%s\n---\n' "$(date -u '+%F %T')" "$subject" "$body" \

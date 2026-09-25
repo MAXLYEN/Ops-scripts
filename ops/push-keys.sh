@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/push-keys.sh — 按主机清单批量下发 SSH 公钥
-# VERSION: 1.0.3
-# 1.0.3: 删除未使用的 PUBKEY，执行逻辑未变。
+# VERSION: 1.0.4
+# 1.0.4: 诊断提示改为 diag-key -p，不再建议把密码写进参数。
 
 set -o pipefail
 
@@ -97,7 +97,7 @@ log "处理 $n / 清单 $total —— 新下发 $ok，已免密 $skip，缺密�
   log "未成功:$fail"
   log "  多半是服务端 PubkeyAuthentication no —— 逐台处理并自动修复:"
   log "    opsget ops/setup-key-login <IP> <端口>（密码会提示输入）"
-  log "  或诊断: opsget ops/diag-key <ssh目标[:端口]> <密码>"
+  log "  或诊断: opsget ops/diag-key <ssh目标[:端口]> -p（密码会提示输入）"
 }
 log ""
 log "全部成功后销毁明文密码清单: shred -u $LIST"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/cleanup-tidy.sh — 清理历史输出、旧版备份与中间产物
-# VERSION: 1.1.1
-# 1.1.1: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 1.1.2
+# 1.1.2: 第 7 节改为只列出容器数据目录里的 .bak 旧副本（原先想按份数删，却总被保护名单拦下，从未生效）。
 # 默认预演，--apply 才执行清理。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -107,18 +107,21 @@ done
 [ -n "$SECBUF" ] && emit "  [提醒] restore_cmds 里可能含带凭据的启动命令，清掉是好事"
 sec "6. 恢复过程的中间产物"
 
-# db/sqlite-dsn、rotate-db-pass 等在修改前会留 <文件>.bak.<时间戳>
+# db/sqlite-dsn、rotate-db-pass 等在修改前会留 <文件>.bak.<时间戳>。
+# 只列出、不删：它们在受保护的容器数据目录里，而且往往是数据库改动前的唯一副本，
+# 同名模式也可能撞上应用自己的文件 —— 该不该删要人看过再定。
 for d in $CONTAINER_DATA_DIRS; do
   [ -d "$d" ] || continue
-  # 这些目录本身受保护，但目录里的 .bak.<时间戳> 是 ops 产生的，可以按份数清
-  found=$(find "$d" -maxdepth 2 -name '*.bak.[0-9]*' 2>/dev/null)
+  found=$(find "$d" -maxdepth 2 -name '*.bak.[0-9]*' 2>/dev/null | sort)
   [ -n "$found" ] || continue
-  for base in $(printf '%s\n' "$found" | sed 's/\.bak\.[0-9]*$//' | sort -u); do
-    sweep "$(basename "$base")" 1 "$base".bak.[0-9]*
-  done
+  while IFS= read -r f; do
+    emit "$(printf '    %-10s %s' "$(human "$f")" "$f")"
+  done <<EOF
+$found
+EOF
 done
-[ -n "$SECBUF" ] && emit "  (以上只清 ops 脚本留下的 .bak.<时间戳>，业务数据本身不动)"
-sec "7. 脚本改动过的配置文件的旧副本"
+[ -n "$SECBUF" ] && emit "  (只列出不删除：在受保护目录里，确认不再需要后手动 rm)"
+sec "7. 容器数据目录里的旧副本（仅列出）"
 
 # collect.sh 每跑一次就在每台机器新增一份 JSON 加一份 route.txt，
 # 汇总目录还会按台累积 —— 不管的话几轮下来就是几百个文件

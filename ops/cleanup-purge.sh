@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/cleanup-purge.sh — 按安装台账移除 ops-scripts 及其产物
-# VERSION: 1.0.4
-# 1.0.4: crontab 正在调用的脚本与 BACKUP_SCRIPTS 默认不删（原先会删掉却声称不删）；PURGE_CRON_SCRIPTS=1 才一并删除。
+# VERSION: 1.0.5
+# 1.0.5: 同一路径只列一次（ops-common.sh 原先会重复显示）。
 # 默认预演，--apply 才执行移除并要求确认。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -43,9 +43,13 @@ is_in_use() {
 }
 
 TARGETS=$(mktemp); trap 'rm -f "$TARGETS"' EXIT
+SEEN=" "
 add() {
   for p in "$@"; do
     [ -e "$p" ] || continue
+    # 台账里的路径可能又被单独 add 一次（如 ops-common.sh），只处理第一次
+    case "$SEEN" in *" $p "*) continue ;; esac
+    SEEN="$SEEN$p "
     if is_protected "$p"; then echo "  [跳过·受保护] $p"; continue; fi
     if is_in_use "$p"; then echo "  [跳过·crontab/备份在用] $p"; continue; fi
     printf '%s\n' "$p" >> "$TARGETS"

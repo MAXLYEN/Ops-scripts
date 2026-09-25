@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/panel-cron-inspect.sh — 查看面板计划任务的真实命令与运行状态
-# VERSION: 2.0.3
-# 2.0.3: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 2.0.4
+# 2.0.4: --run 只接受 32 位十六进制的任务 hash，拒绝 ../ 等路径。
 # ENV-REQUIRED: PANEL_CRON_DIR
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -11,6 +11,8 @@ require_env PANEL_CRON_DIR
 
 if [ "${1:-}" = "--run" ]; then
   H=${2:?用法: $0 --run <hash>}
+  # 面板任务文件名是 32 位小写十六进制；其他写法（含 ../）一律拒绝，免得以 root 执行任意文件
+  printf '%s' "$H" | grep -qxE '[a-f0-9]{32}' || die "hash 必须是 32 位十六进制: $H"
   F="$PANEL_CRON_DIR/$H"
   [ -f "$F" ] || die "任务不存在: $F"
   log "手动触发 $H"

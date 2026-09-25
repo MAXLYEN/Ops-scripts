@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # db/rotate-db-pass.sh — 轮换数据库密码并核对所有 host 记录
-# VERSION: 2.0.3
-# 2.0.3: 任一 host 改密失败即中止，不再继续改下游连接串（原先会把服务改成连不上库）。
+# VERSION: 2.0.4
+# 2.0.4: 校验经 NEWPASS 传入的密码字符，含 ' \ @ : / 时拒绝。
 # 用法: rotate-db-pass.sh check|rotate <用户名> [下游sqlite] [容器名]
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -49,6 +49,8 @@ rotate)
 
   NEWPASS="${NEWPASS:-$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)}"
   [ ${#NEWPASS} -ge 24 ] || die "密码太短"
+  # 手工经 NEWPASS 传入时：' 和 \ 会破坏 ALTER USER 语句，@ : / 会破坏 user:pass@host 连接串
+  case "$NEWPASS" in *[\'\\@:/]*) die "NEWPASS 不能含 ' \\ @ : / 这几个字符" ;; esac
   section "新密码"
   echo "  $NEWPASS"
   echo "  ↑ 现在就抄下来，脚本不会再显示第二次"

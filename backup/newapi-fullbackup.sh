@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # backup/newapi-fullbackup.sh — 从汇总机拉取 new-api 数据，生成一致性快照并加密上传
-# VERSION: 1.0.3
-# 1.0.3: 未使用的重试计数改为 _，执行逻辑未变。
+# VERSION: 1.0.4
+# 1.0.4: umask 077，暂存区与成品包不再对其他用户可读；webhook 的 JSON 正确转义。
 # ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_BAK_DIR BACKUP_PASS_FILE MAIL_TO
 # 定时任务调用已安装的本地脚本；SQLite 使用在线备份生成一致性快照。
 
 set -o pipefail
+# 暂存区里是明文的 one-api.db（含上游渠道 Key）：解包期间目录还没收紧，
+# 文件是 644。之后新建的目录一律 700、文件 600。
+umask 077
 
 # 配置载入
 ENV_FILE=/etc/ops-scripts/env.conf
@@ -35,6 +38,13 @@ hb() {
   curl -fsS -m 10 --retry 2 "${NEWAPI_HEARTBEAT_URL}$1" >/dev/null 2>&1 || true
 }
 
+# webhook 的 JSON 要转义：正文是日志尾部，含引号、反斜杠或换行时原样拼进去
+# JSON 就坏了，webhook 静默失败，告警只剩本地落盘那一份
+json_esc() {
+  printf '%s' "$1" | tr -d '\r' \
+    | awk 'BEGIN{ORS=""} {gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"\\t"); if (NR>1) print "\\n"; print}'
+}
+
 # 三次重试 + webhook 兜底 + 落盘兜底
 send_mail() {
   local subject="$1" body="$2"
@@ -48,7 +58,7 @@ send_mail() {
   if [ -n "${ALERT_WEBHOOK:-}" ]; then
     curl -fsS -m 15 -X POST "$ALERT_WEBHOOK" \
       -H 'Content-Type: application/json' \
-      --data "$(printf '{"text":"%s\\n%s"}' "$subject" "$body" | tr -d '\r')" \
+      --data "{\"text\":\"$(json_esc "$subject"$'\n'"$body")\"}" \
       >/dev/null 2>&1 && return 0
   fi
   printf '%s %s\n%s\n---\n' "$(date -u '+%F %T')" "$subject" "$body" \

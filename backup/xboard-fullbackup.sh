@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # backup/xboard-fullbackup.sh — 生成 Xboard 加密备份包并上传云端
-# VERSION: 2.3.2
-# 2.3.2: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 2.3.3
+# 2.3.3: option 文件的密码加引号转义（含 # 时原先会被截断）；未设静态资源站时不再把整个 wwwroot 收进包。
 # ENV-REQUIRED: SVC_XBOARD_DIR XBOARD_DB_NAME XBOARD_DB_USER XBOARD_DB_PASS_FILE XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH RCLONE_REMOTES BACKUP_PASS_FILE|VW_PASS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
 # 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
 
@@ -133,13 +133,15 @@ BACKUP_PASS=$(head -1 "$BACKUP_PASS_FILE")
 
 mkdir -p "$BACKUP_DIR" || fail "无法创建 $BACKUP_DIR"
 
-# 用 defaults-file 传密码，避免出现在 ps 输出里
+# 用 defaults-file 传密码，避免出现在 ps 输出里。
+# 值加双引号，密码里的 # 才不会被当成注释截断；\ 和 " 按 option 文件规则转义。
 MYCNF="$WORK/.my.cnf"
 umask 077
+DB_PASS_ESC=${DB_PASS//\\/\\\\}; DB_PASS_ESC=${DB_PASS_ESC//\"/\\\"}
 cat > "$MYCNF" <<EOF
 [client]
 user=$DB_USER
-password=$DB_PASS
+password="$DB_PASS_ESC"
 host=$DB_HOST
 port=$DB_PORT
 EOF
@@ -243,8 +245,12 @@ if [ -z "$ASSETS_SITE" ]; then
         [ -d "${WWWROOT}/${s}" ] && { ASSETS_SITE="$s"; break; }
     done
 fi
-[ -d "${WWWROOT}/${ASSETS_SITE}" ] \
-    && cp -a "${WWWROOT}/${ASSETS_SITE}" "$WORK/nginx/assets-site"
+# ASSETS_SITE 为空时 "${WWWROOT}/" 本身就是目录，会把整个 wwwroot 抄进 /tmp
+if [ -n "$ASSETS_SITE" ] && [ -d "${WWWROOT}/${ASSETS_SITE}" ]; then
+    cp -a "${WWWROOT}/${ASSETS_SITE}" "$WORK/nginx/assets-site"
+else
+    log "没有可收的静态资源站（XBOARD_ASSETS_SITE 未设，站点目录也都不在 ${WWWROOT} 下）"
+fi
 
 # 4. 部署元数据
 log "--- 打包部署元数据 ---"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/newapi-drill.sh — 在备用机演练 new-api 备份的恢复与清理
-# VERSION: 1.0.3
-# 1.0.3: 可选的 data-rest 改用位置参数传给 tar；提示写出实际路径。
+# VERSION: 1.0.4
+# 1.0.4: 状态文件的值用 printf %q 写入：它会被 source，而 IMAGE 取自备份包内容。
 # ENV-REQUIRED: NEWAPI_HOST BACKUP_PASS_FILE NEWAPI_CLOUD_DIR
 # 在备用机运行；禁止指向生产落地机。
 # 用法：
@@ -83,7 +83,8 @@ do_restore() {
     echo "DOCKER_PREEXISTING=0" > "$STATE_FILE"
     log "目标机原本没有 docker，teardown 时会卸载还原"
   fi
-  echo "DRILL_START='$(date -u '+%F %T')'" >> "$STATE_FILE"
+  # 状态文件在 teardown 时会被 source：值一律 %q 转义，别让包里的内容变成代码
+  printf 'DRILL_START=%q\n' "$(date -u '+%F %T')" >> "$STATE_FILE"
 
   log "----- 从云端取最新备份 -----"
   command -v rclone >/dev/null 2>&1 || die "本机缺少 rclone"
@@ -173,8 +174,7 @@ docker ps --filter name=${DRILL_CONTAINER} --format '  {{.Names}}  {{.Image}}  {
 REMOTE_RUN
   [ $? -ne 0 ] && die "恢复实例起不来或自检不过"
 
-  echo "RESTORED_FROM='$LATEST'" >> "$STATE_FILE"
-  echo "IMAGE='$IMAGE'" >> "$STATE_FILE"
+  printf 'RESTORED_FROM=%q\nIMAGE=%q\n' "$LATEST" "$IMAGE" >> "$STATE_FILE"
   log "恢复完成。下一步：newapi-drill.sh verify $TARGET"
 }
 

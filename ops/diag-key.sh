@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/diag-key.sh — 诊断指定主机的 SSH 密钥登录失败原因
-# VERSION: 1.0.2
-# 1.0.2: 提示改为省略密码参数的 setup-key-login 用法，执行逻辑未变。
+# VERSION: 1.1.0
+# 1.1.0: 新增 -p：密码从终端静默读取或取环境变量 SSHPASS，不再需要写在参数里。
 
 set -o pipefail
 
@@ -9,10 +9,12 @@ usage() {
   cat <<'USAGE'
 diag-key.sh — 诊断密钥登录失败的原因
 
-  diag-key.sh <ssh目标[:端口]> [密码]
+  diag-key.sh <ssh目标[:端口]>        用密钥登录去查（能登但想确认配置）
+  diag-key.sh <ssh目标[:端口]> -p     用密码登录去查（密钥完全登不上）
 
-  密码可省略 —— 省略时用密钥登录去查（适合「能登但想确认配置」的场景）；
-  提供密码则用密码登录去查（适合密钥完全登不上的场景）。
+  -p 时密码在终端静默输入（不回显、不进 shell 历史），
+  非交互调用取环境变量 SSHPASS。旧写法「把密码写在第二个参数」仍兼容，
+  但会留在 shell 历史和进程命令行里。
 
 检查项: 家目录与 .ssh 权限、authorized_keys 内容、sshd 生效配置、
         磁盘是否写满、SELinux、以及客户端侧的完整认证过程。
@@ -25,9 +27,26 @@ die() { printf '[致命] %s\n' "$*" >&2; exit 1; }
 
 case "${1:-}" in -h|--help|'') usage; exit 0 ;; esac
 
-tgt="$1"; pw="${2:-}"
+tgt="$1"; pw=""
 case "$tgt" in *:*) t=${tgt%:*}; p=${tgt##*:} ;; *) t=$tgt; p=22 ;; esac
 case "$p" in ''|*[!0-9]*) die "端口必须是数字: $p" ;; esac
+case "${2:-}" in
+  '') ;;
+  -p)
+    if [ -n "${SSHPASS:-}" ]; then
+      pw="$SSHPASS"
+    else
+      [ -t 0 ] || die "非交互调用请用环境变量 SSHPASS 传入密码"
+      printf '%s 的密码（不回显）: ' "$t" >&2
+      read -rs pw; printf '\n' >&2
+    fi
+    [ -n "$pw" ] || die "密码为空"
+    ;;
+  *)
+    pw="$2"
+    printf '[提示] 密码写在参数里会留在 shell 历史和进程命令行，下次改用 -p\n' >&2
+    ;;
+esac
 
 # 有密码就用密码连（密钥登不上时唯一的进入方式），否则用密钥
 if [ -n "$pw" ]; then
