@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/panel-cron-inspect.sh — 查看面板计划任务的真实命令与运行状态
-# VERSION: 2.0.4
-# 2.0.4: --run 只接受 32 位十六进制的任务 hash，拒绝 ../ 等路径。
+# VERSION: 2.0.5
+# 2.0.5: 「脚本文件不存在」计入告警（原先在管道子 shell 里计数丢失）。
 # ENV-REQUIRED: PANEL_CRON_DIR
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -24,7 +24,8 @@ section "crontab 里的面板任务"
 crontab -l 2>/dev/null | grep -F "$PANEL_CRON_DIR/" | sed 's/^/  /'
 
 section "各任务在做什么"
-crontab -l 2>/dev/null | grep -oE "${PANEL_CRON_DIR}/[a-f0-9]{32}" | sort -u | while read -r f; do
+# 进程替换而不是管道：循环里的 warn 要计入最后的告警数
+while read -r f; do
   h=$(basename "$f")
   sched=$(crontab -l 2>/dev/null | grep -m1 -F "$h" | awk '{print $1,$2,$3,$4,$5}')
   echo "  ── $h   计划: $sched"
@@ -49,7 +50,7 @@ crontab -l 2>/dev/null | grep -oE "${PANEL_CRON_DIR}/[a-f0-9]{32}" | sort -u | w
     warn "脚本文件不存在: $f"
   fi
   echo
-done
+done < <(crontab -l 2>/dev/null | grep -oE "${PANEL_CRON_DIR}/[a-f0-9]{32}" | sort -u)
 
 section "输出目录现状"
 if [ -n "${PANEL_DB_BACKUP_DIR:-}" ]; then

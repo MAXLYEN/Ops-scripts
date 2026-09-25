@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/opsget — 从仓库拉取、安装和执行运维脚本
-# VERSION: 1.4.0
-# 1.4.0: 新增 --pin / --unpin，把本机固定到验证过的 tag 或提交；执行脚本时导出 OPS_REF。
+# VERSION: 1.4.1
+# 1.4.1: 校验脚本路径（拒绝 .. 与非法字符）；帮助里的验证写法改为完整提交号。
 # 配置依赖以目标脚本的 ENV-REQUIRED 声明为准。
 
 set -o pipefail
@@ -12,6 +12,10 @@ log() { printf '%s\n' "$*"; }
 # ref 只进 URL 路径，限定字符集，也挡掉 .. 这类路径穿越
 valid_ref() {
   case "$1" in ''|*[!A-Za-z0-9._/-]*|*..*) return 1 ;; esac
+}
+# 脚本路径同理：它既拼进 URL，又决定装到哪个文件名
+valid_path() {
+  case "$1" in ''|/*|*..*|*[!A-Za-z0-9._/-]*) return 1 ;; esac
 }
 
 OPS_REPO="${OPS_REPO:-https://raw.githubusercontent.com/MAXLYEN/ops-scripts}"
@@ -50,7 +54,9 @@ opsget — ops-scripts 引导器
   opsget --pin                   看当前从哪个 ref 拉取、来源是什么
   opsget --pin <tag|提交>        固定本机，之后只从这个 ref 拉取
   opsget --unpin                 取消固定，回到 main
-  OPS_REF=main opsget -i <路径>  单次覆盖固定（先在一台机上验证新提交）
+  OPS_REF=<40位提交号> opsget -i <路径>
+                                 单次覆盖固定（先在一台机上验证新提交）。
+                                 别用 OPS_REF=main：raw 会缓存分支指向几分钟，刚推送后拉到的可能是旧版
 
 配置（env.conf）：
   opsget -c                      按已装脚本的实际需要，补齐 env.conf
@@ -234,6 +240,7 @@ env_merge() {  # $1=模板 $2...=要写入的键
 # 而这个方向的错答（该拦没拦）比误报缺配置危险得多。
 get_env_required() {  # $1=仓库内路径（不带 .sh）
   local p=$1 name tmp keys=""
+  valid_path "$p" || die "路径不合法: $p"
   name=$(basename "$p")
   tmp=$(mktemp)
   if curl_retry "$BASE/$p.sh" "$tmp" >/dev/null 2>&1 && [ -s "$tmp" ]; then
@@ -318,7 +325,7 @@ case "${1:-}" in
   -i|--install)
     shift
     [ -n "${1:-}" ] || die "用法: opsget -i <路径>"
-    P=${1%.sh}; NAME=$(basename "$P")
+    P=${1%.sh}; valid_path "$P" || die "路径不合法: $1"; NAME=$(basename "$P")
     log "[ref] $OPS_REF（$REF_SRC）"
     sync_lib
     fetch "$P.sh" "$BIN_DIR/$NAME.sh"
@@ -371,6 +378,7 @@ esac
 
 # ── 拉取并执行 ──────────────────────────────────────────────
 P=${1%.sh}; shift
+valid_path "$P" || die "路径不合法: $P.sh（写成 目录/脚本名，如 ops/save-fw）"
 NAME=$(basename "$P")
 log "[ref] $OPS_REF（$REF_SRC）"
 sync_lib

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/bind-localhost.sh — 将容器端口映射从公网绑定改为本机绑定
-# VERSION: 2.1.0
-# 2.1.0: 每轮在独立子目录生成、--apply 只执行本轮的；含重建命令复现不了的配置（匿名卷、cap、设备、资源限制、多网络等）时拒绝生成；重建改为旧容器改名保留、失败自动回滚。
+# VERSION: 2.1.1
+# 2.1.1: 被拒绝重建或由 compose 管理的容器计入告警（原先在子 shell 里计数丢失，总报 0 告警）。
 # 默认只生成命令，--apply 才执行容器重建。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -27,7 +27,9 @@ fi
 echo "$EXPOSED" | sed 's/^/  /'
 
 section "生成收紧后的启动命令"
-echo "$EXPOSED" | awk -F'\t' '{print $1}' | while read -r name; do
+# 进程替换而不是管道：管道里的 while 是子 shell，里面的 warn 计数传不出来，
+# 有容器被拒绝重建时最后仍报「0 告警」
+while read -r name; do
   [ -n "$name" ] || continue
   # compose 管理的容器不能这样重建，要改 compose 文件
   proj=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$name" 2>/dev/null)
@@ -138,7 +140,7 @@ fi
 os.chmod(sys.argv[2], 0o700)
 print(f"  [生成] {sys.argv[2]}")
 PY
-done
+done < <(printf '%s\n' "$EXPOSED" | awk -F'\t' '{print $1}')
 
 section "生成的命令"
 for f in "$OUTDIR"/*.sh; do

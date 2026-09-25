@@ -11,7 +11,7 @@
 | `diag-key.sh` | 1.1.0 | 诊断指定主机的 SSH 密钥登录失败原因 |
 | `komari-metrics-check.sh` | 2.0.1 | 检查 Komari 指标库的保留期与增长速度 |
 | `mail-doctor.sh` | 1.0.3 | 诊断告警邮件的配置与发送链路 |
-| `panel-cron-inspect.sh` | 2.0.4 | 查看面板计划任务的真实命令与运行状态 |
+| `panel-cron-inspect.sh` | 2.0.5 | 查看面板计划任务的真实命令与运行状态 |
 | `panel-data-locate.sh` | 2.0.2 | 定位面板数据在磁盘上的存储位置 |
 | `preflight-backup.sh` | 2.0.2 | 检查备份脚本运行前的依赖与配置 |
 | `save-fw.sh` | 2.0.2 | 在修改防火墙前保存当前配置快照 |
@@ -23,7 +23,7 @@
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `bind-localhost.sh` | 2.1.0 | 将容器端口映射从公网绑定改为本机绑定 |
+| `bind-localhost.sh` | 2.1.1 | 将容器端口映射从公网绑定改为本机绑定 |
 | `containerize-and-pin.sh` | 1.1.1 | 把服务改为 compose 管理并锁定镜像 digest |
 | `decommission-archive.sh` | 2.0.1 | 在机器退役前归档最终状态与数据 |
 | `deploy-litellm.sh` | 1.2.4 | 部署 LiteLLM、Postgres 与 Redis 容器 |
