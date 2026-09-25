@@ -1,0 +1,903 @@
+#!/usr/bin/env bash
+# bin/opsbox — ops-scripts 中文菜单：按场景挑功能，常用组合自动串联
+# VERSION: 1.0.0
+# 1.0.0: 首版。菜单只负责挑选、说明、确认与串联；拉取、版本固定和配置预检仍交给 opsget。
+# 用法: opsbox（或在终端里不带参数运行 opsget）。随 opsget -u 一起更新。
+
+set -o pipefail
+
+OPSBOX_VERSION=1.0.0
+BIN_DIR=/usr/local/bin
+ENV_FILE=/etc/ops-scripts/env.conf
+REF_FILE=/etc/ops-scripts/ref
+STATE_DIR=/var/lib/ops-scripts
+STATE_FILE="$STATE_DIR/opsbox.state"
+
+die() { printf '[致命] %s\n' "$*" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || die "需要 root"
+{ [ -t 0 ] && [ -t 1 ]; } || die "菜单需要交互终端；脚本和 cron 里请直接用 opsget <路径> 或本地已装脚本"
+command -v opsget >/dev/null 2>&1 || die "找不到 opsget，先按仓库 README 的「快速开始」安装引导器"
+
+# 中文按两列宽对齐，要求 bash 按字符计数；只影响本 shell 的字符串处理
+case "$(locale charmap 2>/dev/null)" in
+  UTF-8) ;;
+  *) locale -a 2>/dev/null | grep -qiE '^c\.utf-?8$' && LC_ALL=C.UTF-8 ;;
+esac
+
+c=$(tput colors 2>/dev/null)
+if [ -z "${NO_COLOR:-}" ] && [ "${c:-0}" -ge 8 ] 2>/dev/null; then
+  R=$'\e[31m' G=$'\e[32m' Y=$'\e[33m' B=$'\e[36m' D=$'\e[2m' H=$'\e[1m' N=$'\e[0m'
+else
+  R='' G='' Y='' B='' D='' H='' N=''
+fi
+unset c
+
+# ── 菜单登记表 ──────────────────────────────────────────────
+# 分类|键|仓库路径（多个用空格，没有写 -）|标记|标题|什么时候用|会做什么
+# 键同时是处理函数名 do_<键>；没有 do_<键> 的单路径项直接经 opsget 执行。
+# 按「要办的事」登记，不按脚本登记：改动类脚本只通过带前后检查的联动入口出现。
+CATS="check|日常巡检
+backup|备份与恢复
+security|安全与防火墙
+ssh|SSH 密钥
+maint|清理与维护
+init|服务器初始化
+vps|VPS 质量评估
+migrate|整机迁移
+settings|工具箱设置"
+
+ITEMS=$(cat <<'EOF'
+check|daily|-|联动|一键巡检|每周随手跑一次，或感觉哪里不对、不知道从哪查起时|依次跑备份前置检查、证书对账、LLM 访问控制盘点、监控库体检、脚本盘点，最后汇总；本机没配置的项自动跳过
+check|preflight|ops/preflight-backup|只读|备份前置检查|改了备份配置、装了新备份脚本，或换机器之后|检查备份依赖的命令、目录、密码文件和网盘配置是否齐全
+check|ssl|ops/ssl-audit|只读|证书对账|站点报证书错误、证书快到期，或增删过站点之后|核对证书文件、站点引用、续期记录三方是否一致
+check|linkcheck|ops/newapi-linkcheck|需确认|new-api 链路检查|new-api 打不开或变慢，想分清是隧道断了还是公网出了问题|先测隧道端口再测公网地址；隧道不通时会自动重启隧道服务（与定时任务行为相同）
+check|komari|ops/komari-metrics-check|只读|监控指标库体检|磁盘涨得快，或每月看一次监控库体积|检查 Komari 指标库的保留期和增长速度
+check|panelcron|ops/panel-cron-inspect|只读|面板计划任务|面板里的计划任务看不懂在跑什么，或想手动触发一次时|列出面板计划任务背后的真实命令和运行状态；看完可以挑一个手动触发
+check|inventory|ops/script-inventory|只读|本机脚本盘点|想知道本机哪些脚本来自仓库、哪些是手工放的、版本有没有落后|对比本机脚本与固定版本的仓库内容
+check|locate|ops/panel-data-locate|只读|定位面板数据|想找某个站点或配置的数据到底存在哪个目录、哪张表|按你给的特征串（如域名）在面板目录和数据库里搜索
+backup|health|-|联动|备份体检|每周一次，或担心备份没在跑、云端的包坏了|先跑备份前置检查，再下载云端最新包验证能否解开；校验没通过时自动接着诊断告警邮件
+backup|now|backup/vw-fullbackup backup/xboard-fullbackup backup/newapi-fullbackup|需确认|立即备份|升级、迁移或大改之前，先手动备份一次|运行本机已装的备份脚本，和定时任务用同一把锁，不会撞车；不经网络拉取
+backup|verify|ops/verify-backup-pass|只读|云端备份包校验|想确认云端的包能用本地密码解开，且最新的包没有过期|每个网盘取最新包下载并解开验证；手动运行不发告警
+backup|compare|ops/compare-backup-content|只读|比对最近两个备份包|改了备份脚本后，确认新包内容和旧包一致|解开同一目录下最新的两个包，比较文件清单
+backup|panelup|ops/panel-backup-upload|需确认|上传面板整机备份|在面板里手动生成整机备份后，想把它加密传到网盘|先列出本地和云端已有的包，确认后加密上传；可选只保留本机最近上传的几份
+security|savefw|ops/save-fw|只读|防火墙快照|手动改 ufw 或 iptables 之前|把当前防火墙规则存到 /root/fwstate_<时间>，并附恢复命令；不改动防火墙
+security|llm|ops/check-llm-security ops/sync-llm-allowlist|联动|LLM 访问控制|LLM 站被扫、要加白名单 IP，或改了 ALLOW_EXTRA_IPS 之后|先只读盘点；确认后自动存防火墙快照，同步白名单与 fail2ban，再盘点一次对比
+security|bind|ops/bind-localhost|联动|容器端口收回本机|docker ps 看到容器端口是 0.0.0.0:端口、直接暴露在公网时|先生成重建命令给你看；确认后存防火墙快照、重建容器，可选跑端到端验收
+security|mail|ops/mail-doctor|只读|告警邮件诊断|收不到告警邮件，或刚配好发信时|检查发信配置与 SMTP 连通性；看完可选实发一封测试邮件
+ssh|setupkey|ops/setup-key-login|需确认|新机配置密钥登录|新买的机器只有密码，想改成密钥登录|把本机公钥装到对方并验证能登；密码由脚本静默询问、不留历史；不会关闭密码登录
+ssh|pushkeys|ops/push-keys|需确认|批量下发公钥|一次给多台机器下发公钥（需先准备好带密码的清单文件）|按清单逐台下发，已免密的自动跳过；完成后可顺手销毁清单
+ssh|diagkey|ops/diag-key|只读|密钥登录诊断|某台机器密钥登不上时|检查对方的目录权限、authorized_keys、sshd 配置和认证过程，只读不改
+maint|tidy|ops/cleanup-tidy|需确认|清理冗余文件|磁盘紧张，或脚本更新多次后想清掉旧版和历史输出|先预演列出能清的内容和大小，确认后才删除；备份与容器数据在保护名单里
+maint|vwup|ops/upgrade-vaultwarden|联动|Vaultwarden 升级|想看密码库有没有新版本，有就升级|先查新版本；确认升级时自动先做一次新备份，再升级并锁定镜像 digest
+maint|logprune|ops/newapi-log-prune|需确认|new-api 日志清理|定时任务每月会跑；数据库太大想提前清一次时|先预演，确认后按保留期清理消费日志（保留期低于 30 天会拒绝）
+maint|dbcheck|db/rotate-db-pass|只读|数据库账号核对|应用连不上库，怀疑账号 host 被面板改掉时|列出某个数据库账号的全部 host 记录与授权；只核对，不改密码
+init|wizard|init/run init/00-precheck init/01-swap-memory init/02-system-network init/03-ssh-firewall init/04-verify|向导|新机初始化向导|新机器第一次登录后，从这里开始按步骤走|按 00→04 逐步执行并记住进度，需要重启时提示；也可以单独重跑某一阶段
+vps|probe|vpsscore/probe|只读|本机质量采集|买了新机器，想知道 CPU、磁盘、线路和 IP 质量|在本机采集硬件与线路指标，结果存成 JSON
+vps|collect|vpsscore/collect|只读|多机汇总评分|在汇总机上，想给所有机器统一采集并排名|ssh 到清单里的每台机器收集结果并打分
+vps|score|vpsscore/score|只读|按用途排名|只想按用途（中转 / 建站 / 落地）看排名|对已收集的结果按角色权重打分
+migrate|migrate|migrate/01-inventory migrate/02-nat-probe migrate/03-pre-migrate migrate/04-verify-migration migrate/05-fix-db-grants migrate/06-export-images migrate/07-restore-containers migrate/08-post-start-check migrate/09-restore-backup-stack ops/restore-cron|向导|整机迁移向导|要把服务整体搬到另一台机器时|先选本机是迁出机还是迁入机，只列出这台该跑的步骤；停服和覆盖数据的步骤要输主机名确认
+settings|update|-|需确认|更新工具箱|隔段时间更新一次，或刚发了新版本|按本机固定的版本更新 opsget、公共库和这个菜单
+settings|pin|-|需确认|版本固定|发了新 tag 并验证过，要把本机切过去时|查看本机从哪个版本拉取；可固定到新 tag 或取消固定
+settings|config|-|需确认|配置管理|脚本提示「缺配置」，或要改 env.conf 时|补齐本机脚本需要的配置键、查看某个脚本需要哪些键、直接编辑 env.conf
+settings|crontab|-|需确认|定时任务|想看本机有哪些运维定时任务，或给云端备份校验加上每周任务|列出 crontab 里调用运维脚本的行；可按文档添加每周云端备份校验
+settings|purge|ops/cleanup-purge|高危|卸载 ops-scripts|机器不再用这套脚本（交还、转手）时|先预演要删的内容；输主机名确认后删除全部已装脚本和产物，包括这个菜单
+EOF
+)
+
+# 不进菜单的脚本。CI 据此核对：MANIFEST 里的每个脚本要么登记在上表，要么列在这里。
+# MENU-EXCLUDE: ops/decommission-archive      机器退役前只用一次，且刻意不依赖任何公共组件
+# MENU-EXCLUDE: ops/apply-newapi-quota-fix    一次性历史数据修复，会停容器、改库
+# MENU-EXCLUDE: ops/fix-newapi-fallback-quota 上一项调用的组件，不单独使用
+# MENU-EXCLUDE: ops/fix-newapi-quota-data     同上
+# MENU-EXCLUDE: ops/deploy-litellm            一次性部署
+# MENU-EXCLUDE: ops/containerize-and-pin      一次性改造
+# MENU-EXCLUDE: ops/newapi-drill              在备用机上分步演练，菜单里容易误触 teardown
+# MENU-EXCLUDE: db/sqlite-dsn                 直接改应用库里的连接串，用得少、误操作代价大
+# MENU-EXCLUDE: openclash/dns-anti-poison     在路由器上用 sh 运行，不是服务器脚本
+
+# 场景导航：不知道该用哪个时，从要办的事找到功能。场景|键
+SCENES="新买了一台服务器，第一次登录|wizard
+想知道一台机器的质量好不好|probe
+新机器只有密码，想改成密钥登录|setupkey
+某台机器密钥登不上|diagkey
+平时随手检查一下|daily
+担心备份没在跑，或云端的包坏了|health
+升级、迁移、大改之前|now
+手动改防火墙之前|savefw
+收不到告警邮件|mail
+站点证书报错或快过期|ssl
+docker 端口暴露在公网|bind
+LLM 站被扫，或要加白名单 IP|llm
+new-api 打不开|linkcheck
+磁盘快满了|tidy
+密码库要升级|vwup
+应用连不上数据库|dbcheck
+脚本提示缺配置|config
+要把服务搬到另一台机器|migrate"
+
+# ── 显示 ────────────────────────────────────────────────────
+dw() {  # 显示宽度：ASCII 记 1 列，其余（中文）记 2 列
+  local s=$1 w=${1//[ -~]/}
+  echo $(( ${#s} + ${#w} ))
+}
+pad() {  # pad <文本> <宽度>：按显示宽度补空格
+  local n; n=$(( $2 - $(dw "$1") )); [ "$n" -lt 1 ] && n=1
+  printf '%s%*s' "$1" "$n" ''
+}
+cls() { printf '\e[H\e[2J'; }
+hr()  { printf '%s ────────────────────────────────────────────────────%s\n' "$D" "$N"; }
+tagc() {
+  case "$1" in
+    只读)      printf '%s[只读]%s' "$G" "$N" ;;
+    需确认)    printf '%s[需确认]%s' "$Y" "$N" ;;
+    高危)      printf '%s[高危]%s' "$R" "$N" ;;
+    *)         printf '%s[%s]%s' "$B" "$1" "$N" ;;
+  esac
+}
+note() { printf '%s%s%s\n' "$Y" "$*" "$N"; }
+
+# ── 输入 ────────────────────────────────────────────────────
+ask() {  # ask <提示> [默认值]；结果放在 ANS
+  local p=$1
+  [ -n "${2:-}" ] && p="$p [$2]"
+  read -r -p "$p: " ANS </dev/tty || ANS=""
+  [ -n "$ANS" ] || ANS=${2:-}
+}
+confirm() {  # confirm <问题> [y|n，默认 n]
+  local a def=${2:-n} hint='[y/N]'
+  [ "$def" = y ] && hint='[Y/n]'
+  read -r -p "$1 $hint " a </dev/tty || a=""
+  case "${a:-$def}" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+gate_host() {  # 高危操作手输主机名：防止在错的机器上顺手回车
+  local h a; h=$(hostname)
+  printf '\n%s⚠ 高危：%s%s\n' "$R" "$1" "$N"
+  read -r -p "  确认在这台机器上执行，请输入主机名 ${H}${h}${N}: " a </dev/tty
+  [ "$a" = "$h" ] && return 0
+  echo "  主机名不符，已取消"; return 1
+}
+pause() { local _; read -r -p "${D}回车返回…${N}" _ </dev/tty; }
+
+# ── 配置 ────────────────────────────────────────────────────
+env_get() {  # env_get <键>：读 env.conf 里的值（子 shell，不污染菜单）
+  ( [ -f "$ENV_FILE" ] && . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${!1:-}" )
+}
+
+# 按本机已装副本的 ENV-REQUIRED 输出缺的键；未安装返回 2。
+# 只用来显示状态和执行失败后的引导 —— 执行前的权威预检仍是 opsget 读云端声明。
+cfg_missing() {
+  local f keys
+  f="$BIN_DIR/$(basename "$1").sh"
+  [ -f "$f" ] || return 2
+  keys=$(sed -n 's/^#[[:space:]]*ENV-REQUIRED:[[:space:]]*//p' "$f")
+  [ -n "$keys" ] || return 0
+  ( [ -f "$ENV_FILE" ] && . "$ENV_FILE" >/dev/null 2>&1
+    for k in $keys; do
+      ok=""
+      for a in ${k//|/ }; do [ -n "${!a:-}" ] && { ok=1; break; }; done
+      [ -n "$ok" ] || printf '%s ' "${k%%|*}"
+    done
+    true )
+}
+
+edit_env() {
+  local ed=${EDITOR:-}
+  if [ -z "$ed" ]; then
+    for ed in nano vim vi; do command -v "$ed" >/dev/null 2>&1 && break; done
+  fi
+  confirm "用 $ed 打开 $ENV_FILE 填写？" y && "$ed" "$ENV_FILE"
+}
+
+cfg_guide() {  # 执行失败后：若是缺配置，引导补齐。补齐返回 0
+  local p=$1 miss
+  miss=$(cfg_missing "$p")
+  [ -n "$miss" ] || return 1
+  printf '\n%s这个功能缺少配置：%s%s\n' "$Y" "$miss" "$N"
+  confirm "现在把这些键补进 env.conf（已有的值不动）？" y || return 1
+  opsget -c "$p" || return 1
+  edit_env
+  miss=$(cfg_missing "$p")
+  [ -z "$miss" ] && return 0
+  note "仍未填：$miss"
+  return 1
+}
+
+# ── 执行 ────────────────────────────────────────────────────
+report_rc() {  # report_rc <退出码> <开始时间>
+  local s=$(( $(date +%s) - $2 ))
+  if [ "$1" -eq 0 ]; then
+    printf '%s✓ 完成%s（%ss）\n' "$G" "$N" "$s"
+  else
+    printf '%s✗ 退出码 %s%s（%ss）—— 有告警或失败，看上面的输出\n' "$Y" "$1" "$N" "$s"
+  fi
+}
+
+run_ops() {  # run_ops <仓库路径> [参数...]：经 opsget 执行（遵守版本固定），缺配置时引导补齐后可重跑
+  local p=$1 t0 rc; shift
+  while :; do
+    printf '\n%s▶ opsget %s%s\n' "$B" "$p${*:+ $*}" "$N"
+    t0=$(date +%s)
+    opsget "$p" "$@"; rc=$?
+    report_rc "$rc" "$t0"
+    if [ "$rc" -ne 0 ] && cfg_guide "$p" && confirm "配置已补齐，重新执行？" y; then
+      continue
+    fi
+    return "$rc"
+  done
+}
+
+cron_lock() {  # cron_lock <脚本文件名>：crontab 里给它用的 flock 锁文件
+  crontab -l 2>/dev/null | grep -vE '^[[:space:]]*#' | grep -F "/$1" | head -1 | awk '{
+    for (i = 1; i <= NF; i++) if ($i ~ /(^|\/)flock$/) {
+      for (j = i + 1; j <= NF; j++) {
+        if ($j ~ /^-/) { if ($j ~ /^(-w|-E|--wait|--timeout|--conflict-exit-code)$/) j++; continue }
+        print $j; exit
+      }
+    }
+  }'
+}
+
+backup_run() {  # backup_run <脚本名>：跑本地已装的备份，和 cron 同一把锁；不经 opsget
+  local n=$1 f="$BIN_DIR/$1.sh" lock t0 rc
+  [ -x "$f" ] || { note "本机没装 $n（opsget -i backup/$n）"; return 1; }
+  lock=$(cron_lock "$n.sh")
+  if [ -z "$lock" ]; then
+    lock="/var/lock/$n.lock"
+    note "crontab 里没找到 $n 的定时任务，改用 $lock（这台机器可能没有定时备份）"
+  fi
+  printf '\n%s▶ flock -n %s %s%s  %s(%s)%s\n' "$B" "$lock" "$f" "$N" "$D" \
+    "$(sed -n 's/^# VERSION: /本地版本 /p' "$f" | head -1)" "$N"
+  t0=$(date +%s)
+  flock -n -E 75 "$lock" "$f"; rc=$?
+  [ "$rc" -eq 75 ] && note "锁被占用：定时备份可能正在跑，等它结束再试"
+  report_rc "$rc" "$t0"
+  return "$rc"
+}
+
+# 联动：每步记一行「结果<TAB>步骤<TAB>耗时」，最后汇总。
+# 退出码分不清「有告警」和「失败」（common.sh 的 finish 与 die 都是 1），
+# 所以只读的检查一律接着跑，改动前由各流程显式确认。
+flow_begin() { FLOW_NAME=$1; FLOW_LOG=""; printf '\n%s════ %s ════%s\n' "$H" "$1" "$N"; }
+flow_rec()   { FLOW_LOG+="$1"$'\t'"$2"$'\t'"$3"$'\n'; }
+step() {  # step <步骤名> <命令...>
+  local name=$1 t0 rc; shift
+  t0=$(date +%s)
+  "$@"; rc=$?
+  if [ "$rc" -eq 0 ]; then flow_rec 通过 "$name" "$(( $(date +%s) - t0 ))s"
+  else flow_rec "异常 $rc" "$name" "$(( $(date +%s) - t0 ))s"; fi
+  return "$rc"
+}
+check_step() {  # check_step <步骤名> <仓库路径>：互不依赖的检查，本机没配置就跳过
+  if ! opsget -e "$2" >/dev/null 2>&1; then
+    printf '\n%s- %s：本机未配置，跳过%s\n' "$D" "$1" "$N"
+    flow_rec 未配置 "$1" -
+    return 0
+  fi
+  step "$1" run_ops "$2"
+}
+flow_end() {
+  local r n s col
+  printf '\n%s──── %s · 汇总 ────%s\n' "$H" "$FLOW_NAME" "$N"
+  while IFS=$'\t' read -r r n s; do
+    [ -n "$n" ] || continue
+    case "$r" in 通过) col=$G ;; 未配置|未执行|跳过) col=$D ;; *) col=$Y ;; esac
+    printf '  %s%s%s %s %s\n' "$col" "$(pad "$r" 8)" "$N" "$(pad "$n" 26)" "$s"
+  done <<<"$FLOW_LOG"
+}
+
+fw_snapshot() {  # 改防火墙前自动存一份现状。新机还没有 env.conf 时 save-fw 跑不了，跳过
+  if [ ! -f "$ENV_FILE" ]; then
+    printf '%s（还没有 env.conf，跳过防火墙快照）%s\n' "$D" "$N"
+    flow_rec 跳过 防火墙快照 -
+    return 0
+  fi
+  step "防火墙快照" run_ops ops/save-fw && return 0
+  confirm "防火墙快照没存成，仍然继续？" n
+}
+
+# ── 功能：日常巡检 ──────────────────────────────────────────
+do_daily() {
+  flow_begin "一键巡检"
+  check_step "备份前置检查" ops/preflight-backup
+  check_step "证书对账" ops/ssl-audit
+  check_step "LLM 访问控制盘点" ops/check-llm-security
+  check_step "监控指标库体检" ops/komari-metrics-check
+  check_step "本机脚本盘点" ops/script-inventory
+  flow_end
+}
+
+do_panelcron() {
+  run_ops ops/panel-cron-inspect
+  echo
+  ask "要手动触发其中一个任务吗？输入它的 hash（回车跳过）"
+  [ -n "$ANS" ] || return 0
+  [[ "$ANS" =~ ^[A-Za-z0-9]+$ ]] || { note "hash 只含字母和数字：$ANS"; return 1; }
+  confirm "立即执行这个计划任务？" n && run_ops ops/panel-cron-inspect --run "$ANS"
+}
+
+do_locate() {
+  ask "特征串（域名、库名等；回车=用配置里的第一个域名）"
+  if [ -n "$ANS" ]; then run_ops ops/panel-data-locate "$ANS"; else run_ops ops/panel-data-locate; fi
+}
+
+# ── 功能：备份与恢复 ────────────────────────────────────────
+do_health() {
+  flow_begin "备份体检"
+  step "备份前置检查" run_ops ops/preflight-backup
+  if ! step "云端备份包校验" run_ops ops/verify-backup-pass; then
+    note "云端校验没通过。备份出问题时靠告警邮件通知你，接着确认邮件链路…"
+    step "告警邮件诊断" run_ops ops/mail-doctor
+  fi
+  flow_end
+}
+
+do_now() {
+  local opts=() n i
+  for n in vw-fullbackup xboard-fullbackup newapi-fullbackup; do
+    [ -x "$BIN_DIR/$n.sh" ] && opts+=("$n")
+  done
+  [ ${#opts[@]} -gt 0 ] || { note "本机没装任何备份脚本（opsget -i backup/<名字>）"; return 1; }
+  if [ ${#opts[@]} -eq 1 ]; then
+    confirm "运行本机的 ${opts[0]}.sh？" y && backup_run "${opts[0]}"
+    return
+  fi
+  for i in "${!opts[@]}"; do printf '  [%d] %s\n' $((i + 1)) "${opts[i]}"; done
+  printf '  [a] 全部依次执行\n'
+  ask "选择" 1
+  if [ "$ANS" = a ]; then
+    flow_begin "立即备份"
+    for n in "${opts[@]}"; do step "$n" backup_run "$n"; done
+    flow_end
+  elif [[ "$ANS" =~ ^[0-9]+$ ]] && [ "$ANS" -ge 1 ] && [ "$ANS" -le ${#opts[@]} ]; then
+    backup_run "${opts[ANS-1]}"
+  fi
+}
+
+do_compare() {
+  ask "备份目录（取其中最新的两个包比对）" "$(env_get VW_BACKUP_DIR)"
+  [ -d "$ANS" ] || { note "目录不存在：$ANS"; return 1; }
+  run_ops ops/compare-backup-content "$ANS"
+}
+
+do_panelup() {
+  run_ops ops/panel-backup-upload --list
+  echo
+  confirm "加密上传本地最新的面板备份包？" n || return 0
+  ask "上传后云端只保留本机最近上传的几份？（回车=不清理）"
+  if [ -z "$ANS" ]; then
+    run_ops ops/panel-backup-upload
+  elif [[ "$ANS" =~ ^[0-9]+$ ]]; then
+    run_ops ops/panel-backup-upload --prune "$ANS"
+  else
+    note "需要一个数字：$ANS"; return 1
+  fi
+}
+
+# ── 功能：安全与防火墙 ──────────────────────────────────────
+do_llm() {
+  flow_begin "LLM 访问控制"
+  step "访问控制盘点" run_ops ops/check-llm-security
+  echo
+  if confirm "按 env.conf 同步白名单与 fail2ban 规则？（会改 nginx 白名单和 fail2ban 配置）" n; then
+    fw_snapshot \
+      && step "同步白名单与 fail2ban" run_ops ops/sync-llm-allowlist \
+      && step "复查" run_ops ops/check-llm-security
+  else
+    flow_rec 未执行 "同步白名单与 fail2ban" -
+  fi
+  flow_end
+}
+
+do_bind() {
+  flow_begin "容器端口收回本机"
+  step "生成重建命令（预演）" run_ops ops/bind-localhost
+  echo
+  if confirm "按上面生成的命令重建这些容器？（容器会重启，业务短暂中断）" n; then
+    if fw_snapshot && step "重建容器" run_ops ops/bind-localhost --apply; then
+      confirm "跑一次端到端验收（容器、nginx、证书、反代）？" y \
+        && step "端到端验收" run_ops migrate/08-post-start-check
+    fi
+  else
+    flow_rec 未执行 重建容器 -
+  fi
+  flow_end
+}
+
+do_mail() {
+  run_ops ops/mail-doctor
+  echo
+  confirm "实发一封测试邮件？" n && run_ops ops/mail-doctor --send
+}
+
+# ── 功能：SSH 密钥 ──────────────────────────────────────────
+do_setupkey() {
+  local ip port user args
+  ask "新机器 IP"; ip=$ANS
+  [[ "$ip" =~ ^[A-Za-z0-9.:-]+$ ]] || { note "IP 不合法：$ip"; return 1; }
+  ask "SSH 端口" 22; port=$ANS
+  [[ "$port" =~ ^[0-9]+$ ]] || { note "端口不合法：$port"; return 1; }
+  ask "登录用户" root; user=$ANS
+  [[ "$user" =~ ^[A-Za-z0-9._-]+$ ]] || { note "用户名不合法：$user"; return 1; }
+  args=("$ip" "$port")
+  [ "$user" = root ] || args+=(--user "$user")
+  printf '%s密码稍后由脚本静默询问（不回显、不进历史）%s\n' "$D" "$N"
+  run_ops ops/setup-key-login "${args[@]}"
+}
+
+do_pushkeys() {
+  ask "主机清单文件" /root/.vps-keyinit.txt
+  if [ ! -f "$ANS" ]; then
+    note "清单不存在：$ANS"
+    printf '  每行一台：ssh目标[:端口] 空格 密码，例如\n    root@1.2.3.4:22  MyPassw0rd\n  权限必须是 600（chmod 600 %s）\n' "$ANS"
+    return 1
+  fi
+  local list=$ANS
+  run_ops ops/push-keys "$list"
+  echo
+  note "清单里是明文密码，下发完应销毁。"
+  confirm "现在销毁 $list（shred -u，不可恢复）？" n && shred -u "$list" && echo "已销毁"
+}
+
+do_diagkey() {
+  local t
+  ask "目标（ssh 别名，或 root@1.2.3.4:22）"; t=$ANS
+  [[ "$t" =~ ^[A-Za-z0-9@._:-]+$ ]] || { note "目标不合法：$t"; return 1; }
+  if confirm "密钥完全登不上，需要改用密码登录进去查？" n; then
+    run_ops ops/diag-key "$t" -p
+  else
+    run_ops ops/diag-key "$t"
+  fi
+}
+
+# ── 功能：清理与维护 ────────────────────────────────────────
+do_tidy() {
+  run_ops ops/cleanup-tidy
+  echo
+  confirm "按上面的预演执行清理？" n && run_ops ops/cleanup-tidy --apply
+}
+
+vw_backup_age() {  # 本机最新 Vaultwarden 备份包距今几小时；没有则无输出
+  local d f
+  d=$(env_get VW_BACKUP_DIR)
+  [ -n "$d" ] || return 0
+  # shellcheck disable=SC2012  # 文件名由备份脚本生成，不含换行
+  f=$(ls -t "$d"/srvbak_*.7z 2>/dev/null | head -1)
+  [ -n "$f" ] && echo $(( ($(date +%s) - $(stat -c %Y "$f")) / 3600 ))
+}
+
+do_vwup() {
+  local age
+  flow_begin "Vaultwarden 升级"
+  step "查询新版本" run_ops ops/upgrade-vaultwarden
+  echo
+  if ! confirm "上面显示有新版本、现在升级？" n; then
+    flow_rec 未执行 升级 -; flow_end; return 0
+  fi
+  age=$(vw_backup_age)
+  if [ -n "$age" ]; then echo "  本机最新备份：${age} 小时前（升级脚本要求 24 小时内）"
+  else note "  本机没找到备份包"; fi
+  if confirm "升级前先做一次新备份？（推荐：数据库迁移没法随 compose 回滚）" y; then
+    if ! step "升级前备份" backup_run vw-fullbackup; then
+      confirm "备份没成功，仍然升级？" n || { flow_rec 未执行 升级 -; flow_end; return 1; }
+    fi
+  fi
+  step "升级" run_ops ops/upgrade-vaultwarden -y
+  flow_end
+}
+
+do_logprune() {
+  run_ops ops/newapi-log-prune --dry-run
+  echo
+  confirm "按保留期真正清理？" n && run_ops ops/newapi-log-prune
+}
+
+do_dbcheck() {
+  ask "数据库用户名"
+  [[ "$ANS" =~ ^[A-Za-z0-9_.-]+$ ]] || { note "用户名不合法：$ANS"; return 1; }
+  run_ops db/rotate-db-pass check "$ANS"
+}
+
+# ── 功能：服务器初始化 ──────────────────────────────────────
+INIT_STAGES="00|环境探测与更新
+01|Swap 与内存参数
+02|系统与网络调优
+03|SSH 加固与防火墙
+04|重启后持久性验证"
+
+state_get() { [ -f "$STATE_FILE" ] && sed -n "s/^$1=//p" "$STATE_FILE" | tail -1; }
+state_set() {  # state_set <键> <值>；值为空即删除该键
+  local tmp
+  mkdir -p "$STATE_DIR"
+  tmp=$(mktemp) || return 1
+  [ -f "$STATE_FILE" ] && grep -v "^$1=" "$STATE_FILE" > "$tmp"
+  [ -n "$2" ] && printf '%s=%s\n' "$1" "$2" >> "$tmp"
+  mv "$tmp" "$STATE_FILE" && chmod 644 "$STATE_FILE"
+}
+boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null; }
+
+init_next() {  # 第一个还没完成的阶段；全部完成则无输出
+  local fin n _
+  fin=" $(state_get INIT_DONE) "
+  while IFS='|' read -r n _; do
+    [[ "$fin" == *" $n "* ]] || { echo "$n"; return; }
+  done <<<"$INIT_STAGES"
+}
+
+need_reboot() {
+  note "⚠ $1。重启后重新登录，运行 opsbox 会从下一步接着走。"
+  state_set INIT_BOOT "$(boot_id)"
+  confirm "现在重启？" n && { sync; reboot; }
+}
+
+init_stage() {  # init_stage <阶段号>
+  local n=$1 fin
+  if [ "$n" = 03 ]; then
+    gate_host "阶段 03 会改 SSH 与防火墙，配错会把自己锁在外面" || return 1
+    fw_snapshot || return 1
+  fi
+  run_ops init/run "$n" || return
+  fin=$(state_get INIT_DONE)
+  [[ " $fin " == *" $n "* ]] || state_set INIT_DONE "${fin:+$fin }$n"
+  case "$n" in
+    00) [ -f /var/run/reboot-required ] && need_reboot "系统更新要求重启" ;;
+    03) need_reboot "阶段 03 之后要重启一次，再用 04 验证配置开机后仍然生效" ;;
+    04) printf '%s✓ 初始化全部完成%s\n' "$G" "$N"; state_set INIT_DONE ""; state_set INIT_BOOT "" ;;
+  esac
+  return 0
+}
+
+do_wizard() {
+  local fin next n t sel
+  while :; do
+    cls
+    printf '%s── 新机初始化向导 ──%s\n\n' "$H" "$N"
+    fin=" $(state_get INIT_DONE) "; next=$(init_next)
+    while IFS='|' read -r n t; do
+      if [[ "$fin" == *" $n "* ]]; then
+        printf '  [%s] %s%s✓ 已完成%s\n' "$n" "$(pad "$t" 20)" "$G" "$N"
+      elif [ "$n" = "$next" ]; then
+        printf '  [%s] %s%s← 下一步%s\n' "$n" "$(pad "$t" 20)" "$B" "$N"
+      else
+        printf '  [%s] %s\n' "$n" "$t"
+      fi
+    done <<<"$INIT_STAGES"
+    echo
+    [ -n "$(state_get INIT_BOOT)" ] && [ "$(state_get INIT_BOOT)" = "$(boot_id)" ] \
+      && note "  ⚠ 上一步要求重启，还没有重启"
+    printf '  顺序：00 →(需要则重启)→ 01 → 02 → 03 →(重启)→ 04\n'
+    printf '  %s阶段 03 之前：先另开一个 SSH 窗口连着，并确认带外控制台（VNC）能进%s\n\n' "$Y" "$N"
+    printf '  回车 执行下一步%s   输入编号 单独执行该阶段   r 重置进度   0 返回\n' "${next:+ $next}"
+    read -r -p "请选择 > " sel </dev/tty || return
+    case "$sel" in
+      0|q) return ;;
+      r)   state_set INIT_DONE ""; state_set INIT_BOOT ""; continue ;;
+      '')  [ -n "$next" ] || { note "所有阶段都已完成；要重跑请输入编号"; pause; continue; }
+           sel=$next ;;
+    esac
+    [[ "$sel" =~ ^0?[0-4]$ ]] || continue
+    sel=$(printf '%02d' "$((10#$sel))")
+    init_stage "$sel"
+    pause
+  done
+}
+
+# ── 功能：VPS 质量评估 ──────────────────────────────────────
+do_probe() {
+  printf '  [1] 快速（约 1 分钟，跳过耗时的测试）\n  [2] 完整\n  [3] 完整 + IP 质量深度检测（再加 1-2 分钟）\n'
+  ask "选择" 1
+  case "$ANS" in
+    1) run_ops vpsscore/probe --quick ;;
+    2) run_ops vpsscore/probe ;;
+    3) run_ops vpsscore/probe --ipq ;;
+  esac
+}
+
+do_collect() {
+  printf '  [1] 汇总各机已有的结果并打分\n  [2] 每台重新采集后打分（约 1-2 分钟/台）\n'
+  printf '  [3] 重新采集 + IP 质量深度检测\n  [4] 只列出会连接哪些主机，不实际连接\n'
+  ask "选择" 1
+  case "$ANS" in
+    1) run_ops vpsscore/collect ;;
+    2) run_ops vpsscore/collect -p ;;
+    3) run_ops vpsscore/collect -p --ipq ;;
+    4) run_ops vpsscore/collect -n ;;
+  esac
+}
+
+do_score() {
+  local dir
+  ask "结果目录" "$HOME/vpsscore-baseline"; dir=$ANS
+  [ -e "$dir" ] || { note "不存在：$dir（先跑「多机汇总评分」或「本机质量采集」）"; return 1; }
+  printf '  [1] 全部角色\n  [2] relay 中转   看重带宽、丢包\n  [3] web 建站     看重 CPU、磁盘\n  [4] land 落地    看重直连延迟\n'
+  ask "选择" 1
+  case "$ANS" in
+    2) run_ops vpsscore/score -r relay "$dir" ;;
+    3) run_ops vpsscore/score -r web "$dir" ;;
+    4) run_ops vpsscore/score -r land "$dir" ;;
+    *) run_ops vpsscore/score "$dir" ;;
+  esac
+}
+
+# ── 功能：整机迁移 ──────────────────────────────────────────
+MIG_OUT="01|环境摸底（新旧两台都要跑，输出拿去对比）
+02|入站探测：从本机探测迁入机的端口（迁入机先开监听）
+03|冷快照：停服并全量导出（执行后服务保持停止）
+04|迁移比对（新旧两台都要跑，输出拿去 diff）
+06|导出容器镜像（迁入机不要重新 pull）"
+MIG_IN="01|环境摸底（新旧两台都要跑，输出拿去对比）
+02|入站监听：等迁出机来探测本机端口
+04|迁移比对（新旧两台都要跑，输出拿去 diff）
+05|修正数据库账号 host
+07|恢复容器数据并生成启动命令（会覆盖本机数据目录）
+08|端到端验收（切 DNS 之前预演）
+09|重建备份体系
+cron|恢复定时任务（业务切换并观察正常后再做）"
+
+mig_run() {  # mig_run <角色 out|in> <步骤>
+  local snap
+  case "$1:$2" in
+    *:01)    run_ops migrate/01-inventory ;;
+    out:02)  ask "迁入机 IP" "$(env_get NEW_HOST_IP)"
+             [ -n "$ANS" ] || { note "需要迁入机 IP"; return 1; }
+             run_ops migrate/02-nat-probe probe "$ANS" ;;
+    in:02)   run_ops migrate/02-nat-probe listen ;;
+    out:03)  gate_host "停掉本机所有服务并制作冷快照，结束后服务保持停止" \
+               && run_ops migrate/03-pre-migrate ;;
+    *:04)    run_ops migrate/04-verify-migration ;;
+    in:05)   confirm "修正数据库账号的 host 授权？" n && run_ops migrate/05-fix-db-grants ;;
+    out:06)  run_ops migrate/06-export-images ;;
+    in:07)   ask "快照目录（回车=最新的 premigrate_*）"
+             snap=$ANS
+             gate_host "用快照覆盖本机的容器数据目录" || return 1
+             if [ -n "$snap" ]; then run_ops migrate/07-restore-containers "$snap"
+             else run_ops migrate/07-restore-containers; fi ;;
+    in:08)   run_ops migrate/08-post-start-check ;;
+    in:09)   ask "恢复暂存目录" /root/restore_stage
+             confirm "从 $ANS 重建备份依赖和配置？" n && run_ops migrate/09-restore-backup-stack "$ANS" ;;
+    in:cron) confirm "业务已经切换过来并观察正常了？" n && run_ops ops/restore-cron ;;
+    *)       return 1 ;;
+  esac
+}
+
+do_migrate() {
+  local role steps n t sel
+  role=$(state_get MIG_ROLE)
+  while :; do
+    if [ -z "$role" ]; then
+      cls
+      printf '%s── 整机迁移向导 ──%s\n\n  这台机器是？\n  [1] 迁出机（旧机器）\n  [2] 迁入机（新机器）\n  [0] 返回\n' "$H" "$N"
+      ask "选择"
+      case "$ANS" in 1) role=out ;; 2) role=in ;; *) return ;; esac
+      state_set MIG_ROLE "$role"
+    fi
+    cls
+    if [ "$role" = out ]; then steps=$MIG_OUT; t="迁出机（旧机器）"; else steps=$MIG_IN; t="迁入机（新机器）"; fi
+    printf '%s── 整机迁移向导 · 本机是%s ──%s\n\n' "$H" "$t" "$N"
+    while IFS='|' read -r n t; do printf '  [%s] %s\n' "$n" "$t"; done <<<"$steps"
+    printf '\n  %s按编号从小到大做；每一步的执行机器和产物见 migrate/README.md%s\n' "$D" "$N"
+    printf '  输入编号执行   c 切换角色   0 返回\n'
+    read -r -p "请选择 > " sel </dev/tty || return
+    case "$sel" in
+      0|q|'') return ;;
+      c)      role=""; state_set MIG_ROLE ""; continue ;;
+      cron)   ;;
+      *)      [[ "$sel" =~ ^[0-9]+$ ]] || continue
+              sel=$(printf '%02d' "$((10#$sel))") ;;
+    esac
+    grep -q "^$sel|" <<<"$steps" || continue
+    mig_run "$role" "$sel"
+    pause
+  done
+}
+
+# ── 功能：工具箱设置 ────────────────────────────────────────
+do_update() {
+  local before after
+  before=$(cksum < "$BIN_DIR/opsbox" 2>/dev/null)
+  opsget -u || return
+  after=$(cksum < "$BIN_DIR/opsbox" 2>/dev/null)
+  if [ -n "$after" ] && [ "$before" != "$after" ]; then
+    note "菜单本身也更新了，重新载入…"; sleep 1
+    exec "$BIN_DIR/opsbox"
+  fi
+}
+
+do_pin() {
+  opsget --pin
+  printf '\n  [1] 固定到新的 tag\n  [2] 取消固定（回到 main）\n  [0] 返回\n'
+  ask "选择" 0
+  case "$ANS" in
+    1) ask "tag（如 v2026.09.25）"
+       [ -n "$ANS" ] || return 0
+       opsget --pin "$ANS" || return
+       confirm "接着把引导器、公共库和菜单换成这一版（opsget -u）？" y && do_update ;;
+    2) note "生产机应保持固定：取消后，下次更新会装上 main 上还没验证过的提交。"
+       confirm "确定取消固定？" n && opsget --unpin ;;
+  esac
+}
+
+do_config() {
+  printf '  [1] 补齐本机已装脚本需要的配置键（opsget -c，已有值不动）\n'
+  printf '  [2] 查看某个脚本需要哪些配置（opsget -e）\n  [3] 编辑 env.conf\n  [0] 返回\n'
+  ask "选择" 0
+  case "$ANS" in
+    1) opsget -c && edit_env ;;
+    2) ask "脚本路径（如 ops/ssl-audit）"
+       [ -n "$ANS" ] && opsget -e "$ANS" ;;
+    3) [ -f "$ENV_FILE" ] || { note "还没有 $ENV_FILE，先选 1 生成"; return 1; }
+       edit_env ;;
+  esac
+}
+
+do_crontab() {
+  local line
+  printf '%s── root 的 crontab 里调用运维脚本的行 ──%s\n' "$H" "$N"
+  crontab -l 2>/dev/null | grep -vE '^[[:space:]]*(#|$)' | grep -E "$BIN_DIR/[A-Za-z0-9_-]+\.sh" \
+    | sed 's/^/  /' || echo "  （没有）"
+  printf '\n  %s提醒：定时任务只调用本地已装的脚本，不要写 opsget（见仓库 README）%s\n' "$D" "$N"
+  # 与 ops/README.md「云端备份每周校验」给出的那一行保持一致
+  line='0 6 * * 1 /usr/bin/flock -n /run/verify-backup-pass.lock /usr/local/bin/verify-backup-pass.sh --cron >> /var/log/verify-backup-pass.log 2>&1'
+  if [ -x "$BIN_DIR/verify-backup-pass.sh" ] && ! crontab -l 2>/dev/null | grep -q 'verify-backup-pass\.sh'; then
+    printf '\n  推荐添加：每周一 06:00（UTC）校验云端备份包\n    %s\n' "$line"
+    if confirm "添加到 root 的 crontab？" n; then
+      { crontab -l 2>/dev/null; printf '%s\n' "$line"; } | crontab - && echo "  已添加"
+    fi
+  fi
+}
+
+do_purge() {
+  run_ops ops/cleanup-purge
+  gate_host "删除本机全部 ops-scripts 脚本与产物，包括这个菜单" || return 1
+  run_ops ops/cleanup-purge --apply
+  [ -x "$BIN_DIR/opsbox" ] || { echo "菜单已随之移除，退出。"; exit 0; }
+}
+
+# ── 菜单 ────────────────────────────────────────────────────
+load_item() {  # load_item <键> → I_PATHS I_TAG I_TITLE I_WHEN I_WHAT
+  local line
+  line=$(awk -F'|' -v k="$1" '$2 == k { print; exit }' <<<"$ITEMS")
+  [ -n "$line" ] || return 1
+  IFS='|' read -r _ _ I_PATHS I_TAG I_TITLE I_WHEN I_WHAT <<<"$line"
+}
+
+cfg_badge() {  # 单路径项在本机缺配置时显示标记
+  local m
+  case "$1" in -|*' '*) return ;; esac
+  m=$(cfg_missing "$1")
+  [ -n "$m" ] && printf ' %s[未配置]%s' "$Y" "$N"
+}
+
+open_item() {  # 先给说明卡片，再执行
+  local a
+  load_item "$1" || return
+  cls
+  printf '%s── %s ──%s  %s\n\n' "$H" "$I_TITLE" "$N" "$(tagc "$I_TAG")"
+  printf '  %s%s%s%s\n' "$D" "$(pad 什么时候用 12)" "$N" "$I_WHEN"
+  printf '  %s%s%s%s\n' "$D" "$(pad 会做什么 12)" "$N" "$I_WHAT"
+  case "$I_PATHS" in
+    -|*' '*) ;;
+    *) declare -F "do_$1" >/dev/null || printf '  %s%s%sopsget %s\n' "$D" "$(pad 等价命令 12)" "$N" "$I_PATHS"
+       a=$(cfg_missing "$I_PATHS")
+       [ -n "$a" ] && printf '  %s%s%s缺 %s（执行时会引导补齐）%s\n' "$D" "$(pad 本机配置 12)" "$N$Y" "$a" "$N" ;;
+  esac
+  echo
+  read -r -p "回车开始，0 返回 > " a </dev/tty || return
+  case "$a" in 0|q) return ;; esac
+  if declare -F "do_$1" >/dev/null; then "do_$1"; else run_ops "$I_PATHS"; fi
+  echo
+  pause
+}
+
+cat_menu() {  # cat_menu <分类ID> <分类名>
+  local keys k i sel
+  mapfile -t keys < <(awk -F'|' -v c="$1" '$1 == c { print $2 }' <<<"$ITEMS")
+  # 只有一项的分类（向导）直接进去
+  [ ${#keys[@]} -eq 1 ] && { open_item "${keys[0]}"; return; }
+  while :; do
+    cls
+    printf '%s── %s ──%s\n\n' "$H" "$2" "$N"
+    i=0
+    for k in "${keys[@]}"; do
+      i=$((i + 1)); load_item "$k"
+      printf '  %s[%d]%s %s%s%s\n' "$H" "$i" "$N" "$(pad "$I_TITLE" 22)" "$(tagc "$I_TAG")" "$(cfg_badge "$I_PATHS")"
+      printf '      %s%s%s\n' "$D" "$I_WHEN" "$N"
+    done
+    printf '\n  [0] 返回\n'
+    read -r -p "请选择 > " sel </dev/tty || return
+    case "$sel" in 0|'') return ;; q) exit 0 ;; esac
+    [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#keys[@]} ] \
+      && open_item "${keys[sel-1]}"
+  done
+}
+
+scene_menu() {
+  local keys=() s k i=0 sel
+  while :; do
+    cls
+    printf '%s── 不知道用哪个？按要办的事找 ──%s\n\n' "$H" "$N"
+    keys=(); i=0
+    while IFS='|' read -r s k; do
+      i=$((i + 1)); keys+=("$k"); load_item "$k"
+      printf '  %s%s%s %s %s→ %s%s\n' "$H" "$(pad "[$i]" 5)" "$N" "$(pad "$s" 34)" "$D" "$I_TITLE" "$N"
+    done <<<"$SCENES"
+    printf '\n  [0] 返回\n'
+    read -r -p "请选择 > " sel </dev/tty || return
+    case "$sel" in 0|'') return ;; q) exit 0 ;; esac
+    [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#keys[@]} ] \
+      && open_item "${keys[sel-1]}"
+  done
+}
+
+banner() {
+  local ref ov os up mem envs next ib
+  printf '%s' "$B"
+  printf '%s\n' \
+    '    ___  ____  ____     ____   _____  __' \
+    '   / _ \|  _ \/ ___|   | __ ) / _ \ \/ /' \
+    "  | | | | |_) \\___ \\   |  _ \\| | | \\  /     ${N}${H}运维工具箱${N}${B}" \
+    "  | |_| |  __/ ___) |  | |_) | |_| /  \\     ${N}${D}opsbox ${OPSBOX_VERSION}${N}${B}" \
+    '   \___/|_|   |____/   |____/ \___/_/\_\'
+  printf '%s' "$N"
+  hr
+  if [ -n "${OPS_REF:-}" ]; then ref="$OPS_REF（环境变量覆盖）"
+  elif [ -s "$REF_FILE" ]; then ref="$(head -n1 "$REF_FILE")（已固定）"
+  else ref="${Y}main（未固定）${N}"; fi
+  ov=$(sed -n 's/^# VERSION: //p' "$(command -v opsget)" 2>/dev/null | head -1)
+  os=$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-未知}")
+  up=$(awk '{ d = int($1 / 86400); h = int($1 % 86400 / 3600); if (d) printf "%d 天 %d 小时", d, h; else printf "%d 小时", h }' /proc/uptime 2>/dev/null)
+  mem=$(free 2>/dev/null | awk '/^Mem:/ { if ($2) printf "%d%%", ($2 - $7) * 100 / $2 }')
+  printf '  主机  %s    系统  %s\n' "$(hostname)" "$os"
+  printf '  版本  %s    opsget %s\n' "$ref" "${ov:-?}"
+  printf '  负载  %s    磁盘 / %s    内存 %s    已运行 %s\n' \
+    "$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)" "$(df -P / 2>/dev/null | awk 'NR == 2 { print $5 }')" \
+    "${mem:-?}" "${up:-?}"
+  if [ -f "$ENV_FILE" ]; then
+    envs="${G}env.conf ✓${N}"
+    [ "$(stat -c %a "$ENV_FILE" 2>/dev/null)" = 600 ] || envs="${Y}env.conf 权限不是 600${N}"
+  else
+    envs="${D}还没有 env.conf（用到时会引导生成）${N}"
+  fi
+  printf '  配置  %s\n' "$envs"
+  [ -f /var/run/reboot-required ] && printf '  %s⚠ 系统标记需要重启%s\n' "$Y" "$N"
+  systemctl list-timers --all 2>/dev/null | grep -qi rollback \
+    && printf '  %s⚠ 存在遗留的回滚定时器：systemctl stop server-rollback.timer%s\n' "$Y" "$N"
+  # 初始化进度：重启过就清掉「待重启」标记
+  ib=$(state_get INIT_BOOT)
+  [ -n "$ib" ] && [ "$ib" != "$(boot_id)" ] && { state_set INIT_BOOT ""; ib=""; }
+  if [ -n "$(state_get INIT_DONE)" ]; then
+    next=$(init_next)
+    [ -n "$next" ] && printf '  %s▸ 初始化进行中：下一步 %s%s%s（服务器初始化 → 向导）\n' \
+      "$B" "$next" "${ib:+，需先重启}" "$N"
+  fi
+  hr
+}
+
+main_menu() {
+  local sel ids=() names=() id name i left
+  while IFS='|' read -r id name; do ids+=("$id"); names+=("$name"); done <<<"$CATS"
+  while :; do
+    cls
+    banner
+    for ((i = 0; i < 5; i++)); do
+      left="[$((i + 1))] ${names[i]}"
+      if [ -n "${names[i + 5]:-}" ]; then
+        printf '  %s[%d] %s\n' "$(pad "$left" 26)" $((i + 6)) "${names[i + 5]}"
+      else
+        printf '  %s\n' "$left"
+      fi
+    done
+    printf '\n  %s[a]%s 一键巡检    %s[b]%s 备份体检    %s[?]%s 不知道用哪个？按场景找\n' \
+      "$B" "$N" "$B" "$N" "$B" "$N"
+    printf '  [q] 退出\n\n'
+    read -r -p "请选择 > " sel </dev/tty || exit 0
+    case "$sel" in
+      q|Q|0) exit 0 ;;
+      a) open_item daily ;;
+      b) open_item health ;;
+      \?|？) scene_menu ;;
+      [1-9]) [ "$sel" -le ${#ids[@]} ] && cat_menu "${ids[sel-1]}" "${names[sel-1]}" ;;
+    esac
+  done
+}
+
+main_menu

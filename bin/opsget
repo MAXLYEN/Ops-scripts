@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/opsget — 从仓库拉取、安装和执行运维脚本
-# VERSION: 1.4.1
-# 1.4.1: 校验脚本路径（拒绝 .. 与非法字符）；帮助里的验证写法改为完整提交号。
+# VERSION: 1.5.0
+# 1.5.0: 新增中文菜单 opsbox：-u 一并更新；在终端里不带参数运行时打开菜单。
 # 配置依赖以目标脚本的 ENV-REQUIRED 声明为准。
 
 set -o pipefail
@@ -45,10 +45,11 @@ usage() {
   cat <<'USAGE'
 opsget — ops-scripts 引导器
 
+  opsbox                         中文菜单（终端里不带参数运行 opsget 也会打开）
   opsget -l                      列出可用脚本
   opsget <路径> [参数...]        拉取、安装并执行
   opsget -i <路径>               只安装，不执行
-  opsget -u                      更新自身与 common.sh
+  opsget -u                      更新自身、common.sh 与菜单 opsbox
 
 版本固定：
   opsget --pin                   看当前从哪个 ref 拉取、来源是什么
@@ -91,11 +92,12 @@ curl_retry() {  # curl_retry <url> <落盘路径>
   return 1
 }
 
-fetch() {  # fetch <仓库内路径> <落盘路径>
+fetch() {  # fetch <仓库内路径> <落盘路径> [opt]：带 opt 时取不到只返回 1，不退出
   local url="$BASE/$1" out=$2 tmp
   tmp=$(mktemp) || die "mktemp 失败"
   if ! curl_retry "$url" "$tmp"; then
-    rm -f "$tmp"; die "拉取失败（已重试 3 次）: $url"
+    rm -f "$tmp"; [ -n "${3:-}" ] && return 1
+    die "拉取失败（已重试 3 次）: $url"
   fi
   [ -s "$tmp" ] || { rm -f "$tmp"; die "拉到空文件: $url"; }
   # 幂等：内容相同就不动，不同则备份旧版
@@ -319,6 +321,8 @@ case "${1:-}" in
     log "[ref] $OPS_REF（$REF_SRC）"
     fetch "bin/opsget" "$BIN_DIR/opsget"
     sync_lib
+    # 菜单随引导器一起走固定的 ref；固定在 1.5.0 之前的 tag 上时那一版没有它，跳过即可
+    fetch "bin/opsbox" "$BIN_DIR/opsbox" opt || log "[提示] $OPS_REF 里没有 opsbox 菜单，跳过"
     log "已更新（ref: $OPS_REF）"
     exit 0 ;;
 
@@ -371,7 +375,17 @@ case "${1:-}" in
     fi
     exit 0 ;;
 
-  ""|-h|--help)
+  "")
+    # 终端里不带参数：打开菜单（没装就先装）。管道、cron 里仍只打印帮助
+    if [ -t 0 ] && [ -t 1 ]; then
+      [ -x "$BIN_DIR/opsbox" ] || fetch "bin/opsbox" "$BIN_DIR/opsbox" opt \
+        || log "[提示] $OPS_REF 里没有 opsbox 菜单"
+      [ -x "$BIN_DIR/opsbox" ] && exec "$BIN_DIR/opsbox"
+    fi
+    usage
+    exit 0 ;;
+
+  -h|--help)
     usage
     exit 0 ;;
 esac
