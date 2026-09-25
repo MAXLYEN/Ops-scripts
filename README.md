@@ -51,6 +51,7 @@ opsget --pin v2026.09.24 && opsget -u
 | `db/` | 数据库维护 | [介绍](db/README.md) · [版本记录](db/CHANGELOG.md) |
 | `vpsscore/` | VPS 质量采集与评分 | [介绍](vpsscore/README.md) · [版本记录](vpsscore/CHANGELOG.md) |
 | `openclash/` | OpenClash DNS 分流 | [介绍](openclash/README.md) · [版本记录](openclash/CHANGELOG.md) |
+| `tests/` | 静态检查与端到端测试 | [介绍](tests/README.md) |
 
 `init/` 与 `vpsscore/` 不依赖 `lib/common.sh`，方便在新机上单独运行，也不强制要求 `env.conf`。`ops/decommission-archive` 同样自包含，以适应机器即将退役的场景。
 
