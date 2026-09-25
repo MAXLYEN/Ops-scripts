@@ -17,7 +17,19 @@
 | `save-fw.sh` | 2.0.2 | 在修改防火墙前保存当前配置快照 |
 | `script-inventory.sh` | 1.0.2 | 盘点本机脚本并区分仓库来源与本地文件 |
 | `ssl-audit.sh` | 2.1.2 | 核对证书文件、站点引用与续期记录 |
-| `verify-backup-pass.sh` | 2.0.2 | 验证本地密码能否解开云端备份包 |
+| `verify-backup-pass.sh` | 2.1.0 | 验证本地密码能否解开云端备份包，并检查最新包是否过旧 |
+
+
+### 云端备份每周校验
+
+备份脚本每次只做 `7z t` 自检，证明的是「刚打好的包能解开」；云端的包有没有损坏、密码文件和包还对不对得上、备份是否早已悄悄停止上传，要另外验证。`verify-backup-pass.sh --cron` 对每个 `RCLONE_REMOTES × RCLONE_PATHS` 取最新包下载解开，最新包超过 `VERIFY_MAX_AGE_DAYS`（默认 2 天）也算失败；失败时按「邮件 → webhook → 落盘」发告警，配了 `VERIFY_HEARTBEAT_URL` 还会上报心跳。超过 `VERIFY_MAX_MB` 的包不下载，只在汇总里注明。
+
+```bash
+opsget -i ops/verify-backup-pass
+( crontab -l 2>/dev/null; echo '0 6 * * 1 /usr/bin/flock -n /run/verify-backup-pass.lock /usr/local/bin/verify-backup-pass.sh --cron >> /var/log/verify-backup-pass.log 2>&1' ) | crontab -
+```
+
+每周一 06:00（UTC）运行，排在凌晨备份之后。`RCLONE_PATHS` 要列全所有备份目录，漏掉的目录不会被校验。不带 `--cron` 手动运行时只输出结果，不发告警。
 
 ## 部署与日常维护
 
