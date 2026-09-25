@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ops/komari-metrics-check.sh — 检查 Komari 指标库的保留期与增长速度
-# VERSION: 2.0.1
-# 2.0.1: 整理注释并补充目录文档，执行逻辑未变。
+# VERSION: 2.0.2
+# 2.0.2: 声明 ENV-REQUIRED 的 MYSQL_DEFAULTS_FILE：mysql_ready 需要它，原先漏声明，预检放行后才在运行时报错。执行逻辑未变。
+# ENV-REQUIRED: MYSQL_DEFAULTS_FILE
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env

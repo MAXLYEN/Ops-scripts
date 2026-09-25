@@ -101,6 +101,22 @@ env_keys() {
   done < "$TMP/scripts"
 }
 
+# 脚本运行时实际要求的键（require_env 列出的、mysql_ready 隐含的 MYSQL_DEFAULTS_FILE）
+# 必须写进 ENV-REQUIRED。漏声明时 opsget 预检和菜单都当它「不缺配置」，放它执行后才报错
+declared_all() {
+  local f k d need
+  while read -r f; do
+    case "$f" in lib/*|tests/*) continue ;; esac
+    d=" $(sed -n 's/^#[[:space:]]*ENV-REQUIRED:[[:space:]]*//p' "$f" | tr '|' ' ') "
+    need=$(grep -E '^[[:space:]]*require_env[[:space:]]' "$f" | sed -E 's/^[[:space:]]*require_env[[:space:]]+//; s/[;#|&].*//')
+    grep -qE '^[[:space:]]*mysql_ready\b' "$f" && need="$need MYSQL_DEFAULTS_FILE"
+    for k in $need; do
+      [[ "$k" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
+      [[ "$d" == *" $k "* ]] || err "$f" "运行时要求 $k，但 ENV-REQUIRED 没声明"
+    done
+  done < "$TMP/scripts"
+}
+
 printf '共 %s 个脚本\n' "$(wc -l < "$TMP/scripts")"
 check "换行符都是 LF" lf_only
 check "语法" syntax
@@ -109,4 +125,5 @@ check "每个脚本都有 VERSION 头" version_head
 check "MANIFEST 与文件一致" manifest
 check "opsbox 菜单与 MANIFEST 一致" menu
 check "ENV-REQUIRED 的键都在配置模板里" env_keys
+check "运行时要求的键都已声明" declared_all
 exit "$BAD"

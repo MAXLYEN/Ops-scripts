@@ -2,6 +2,15 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-09-25：补全配置声明
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `03-pre-migrate.sh` | 2.0.3 → 2.0.4 | 声明 `ENV-REQUIRED: MYSQL_DEFAULTS_FILE`：`mysql_ready` 需要它，原先漏声明，opsget 预检与菜单都当它不缺配置，执行后才报错。执行逻辑未变 |
+| `04-verify-migration.sh` | 2.0.2 → 2.0.3 | 声明 `ENV-REQUIRED: MYSQL_DEFAULTS_FILE`：`mysql_ready` 需要它，原先漏声明，opsget 预检与菜单都当它不缺配置，执行后才报错。执行逻辑未变 |
+| `05-fix-db-grants.sh` | 2.0.2 → 2.0.3 | 声明 `ENV-REQUIRED: MYSQL_DEFAULTS_FILE`：`mysql_ready` 需要它，原先漏声明，opsget 预检与菜单都当它不缺配置，执行后才报错。执行逻辑未变 |
+| `08-post-start-check.sh` | 2.1.1 → 2.1.2 | 声明 `ENV-REQUIRED: MYSQL_DEFAULTS_FILE`：`mysql_ready` 需要它，原先漏声明，opsget 预检与菜单都当它不缺配置，执行后才报错。执行逻辑未变 |
+
 ## 2026-09-24：快照权限与 WAL 保护
 
 | 文件 | 原版本 → 当前版本 | 变更 |

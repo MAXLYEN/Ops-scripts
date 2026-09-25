@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/opsbox — ops-scripts 中文菜单：按场景挑功能，常用组合自动串联
 # VERSION: 1.1.0
-# 1.1.0: 缺配置时执行前就地逐项填写（显示模板说明、凭据不回显、原样保存），不再打开编辑器；配置管理可逐项填写与查看；头部提示未填项数；提交号缩短显示。
+# 1.1.0: 缺配置时执行前就地逐项填写（显示模板说明、凭据不回显、原样保存），不再打开编辑器；配置管理可逐项填写与查看；头部提示未填项数；一键巡检里本机没有的服务记为「不适用」；提交号缩短显示。
 # 用法: opsbox（或在终端里不带参数运行 opsget）。随 opsget -u 一起更新。
 
 set -o pipefail
@@ -78,7 +78,7 @@ vps|score|vpsscore/score|只读|按用途排名|只想按用途（中转 / 建�
 migrate|migrate|migrate/01-inventory migrate/02-nat-probe migrate/03-pre-migrate migrate/04-verify-migration migrate/05-fix-db-grants migrate/06-export-images migrate/07-restore-containers migrate/08-post-start-check migrate/09-restore-backup-stack ops/restore-cron|向导|整机迁移向导|要把服务整体搬到另一台机器时|先选本机是迁出机还是迁入机，只列出这台该跑的步骤；停服和覆盖数据的步骤要输主机名确认
 settings|update|-|需确认|更新工具箱|隔段时间更新一次，或刚发了新版本|按本机固定的版本更新 opsget、公共库和这个菜单
 settings|pin|-|需确认|版本固定|发了新 tag 并验证过，要把本机切过去时|查看本机从哪个版本拉取；可固定到新 tag 或取消固定
-settings|config|-|需确认|配置管理|脚本提示「缺配置」，或要改 env.conf 时|补齐本机脚本需要的配置键、查看某个脚本需要哪些键、直接编辑 env.conf
+settings|config|-|需确认|配置管理|新机器上想先把配置填好，或想看、想改当前配置时|逐项填写本机还没填的配置（每项有中文说明）、查看当前配置（凭据打码）、查看某个脚本需要哪些配置
 settings|crontab|-|需确认|定时任务|想看本机有哪些运维定时任务，或给云端备份校验加上每周任务|列出 crontab 里调用运维脚本的行；可按文档添加每周云端备份校验
 settings|purge|ops/cleanup-purge|高危|卸载 ops-scripts|机器不再用这套脚本（交还、转手）时|先预演要删的内容；输主机名确认后删除全部已装脚本和产物，包括这个菜单
 EOF
@@ -302,6 +302,12 @@ cfg_fill_all() {  # 已装功能缺的配置一次问完
 cfg_show() {  # 列出 env.conf 里的键和值；凭据类只露前 4 位
   [ -f "$ENV_FILE" ] || { note "还没有 $ENV_FILE"; return 1; }
   printf '%s── %s ──%s\n' "$H" "$ENV_FILE" "$N"
+  if ! grep -qE '^[[:space:]]*(export[[:space:]]+)?[A-Z_][A-Z0-9_]*=' "$ENV_FILE"; then
+    printf '  还没有任何配置项。\n'
+    printf '  %s不用现在一次填完：用到哪个功能缺什么，执行时会当场逐项问你；\n' "$D"
+    printf '  想先把已装功能要的都填好，选这里的「1 逐项填写」。%s\n' "$N"
+    return 0
+  fi
   ( . "$ENV_FILE" >/dev/null 2>&1
     grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Z_][A-Z0-9_]*=' "$ENV_FILE" \
       | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/=$//' | awk '!seen[$0]++' \
@@ -391,20 +397,33 @@ step() {  # step <步骤名> <命令...>
   else flow_rec "异常 $rc" "$name" "$(( $(date +%s) - t0 ))s"; fi
   return "$rc"
 }
-check_step() {  # check_step <步骤名> <仓库路径>：互不依赖的检查，本机没配置就跳过
+check_step() {  # check_step <步骤名> <仓库路径> [前提函数]：互不依赖的检查，本机没配置或没这个服务就跳过
   if ! opsget -e "$2" >/dev/null 2>&1; then
     printf '\n%s- %s：本机未配置，跳过%s\n' "$D" "$1" "$N"
     flow_rec 未配置 "$1" -
     return 0
   fi
+  if [ -n "${3:-}" ] && ! "$3"; then
+    printf '\n%s- %s：%s，跳过%s\n' "$D" "$1" "$SKIP_WHY" "$N"
+    flow_rec 不适用 "$1" -
+    return 0
+  fi
   step "$1" run_ops "$2"
+}
+
+# 前提函数：不满足时把原因放进 SKIP_WHY。服务压根不在这台机器上，结果应是「不适用」而不是「异常」
+has_mysql() {
+  local f; f=$(env_get MYSQL_DEFAULTS_FILE)
+  command -v mysql >/dev/null 2>&1 && [ -n "$f" ] && [ -f "$f" ] && return 0
+  SKIP_WHY="本机没有 MySQL（或 MYSQL_DEFAULTS_FILE 指向的凭据文件不存在）"
+  return 1
 }
 flow_end() {
   local r n s col
   printf '\n%s──── %s · 汇总 ────%s\n' "$H" "$FLOW_NAME" "$N"
   while IFS=$'\t' read -r r n s; do
     [ -n "$n" ] || continue
-    case "$r" in 通过) col=$G ;; 未配置|未执行|跳过) col=$D ;; *) col=$Y ;; esac
+    case "$r" in 通过) col=$G ;; 未配置|不适用|未执行|跳过) col=$D ;; *) col=$Y ;; esac
     printf '  %s%s%s %s %s\n' "$col" "$(pad "$r" 8)" "$N" "$(pad "$n" 26)" "$s"
   done <<<"$FLOW_LOG"
 }
@@ -425,7 +444,7 @@ do_daily() {
   check_step "备份前置检查" ops/preflight-backup
   check_step "证书对账" ops/ssl-audit
   check_step "LLM 访问控制盘点" ops/check-llm-security
-  check_step "监控指标库体检" ops/komari-metrics-check
+  check_step "监控指标库体检" ops/komari-metrics-check has_mysql
   check_step "本机脚本盘点" ops/script-inventory
   flow_end
   if [[ "$FLOW_LOG" == *未配置* ]]; then

@@ -122,7 +122,16 @@ state() { cat /var/lib/ops-scripts/opsbox.state 2>/dev/null; }
 }
 
 # ── 联动 ────────────────────────────────────────────────────
+fake_mysql() {  # 让「本机有 MySQL」的前提成立
+  printf '#!/bin/sh
+exit 0
+' > /usr/local/bin/mysql; chmod 755 /usr/local/bin/mysql
+  touch /tmp/my.cnf
+  env_conf "MYSQL_DEFAULTS_FILE=/tmp/my.cnf"
+}
+
 @test "一键巡检：未配置的跳过，异常的照跑，最后汇总" {
+  fake_mysql
   stub ops/preflight-backup 0 BACKUP_DIRS
   stub ops/ssl-audit 0
   stub ops/check-llm-security 1
@@ -329,4 +338,39 @@ state() { cat /var/lib/ops-scripts/opsbox.state 2>/dev/null; }
   stub ops/komari-metrics-check 0; stub ops/script-inventory 0
   drive opsbox a "" "" q
   has "要启用哪一项，就在「日常巡检」里单独选它执行"
+}
+
+# ── 真机第二轮：服务不存在、空配置 ──────────────────────────
+daily_stubs() {  # 一键巡检里的其余几项都放成通过的桩
+  stub ops/preflight-backup 0; stub ops/ssl-audit 0; stub ops/check-llm-security 0
+  stub ops/script-inventory 0
+}
+
+@test "一键巡检：本机没有 MySQL 时，监控库体检算「不适用」而不是异常" {
+  env_conf "MYSQL_DEFAULTS_FILE=/nonexistent/.my.cnf"
+  daily_stubs; stub ops/komari-metrics-check 0 MYSQL_DEFAULTS_FILE
+  drive opsbox a "" "" q
+  calls_are "ops/preflight-backup" "ops/ssl-audit" "ops/check-llm-security" "ops/script-inventory"
+  has "本机没有 MySQL"
+  grep -q '^  不适用 *监控指标库体检' <<<"$output"
+  lacks "异常"
+}
+
+@test "一键巡检：有 MySQL 时照常跑监控库体检" {
+  env_conf "MYSQL_DEFAULTS_FILE=/root/.my.cnf"
+  touch /root/.my.cnf
+  printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/mysql; chmod 755 /usr/local/bin/mysql
+  daily_stubs; stub ops/komari-metrics-check 0 MYSQL_DEFAULTS_FILE
+  drive opsbox a "" "" q
+  calls_are "ops/preflight-backup" "ops/ssl-audit" "ops/check-llm-security" \
+            "ops/komari-metrics-check" "ops/script-inventory"
+  rm -f /root/.my.cnf
+}
+
+@test "查看配置：还没有任何配置项时，说清楚怎么加" {
+  env_conf "# 只有说明头"
+  drive opsbox 9 3 "" 2 "" 0 q
+  has "逐项填写本机还没填的配置"          # 卡片说明是新功能，不再是「直接编辑」
+  lacks "直接编辑 env.conf"
+  has "还没有任何配置项"
 }
