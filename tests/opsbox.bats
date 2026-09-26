@@ -181,14 +181,14 @@ exit 0
 @test "Vaultwarden 升级：先做新备份，再升级" {
   stub ops/upgrade-vaultwarden 0
   local_stub vw-fullbackup
-  drive opsbox 5 2 "" y y "" 0 q
+  drive opsbox 5 2 "" y "" 0 q
   calls_are "ops/upgrade-vaultwarden" "local/vw-fullbackup" "ops/upgrade-vaultwarden -y"
 }
 
 @test "Vaultwarden 升级：备份失败且不坚持，就不升级" {
   stub ops/upgrade-vaultwarden 0
   local_stub vw-fullbackup 1
-  drive opsbox 5 2 "" y y n "" 0 q
+  drive opsbox 5 2 "" y n "" 0 q
   calls_are "ops/upgrade-vaultwarden" "local/vw-fullbackup"
 }
 
@@ -255,7 +255,7 @@ exit 0
 # ── 工具箱设置 ──────────────────────────────────────────────
 @test "更新工具箱：菜单本身有新版时自动重新载入" {
   echo '# 新版本' >> "$MOCK/main/bin/opsbox"
-  drive opsbox 9 1 "" q
+  drive opsbox 9 1 "" y q
   has "菜单本身也更新了"
   [ "$status" -eq 0 ]
 }
@@ -439,7 +439,7 @@ two_outdated() {  # 装两个脚本，再让仓库里两个都出新版
 
 @test "更新工具箱之后顺便检查已装脚本" {
   two_outdated
-  drive opsbox 9 1 "" y a y "" 0 q
+  drive opsbox 9 1 "" y y a y "" 0 q
   cmp /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
 }
 
@@ -568,4 +568,110 @@ upd_cache() { cat /var/lib/ops-scripts/opsbox.updates 2>/dev/null; }
   drive opsbox 1 2 "" y $'/bakx\b' "" 0 q
   grep -qx "BACKUP_DIRS='/bak'" /etc/ops-scripts/env.conf
   lacks "^H"
+}
+
+# ── 卸载：用真实的 cleanup-purge（不是桩），确认真的清干净 ──────
+toolbox_litter() {  # 摆出工具箱平时会留下的各种文件
+  env_conf "BACKUP_DIRS=/x"
+  touch /etc/ops-scripts/env.conf.bak.20260101000000
+  touch /usr/local/bin/opsget.bak.20260101000000 /usr/local/bin/opsbox.bak.20260101000000
+  opsget -i ops/save-fw >/dev/null
+  touch /usr/local/bin/save-fw.sh.bak.20260101000000
+  mkdir -p /var/lib/ops-scripts; echo INIT_DONE=00 > /var/lib/ops-scripts/opsbox.state
+  opsbox --check-updates
+}
+no_toolbox_left() {
+  local f left=""
+  for f in /usr/local/bin/opsget /usr/local/bin/opsbox /usr/local/bin/save-fw.sh \
+           /usr/local/lib/ops-common.sh /var/lib/ops-scripts; do
+    [ -e "$f" ] && left="$left $f"
+  done
+  left="$left $(ls /usr/local/bin/*.bak.* /etc/ops-scripts/*.bak.* 2>/dev/null | tr '\n' ' ')"
+  [ -z "${left// /}" ] || { echo "还留着:$left" >&2; return 1; }
+}
+
+@test "卸载并保留配置：只留 env.conf，其余工具箱文件全清，菜单直接退出" {
+  toolbox_litter
+  drive opsbox 9 6 "" n ops-test yes
+  [ "$status" -eq 0 ]
+  has "保留配置"
+  has "已卸载"
+  no_toolbox_left
+  [ -f /etc/ops-scripts/env.conf ]
+  [ "$(ls -A /etc/ops-scripts)" = env.conf ]
+  grep -q '^BACKUP_DIRS=/x' /etc/ops-scripts/env.conf
+}
+
+@test "卸载且不保留配置：/etc/ops-scripts 整个删掉" {
+  toolbox_litter
+  drive opsbox 9 6 "" y ops-test yes
+  [ "$status" -eq 0 ]
+  no_toolbox_left
+  [ ! -e /etc/ops-scripts ]
+}
+
+@test "卸载：最后一步回 no，回到菜单，什么都没删" {
+  toolbox_litter
+  drive opsbox 9 6 "" n ops-test no "" 0 q
+  [ -x /usr/local/bin/opsbox ]
+  [ -f /etc/ops-scripts/env.conf.bak.20260101000000 ]
+}
+
+@test "卸载：后台更新检查不会在卸载后把文件写回来" {
+  toolbox_litter
+  rm -f /var/lib/ops-scripts/opsbox.updates      # 让菜单启动时开后台检查
+  unset OPSBOX_NO_CHECK
+  drive opsbox 9 6 "" n ops-test yes
+  sleep 3
+  no_toolbox_left
+}
+
+@test "卸载完的提示：保留了配置就说重装后直接能用，并给出重装命令" {
+  toolbox_litter
+  drive opsbox 9 6 "" n ops-test yes
+  has "/etc/ops-scripts/env.conf"
+  has "curl -fsSL"
+  lacks "opsget -c   # 重新生成配置"
+}
+
+# ── 规则：回车永远不执行（测试机上好几处「没输入就执行了」） ──
+@test "回车不执行：一键更新的确认" {
+  two_outdated
+  opsbox --check-updates
+  drive opsbox u "" "" q
+  ! cmp -s /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+}
+
+@test "回车不执行：更新工具箱要先确认" {
+  echo '# 新版本' >> "$MOCK/main/bin/opsbox"
+  drive opsbox 9 1 "" "" "" 0 q
+  ! cmp -s /usr/local/bin/opsbox "$MOCK/main/bin/opsbox"
+}
+
+@test "回车不执行：配置管理的选择没有默认项" {
+  # 装一个要配置的脚本：误进「逐项填写」就会建出 env.conf，留下痕迹
+  stub ops/preflight-backup 0 BACKUP_DIRS
+  opsget -i ops/preflight-backup >/dev/null
+  drive opsbox 9 4 "" "" "" 0 q
+  [ ! -e /etc/ops-scripts/env.conf ]
+  lacks "BACKUP_DIRS ──"
+}
+
+@test "回车不执行：VPS 评分的角色选择没有默认项" {
+  mkdir -p /root/vpsscore-baseline
+  stub vpsscore/score 0
+  drive opsbox 7 3 "" "" "" "" 0 q
+  [ -z "$(calls)" ]
+}
+
+@test "回车不执行：new-api 链路检查（可能重启隧道）要先确认" {
+  stub ops/newapi-linkcheck 0
+  drive opsbox 1 4 "" "" "" 0 q
+  [ -z "$(calls)" ]
+}
+
+@test "回车不执行：卸载时回车＝保留配置" {
+  toolbox_litter
+  drive opsbox 9 6 "" "" ops-test yes
+  [ -f /etc/ops-scripts/env.conf ]
 }
