@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/opsget — 从仓库拉取、安装和执行运维脚本
-# VERSION: 1.5.1
-# 1.5.1: 不声明配置键但会 load_env 的脚本，预检、-e、-c 都按「需要 env.conf 文件」处理，-c 可建空文件。
+# VERSION: 1.6.0
+# 1.6.0: 新增 --outdated：逐个对比工具箱本身（引导器、公共库、菜单）和已装脚本与当前 ref，列出不一致的（本地版本 → 该 ref 的版本）。
 # 配置依赖以目标脚本的 ENV-REQUIRED 声明为准。
 
 set -o pipefail
@@ -50,6 +50,7 @@ opsget — ops-scripts 引导器
   opsget <路径> [参数...]        拉取、安装并执行
   opsget -i <路径>               只安装，不执行
   opsget -u                      更新自身、common.sh 与菜单 opsbox
+  opsget --outdated              列出和当前 ref 不一致的已装脚本（本地版本 → 该 ref 的版本）
 
 版本固定：
   opsget --pin                   看当前从哪个 ref 拉取、来源是什么
@@ -373,6 +374,35 @@ case "${1:-}" in
     [ -n "$MISS" ] && log "[提示] 执行前需补配置: $(echo $MISS)（opsget -c $P）"
     [ -z "$MISS" ] && [ ! -f "$ENV_FILE" ] && needs_env_file "$BIN_DIR/$NAME.sh" \
       && log "[提示] 执行前需要 $ENV_FILE，可以为空（opsget -c $P）"
+    exit 0 ;;
+
+  --outdated)
+    # 切换固定版本或 -u 只换引导器、公共库和菜单，已装脚本各自停在当初装的版本 ——
+    # 生产机上一次就查出 22 个落后，其中几个旧版有实际风险。这里逐个和当前 ref 比内容。
+    # stdout 每行「仓库路径<TAB>本地版本<TAB>该 ref 的版本」，供菜单解析；说明文字走 stderr。
+    MAN=$(mktemp) && TMP=$(mktemp) || die "mktemp 失败"
+    curl_retry "$BASE/MANIFEST" "$MAN" >/dev/null || { rm -f "$MAN" "$TMP"; die "拉取 MANIFEST 失败"; }
+    ver_of() { local v; v=$(sed -n 's/^# VERSION: //p' "$1" | head -1); printf '%s' "${v:-?}"; }
+    N=0
+    outdated_one() {  # $1=仓库内文件 $2=本机文件 $3=显示的路径；本机没装就跳过
+      [ -f "$2" ] || return 0
+      if ! curl_retry "$BASE/$1" "$TMP" >/dev/null 2>&1 || [ ! -s "$TMP" ]; then
+        log "[警告] 拉取失败，跳过: $3" >&2; return 0
+      fi
+      cmp -s "$TMP" "$2" && return 0
+      printf '%s\t%s\t%s\n' "$3" "$(ver_of "$2")" "$(ver_of "$TMP")"
+      N=$((N + 1))
+    }
+    # 先工具箱本身，再 MANIFEST 里已装的脚本
+    outdated_one bin/opsget "$BIN_DIR/opsget" bin/opsget
+    outdated_one bin/opsbox "$BIN_DIR/opsbox" bin/opsbox
+    outdated_one lib/common.sh "$LIB_DST" lib/common.sh
+    for P in $(grep -oE '^[a-z]+/[A-Za-z0-9_-]+' "$MAN"); do
+      outdated_one "$P.sh" "$BIN_DIR/$(basename "$P").sh" "$P"
+    done
+    rm -f "$MAN" "$TMP"
+    if [ "$N" -eq 0 ]; then log "[✓] 已装脚本和工具箱都和 $OPS_REF 一致" >&2
+    else log "共 $N 个和 $OPS_REF 不一致；工具箱用 opsget -u，脚本用 opsget -i <路径>（旧版自动备份）" >&2; fi
     exit 0 ;;
 
   --pin)

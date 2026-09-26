@@ -90,14 +90,14 @@ state() { cat /var/lib/ops-scripts/opsbox.state 2>/dev/null; }
 
 @test "高危：主机名不符就取消" {
   stub ops/cleanup-purge 0
-  drive opsbox 9 5 "" wrong-host "" 0 q
+  drive opsbox 9 6 "" wrong-host "" 0 q
   has "主机名不符"
   calls_are "ops/cleanup-purge"
 }
 
 @test "高危：输对主机名才执行" {
   stub ops/cleanup-purge 0
-  drive opsbox 9 5 "" ops-test "" 0 q
+  drive opsbox 9 6 "" ops-test "" 0 q
   calls_are "ops/cleanup-purge" "ops/cleanup-purge --apply"
 }
 
@@ -262,7 +262,7 @@ exit 0
 
 @test "定时任务：按文档添加每周云端备份校验" {
   local_stub verify-backup-pass
-  drive opsbox 9 4 "" y "" 0 q
+  drive opsbox 9 5 "" y "" 0 q
   crontab -l | grep -q 'verify-backup-pass.sh --cron'
 }
 
@@ -298,13 +298,13 @@ exit 0
   stub ops/preflight-backup 0 BACKUP_DIRS BACKUP_SCRIPTS
   opsget -i ops/preflight-backup >/dev/null
   drive opsbox q
-  has "还有 2 项配置没填 → 9 工具箱设置 → 3 配置管理"
+  has "还有 2 项配置没填 → 9 工具箱设置 → 4 配置管理"
 }
 
 @test "配置管理：逐项填写已装功能缺的配置，回车跳过" {
   stub ops/preflight-backup 0 BACKUP_DIRS BACKUP_SCRIPTS
   opsget -i ops/preflight-backup >/dev/null
-  drive opsbox 9 3 "" 1 "/a /b" "" "" 0 q
+  drive opsbox 9 4 "" 1 "/a /b" "" "" 0 q
   has "还有 2 项没填"
   has "已跳过"
   has "还没填：BACKUP_SCRIPTS"
@@ -316,7 +316,7 @@ exit 0
   stub ops/preflight-backup 0 BACKUP_DIRS
   opsget -i ops/preflight-backup >/dev/null
   local v='it'"'"'s $HOME "x" a\b'
-  drive opsbox 9 3 "" 1 "$v" "" 0 q
+  drive opsbox 9 4 "" 1 "$v" "" 0 q
   got=$(bash -c '. /etc/ops-scripts/env.conf; printf %s "$BACKUP_DIRS"')
   [ "$got" = "$v" ]
 }
@@ -324,10 +324,10 @@ exit 0
 @test "凭据类输入不回显，查看配置时打码" {
   stub ops/newapi-log-prune 0 NEWAPI_ROOT_PAT
   opsget -i ops/newapi-log-prune >/dev/null
-  drive opsbox 9 3 "" 1 sekret-token-123 "" 0 q
+  drive opsbox 9 4 "" 1 sekret-token-123 "" 0 q
   lacks "sekret-token-123"
   grep -q "sekret-token-123" /etc/ops-scripts/env.conf
-  drive opsbox 9 3 "" 2 "" 0 q
+  drive opsbox 9 4 "" 2 "" 0 q
   has "sekr***"
   lacks "sekret-token-123"
 }
@@ -369,7 +369,7 @@ daily_stubs() {  # 一键巡检里的其余几项都放成通过的桩
 
 @test "查看配置：还没有任何配置项时，说清楚怎么加" {
   env_conf "# 只有说明头"
-  drive opsbox 9 3 "" 2 "" 0 q
+  drive opsbox 9 4 "" 2 "" 0 q
   has "逐项填写本机还没填的配置"          # 卡片说明是新功能，不再是「直接编辑」
   lacks "直接编辑 env.conf"
   has "还没有任何配置项"
@@ -391,4 +391,126 @@ daily_stubs() {  # 一键巡检里的其余几项都放成通过的桩
   stub ops/ssl-audit 0
   drive opsbox 1 3 "０" 0 q
   [ -z "$(calls)" ]
+}
+
+# ── 更新已装脚本（生产机上 22 个脚本落后于固定版本） ──────
+two_outdated() {  # 装两个脚本，再让仓库里两个都出新版
+  opsget -i ops/save-fw >/dev/null; opsget -i ops/ssl-audit >/dev/null
+  stub ops/save-fw 0; stub ops/ssl-audit 0
+}
+
+@test "更新已装脚本：列出落后的，全部更新，旧版留备份，只更新不执行" {
+  two_outdated
+  drive opsbox 9 2 "" a y "" 0 q
+  has "ops/save-fw"
+  has "ops/ssl-audit"
+  cmp /usr/local/bin/save-fw.sh "$MOCK/main/ops/save-fw.sh"
+  cmp /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+  ls /usr/local/bin/ssl-audit.sh.bak.* >/dev/null
+  [ -z "$(calls)" ]
+}
+
+@test "更新已装脚本：只更新选中的" {
+  two_outdated
+  drive opsbox 9 2 "" 2 y "" 0 q
+  cmp /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+  ! cmp -s /usr/local/bin/save-fw.sh "$MOCK/main/ops/save-fw.sh"
+}
+
+@test "更新已装脚本：不确认就什么都不动" {
+  two_outdated
+  drive opsbox 9 2 "" a n "" 0 q
+  ! cmp -s /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+}
+
+@test "更新已装脚本：都一致时直接说" {
+  opsget -i ops/save-fw >/dev/null
+  drive opsbox 9 2 "" "" 0 q
+  has "都和固定版本一致"
+}
+
+@test "更新已装脚本：定时任务在用的标出来，更新后提醒手动跑一次" {
+  two_outdated
+  echo '0 3 * * * /usr/local/bin/ssl-audit.sh >/dev/null 2>&1' | crontab -
+  drive opsbox 9 2 "" a y "" 0 q
+  has "定时任务在用"
+  has "建议现在手动跑一次：/usr/local/bin/ssl-audit.sh"
+}
+
+@test "更新工具箱之后顺便检查已装脚本" {
+  two_outdated
+  drive opsbox 9 1 "" y a y "" 0 q
+  cmp /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+}
+
+@test "本机脚本盘点的说明不再承诺比较版本，并指向更新已装脚本" {
+  drive opsbox 1 0 q
+  lacks "版本有没有落后"
+  drive opsbox "?" 0 q
+  has "本机脚本落后于固定版本"
+}
+
+# ── 启动时检查更新 ──────────────────────────────────────────
+upd_cache() { cat /var/lib/ops-scripts/opsbox.updates 2>/dev/null; }
+
+@test "启动检查：发现更新时头部提示，并出现 u 一键更新" {
+  two_outdated
+  opsbox --check-updates
+  drive opsbox q
+  has "发现 2 个更新"
+  has "[u] 一键更新"
+}
+
+@test "启动检查：都一致时显示已是最新，不出现 u" {
+  opsbox --check-updates
+  drive opsbox q
+  has "已是最新"
+  lacks "[u] 一键更新"
+}
+
+@test "启动检查在后台跑：菜单马上出来，稍后结果写进缓存" {
+  unset OPSBOX_NO_CHECK
+  drive opsbox q
+  has "正在后台检查更新"
+  local i; for i in $(seq 100); do [ -s /var/lib/ops-scripts/opsbox.updates ] && break; sleep 0.2; done
+  [[ "$(upd_cache)" == main$'\t'*$'\t'ok* ]]
+}
+
+@test "一键更新：列出后确认一次就全部更新（含菜单本身，并自动重新载入）" {
+  two_outdated
+  echo '# 新版本' >> "$MOCK/main/bin/opsbox"
+  opsbox --check-updates
+  drive opsbox u y q
+  has "菜单本身也更新了"
+  cmp /usr/local/bin/opsbox "$MOCK/main/bin/opsbox"
+  cmp /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+  cmp /usr/local/bin/save-fw.sh "$MOCK/main/ops/save-fw.sh"
+  [ -z "$(calls)" ]
+}
+
+@test "一键更新：不确认就什么都不动" {
+  two_outdated
+  opsbox --check-updates
+  drive opsbox u n "" q
+  ! cmp -s /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+}
+
+@test "检查失败时如实提示，不假装已是最新" {
+  OPS_REPO=http://127.0.0.1:1 opsbox --check-updates
+  drive opsbox q
+  has "更新检查失败"
+  lacks "已是最新"
+}
+
+@test "切换固定版本后，旧的检查结果作废" {
+  two_outdated
+  opsbox --check-updates
+  mkdir -p /etc/ops-scripts; echo v2099.01.01 > /etc/ops-scripts/ref
+  drive opsbox q
+  lacks "发现 2 个更新"
+}
+
+@test "主菜单直接回车是刷新，不报「没有这个选项」" {
+  drive opsbox "" q
+  lacks "没有这个选项"
 }

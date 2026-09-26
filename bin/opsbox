@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # bin/opsbox — ops-scripts 中文菜单：按场景挑功能，常用组合自动串联
-# VERSION: 1.1.0
-# 1.1.0: 缺配置时执行前就地逐项填写（显示模板说明、凭据不回显、原样保存），不再打开编辑器；配置管理可逐项填写与查看；头部提示未填项数；一键巡检里本机没有的服务记为「不适用」；选项输入容错（首尾空格、全角），认不出时明确提示；提交号缩短显示。
+# VERSION: 1.2.0
+# 1.2.0: 工具箱设置新增「更新已装脚本」：对比已装脚本和固定版本，挑着更新，定时任务在用的提醒手动跑一次；更新工具箱后顺便检查。本机脚本盘点的说明不再承诺比较版本。
 # 用法: opsbox（或在终端里不带参数运行 opsget）。随 opsget -u 一起更新。
 
 set -o pipefail
 
-OPSBOX_VERSION=1.1.0
+OPSBOX_VERSION=1.2.0
 BIN_DIR=/usr/local/bin
 ENV_FILE=/etc/ops-scripts/env.conf
 REF_FILE=/etc/ops-scripts/ref
@@ -15,7 +15,6 @@ STATE_FILE="$STATE_DIR/opsbox.state"
 
 die() { printf '[致命] %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "需要 root"
-{ [ -t 0 ] && [ -t 1 ]; } || die "菜单需要交互终端；脚本和 cron 里请直接用 opsget <路径> 或本地已装脚本"
 command -v opsget >/dev/null 2>&1 || die "找不到 opsget，先按仓库 README 的「快速开始」安装引导器"
 
 # 中文按两列宽对齐，要求 bash 按字符计数；只影响本 shell 的字符串处理
@@ -53,7 +52,7 @@ check|ssl|ops/ssl-audit|只读|证书对账|站点报证书错误、证书快到
 check|linkcheck|ops/newapi-linkcheck|需确认|new-api 链路检查|new-api 打不开或变慢，想分清是隧道断了还是公网出了问题|先测隧道端口再测公网地址；隧道不通时会自动重启隧道服务（与定时任务行为相同）
 check|komari|ops/komari-metrics-check|只读|监控指标库体检|磁盘涨得快，或每月看一次监控库体积|检查 Komari 指标库的保留期和增长速度
 check|panelcron|ops/panel-cron-inspect|只读|面板计划任务|面板里的计划任务看不懂在跑什么，或想手动触发一次时|列出面板计划任务背后的真实命令和运行状态；看完可以挑一个手动触发
-check|inventory|ops/script-inventory|只读|本机脚本盘点|想知道本机哪些脚本来自仓库、哪些是手工放的、版本有没有落后|对比本机脚本与固定版本的仓库内容
+check|inventory|ops/script-inventory|只读|本机脚本盘点|想知道本机哪些脚本来自仓库、哪些是手工放的|列出本机脚本的来源与版本号（不比新旧；要看落后的用「工具箱设置 → 更新已装脚本」）
 check|locate|ops/panel-data-locate|只读|定位面板数据|想找某个站点或配置的数据到底存在哪个目录、哪张表|按你给的特征串（如域名）在面板目录和数据库里搜索
 backup|health|-|联动|备份体检|每周一次，或担心备份没在跑、云端的包坏了|先跑备份前置检查，再下载云端最新包验证能否解开；校验没通过时自动接着诊断告警邮件
 backup|now|backup/vw-fullbackup backup/xboard-fullbackup backup/newapi-fullbackup|需确认|立即备份|升级、迁移或大改之前，先手动备份一次|运行本机已装的备份脚本，和定时任务用同一把锁，不会撞车；不经网络拉取
@@ -77,6 +76,7 @@ vps|collect|vpsscore/collect|只读|多机汇总评分|在汇总机上，想给�
 vps|score|vpsscore/score|只读|按用途排名|只想按用途（中转 / 建站 / 落地）看排名|对已收集的结果按角色权重打分
 migrate|migrate|migrate/01-inventory migrate/02-nat-probe migrate/03-pre-migrate migrate/04-verify-migration migrate/05-fix-db-grants migrate/06-export-images migrate/07-restore-containers migrate/08-post-start-check migrate/09-restore-backup-stack ops/restore-cron|向导|整机迁移向导|要把服务整体搬到另一台机器时|先选本机是迁出机还是迁入机，只列出这台该跑的步骤；停服和覆盖数据的步骤要输主机名确认
 settings|update|-|需确认|更新工具箱|隔段时间更新一次，或刚发了新版本|按本机固定的版本更新 opsget、公共库和这个菜单
+settings|upgrade|-|需确认|更新已装脚本|更新过工具箱、切了固定版本之后，看本机脚本有没有落后|逐个对比本机已装脚本和固定版本，列出落后的；可全部或挑几个更新，旧版自动备份，定时任务在用的会提醒手动跑一次
 settings|pin|-|需确认|版本固定|发了新 tag 并验证过，要把本机切过去时|查看本机从哪个版本拉取；可固定到新 tag 或取消固定
 settings|config|-|需确认|配置管理|新机器上想先把配置填好，或想看、想改当前配置时|逐项填写本机还没填的配置（每项有中文说明）、查看当前配置（凭据打码）、查看某个脚本需要哪些配置
 settings|crontab|-|需确认|定时任务|想看本机有哪些运维定时任务，或给云端备份校验加上每周任务|列出 crontab 里调用运维脚本的行；可按文档添加每周云端备份校验
@@ -113,7 +113,8 @@ new-api 打不开|linkcheck
 密码库要升级|vwup
 应用连不上数据库|dbcheck
 脚本提示缺配置|config
-要把服务搬到另一台机器|migrate"
+要把服务搬到另一台机器|migrate
+本机脚本落后于固定版本|upgrade"
 
 # ── 显示 ────────────────────────────────────────────────────
 dw() {  # 显示宽度：ASCII 记 1 列，其余（中文）记 2 列
@@ -281,7 +282,7 @@ fill_key() {  # fill_key <键>：显示说明，读一个值写进 env.conf；�
   return 0
 }
 
-cfg_later() { printf '%s以后要补：主菜单 9 工具箱设置 → 3 配置管理 → 1 逐项填写%s\n' "$D" "$N"; }
+cfg_later() { printf '%s以后要补：主菜单 9 工具箱设置 → 4 配置管理 → 1 逐项填写%s\n' "$D" "$N"; }
 
 cfg_guide() {  # 执行失败后：若是缺配置，就地逐项带着填。补齐返回 0
   local p=$1 miss left k
@@ -866,8 +867,139 @@ do_update() {
   opsget -u || return
   after=$(cksum < "$BIN_DIR/opsbox" 2>/dev/null)
   if [ -n "$after" ] && [ "$before" != "$after" ]; then
+    note "菜单本身也更新了，重新载入…（已装脚本可在「工具箱设置 → 更新已装脚本」里检查）"; sleep 1
+    exec "$BIN_DIR/opsbox"
+  fi
+  # -u 只换引导器、公共库和菜单，已装脚本各自停在当初的版本
+  echo
+  confirm "顺便检查已装脚本有没有落后于固定版本？" y && do_upgrade
+}
+
+do_upgrade() {  # 现场对比已装脚本（含工具箱本身）和固定版本，挑着更新
+  local list
+  printf '%s正在逐个对比本机已装脚本和固定版本…%s\n' "$D" "$N"
+  list=$(opsget --outdated 2>/dev/null) || { note "对比失败（网络不通？）"; return 1; }
+  upgrade_flow "$list"
+}
+
+# upgrade_flow <opsget --outdated 的输出> [all]：列出、选择、更新。
+# all = 一键更新：不逐个挑，确认一次全部更新
+upgrade_flow() {
+  local rows=() picks=() remind=() i n p lv cv mark cronlist tool="" before after
+  if [ -z "$1" ]; then
+    printf '%s✓ 已装脚本都和固定版本一致%s\n' "$G" "$N"
+    return 0
+  fi
+  mapfile -t rows <<<"$1"
+  cronlist=$(crontab -l 2>/dev/null | grep -vE '^[[:space:]]*#')
+  printf '\n  有 %d 项和固定版本不一致：\n\n' "${#rows[@]}"
+  for i in "${!rows[@]}"; do
+    IFS=$'\t' read -r p lv cv <<<"${rows[i]}"
+    case "$p" in
+      bin/*|lib/*) mark="  ${B}工具箱本身${N}" ;;
+      *) mark=""
+         grep -qF "$BIN_DIR/$(basename "$p").sh" <<<"$cronlist" && mark="  ${Y}⏰ 定时任务在用${N}" ;;
+    esac
+    printf '  [%d] %s %s → %s%s\n' $((i + 1)) "$(pad "$p" 32)" "$lv" "$cv" "$mark"
+  done
+  printf '\n  %s只更新文件，不执行任何脚本；旧版自动备份成 .bak.<时间>%s\n' "$D" "$N"
+  if [ "${2:-}" = all ]; then
+    picks=("${!rows[@]}")
+  else
+    ask_choice "a 全部更新，或输入编号（多个用空格隔开），0 返回" a
+    case "$ANS" in
+      0) return 0 ;;
+      a) picks=("${!rows[@]}") ;;
+      *) for n in $ANS; do
+           if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le ${#rows[@]} ]; then picks+=($((n - 1)))
+           else note "没有这个编号：$n"; return 1; fi
+         done ;;
+    esac
+  fi
+  confirm "更新这 ${#picks[@]} 项？" y || return 0
+  before=$(cksum < "$BIN_DIR/opsbox" 2>/dev/null)
+  for i in "${picks[@]}"; do
+    IFS=$'\t' read -r p lv cv <<<"${rows[i]}"
+    case "$p" in bin/*|lib/*) tool=1; continue ;; esac   # 工具箱三件套一起用 -u 换，放到最后
+    if opsget -i "$p" >/dev/null 2>&1; then
+      printf '  %s✓%s %s  %s → %s\n' "$G" "$N" "$p" "$lv" "$cv"
+      grep -qF "$BIN_DIR/$(basename "$p").sh" <<<"$cronlist" && remind+=("$BIN_DIR/$(basename "$p").sh")
+    else
+      printf '  %s✗ %s 更新失败%s\n' "$Y" "$p" "$N"
+    fi
+  done
+  if [ -n "$tool" ]; then
+    if opsget -u >/dev/null 2>&1; then printf '  %s✓%s 工具箱（opsget、公共库、菜单）\n' "$G" "$N"
+    else printf '  %s✗ 工具箱更新失败%s\n' "$Y" "$N"; fi
+  fi
+  # 定时任务会在无人值守时用上新版：先手动跑一次，别让第一次运行发生在凌晨
+  for p in "${remind[@]}"; do note "  定时任务在用，建议现在手动跑一次：$p"; done
+  rm -f "$UPD_CACHE"   # 结果已过时，下次打开菜单重新检查
+  after=$(cksum < "$BIN_DIR/opsbox" 2>/dev/null)
+  if [ -n "$after" ] && [ "$before" != "$after" ]; then
     note "菜单本身也更新了，重新载入…"; sleep 1
     exec "$BIN_DIR/opsbox"
+  fi
+}
+
+# ── 启动时检查更新 ──────────────────────────────────────────
+# 逐个对比要访问仓库几十次，放后台做，菜单照常马上出来；结果写缓存，头部读缓存显示。
+# 缓存第一行「ref<TAB>时间戳<TAB>ok|fail」，其后是 opsget --outdated 的输出
+UPD_CACHE="$STATE_DIR/opsbox.updates"
+UPD_LOCK="$STATE_DIR/opsbox.updates.lock"
+UPD_TTL=300   # 5 分钟内查过就不再查
+
+cur_ref() {  # 与 opsget 同样的判定顺序
+  if [ -n "${OPS_REF:-}" ]; then echo "$OPS_REF"
+  elif [ -s "$REF_FILE" ]; then head -n1 "$REF_FILE"
+  else echo main; fi
+}
+
+check_updates() {  # check_updates [wait]：做一次检查写缓存；同一时间只跑一个，wait 时排队等
+  local tmp out st=ok
+  mkdir -p "$STATE_DIR" || return 1
+  exec 9>"$UPD_LOCK"
+  if [ "${1:-}" = wait ]; then flock -w 120 9 || return 1; else flock -n 9 || return 0; fi
+  tmp=$(mktemp "$STATE_DIR/.updates.XXXXXX") || return 1
+  out=$(opsget --outdated 2>/dev/null) || st=fail
+  # 没有更新时清单为空：别写成 [ -n ] && printf，那样整组返回 1，缓存就不落盘了
+  { printf '%s\t%s\t%s\n' "$(cur_ref)" "$(date +%s)" "$st"
+    if [ -n "$out" ]; then printf '%s\n' "$out"; fi
+  } > "$tmp" && mv "$tmp" "$UPD_CACHE"
+}
+
+start_update_check() {
+  [ -n "${OPSBOX_NO_CHECK:-}" ] && return 0
+  local ref ts
+  if [ -f "$UPD_CACHE" ]; then
+    IFS=$'\t' read -r ref ts _ < "$UPD_CACHE"
+    [ "$ref" = "$(cur_ref)" ] && [ $(( $(date +%s) - ${ts:-0} )) -lt "$UPD_TTL" ] && return 0
+  fi
+  ( check_updates ) </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+}
+
+upd_rows() { tail -n +2 "$UPD_CACHE" 2>/dev/null; }
+
+upd_line() {  # 头部的「更新」一行；顺带设置 UPD_N
+  local ref ts st
+  UPD_N=0
+  if ! flock -n "$UPD_LOCK" true 2>/dev/null; then
+    printf '  更新  %s正在后台检查更新…（回车刷新）%s\n' "$D" "$N"; return
+  fi
+  [ -f "$UPD_CACHE" ] && IFS=$'\t' read -r ref ts st < "$UPD_CACHE"
+  if [ -z "${ref:-}" ] || [ "$ref" != "$(cur_ref)" ]; then
+    [ -n "${OPSBOX_NO_CHECK:-}" ] || printf '  更新  %s还没检查%s\n' "$D" "$N"
+    return
+  fi
+  if [ "$st" = fail ]; then
+    printf '  更新  %s更新检查失败（网络不通？）%s\n' "$Y" "$N"; return
+  fi
+  UPD_N=$(upd_rows | grep -c .)
+  if [ "$UPD_N" -gt 0 ]; then
+    printf '  更新  %s⬆ 发现 %s 个更新（本机和固定版本不一致）→ 按 u 一键更新%s\n' "$Y" "$UPD_N" "$N"
+  else
+    printf '  更新  %s✓ 已是最新（%s 检查）%s\n' "$G" "$(date -d "@$ts" '+%H:%M' 2>/dev/null)" "$N"
   fi
 }
 
@@ -1042,7 +1174,7 @@ banner() {
   if [ -n "$miss" ]; then
     # shellcheck disable=SC2086  # 数一下有几项
     set -- $miss
-    envs="${Y}已装的功能还有 $# 项配置没填 → 9 工具箱设置 → 3 配置管理${N}"
+    envs="${Y}已装的功能还有 $# 项配置没填 → 9 工具箱设置 → 4 配置管理${N}"
   elif [ -f "$ENV_FILE" ]; then
     envs="${G}env.conf ✓${N}"
     [ "$(stat -c %a "$ENV_FILE" 2>/dev/null)" = 600 ] || envs="${Y}env.conf 权限不是 600${N}"
@@ -1050,6 +1182,7 @@ banner() {
     envs="${D}还没有 env.conf（用到哪个功能缺什么，会当场逐项问你）${N}"
   fi
   printf '  配置  %s\n' "$envs"
+  upd_line
   [ -f /var/run/reboot-required ] && printf '  %s⚠ 系统标记需要重启%s\n' "$Y" "$N"
   systemctl list-timers --all 2>/dev/null | grep -qi rollback \
     && printf '  %s⚠ 存在遗留的回滚定时器：systemctl stop server-rollback.timer%s\n' "$Y" "$N"
@@ -1080,12 +1213,16 @@ main_menu() {
     done
     printf '\n  %s[a]%s 一键巡检    %s[b]%s 备份体检    %s[?]%s 不知道用哪个？按场景找\n' \
       "$B" "$N" "$B" "$N" "$B" "$N"
+    [ "${UPD_N:-0}" -gt 0 ] && printf '  %s[u] 一键更新（%s 个）%s\n' "$Y" "$UPD_N" "$N"
     printf '  [q] 退出\n\n'
     show_msg
     read -r -p "请选择 > " sel </dev/tty || exit 0
     sel=$(norm "$sel")
     case "$sel" in
       q|0) exit 0 ;;
+      '') ;;   # 回车：刷新（比如看后台更新检查的结果）
+      u) if [ "${UPD_N:-0}" -gt 0 ]; then upgrade_flow "$(upd_rows)" all; pause
+         else bad_choice u; fi ;;
       a) open_item daily ;;
       b) open_item health ;;
       \?) scene_menu ;;
@@ -1095,4 +1232,8 @@ main_menu() {
   done
 }
 
+# 非交互入口：同步做一次更新检查、写缓存（后台检查和测试都走这里）
+if [ "${1:-}" = --check-updates ]; then check_updates wait; exit $?; fi
+{ [ -t 0 ] && [ -t 1 ]; } || die "菜单需要交互终端；脚本和 cron 里请直接用 opsget <路径> 或本地已装脚本"
+start_update_check
 main_menu
