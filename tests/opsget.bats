@@ -110,3 +110,32 @@ setup() { reset_host; }
   [ "$status" -eq 0 ]
   has "不需要任何配置"
 }
+
+# ── 已装脚本和固定版本对比（生产机上 22 个脚本落后却没人知道） ──
+ver_of() { sed -n 's/^# VERSION: //p' "$1" | head -1; }
+
+@test "--outdated：列出和固定版本不一致的已装脚本，一致的不列" {
+  opsget -i ops/save-fw >/dev/null
+  opsget -i ops/ssl-audit >/dev/null
+  local lv; lv=$(ver_of /usr/local/bin/ssl-audit.sh)
+  stub ops/ssl-audit 0                  # 仓库里出了新版（桩的版本是 0.0.0-stub）
+  run opsget --outdated
+  [ "$status" -eq 0 ]
+  grep -qx "ops/ssl-audit	$lv	0.0.0-stub" <<<"$output"
+  lacks "ops/save-fw"
+}
+
+@test "--outdated：都一致时明确说，不留空" {
+  opsget -i ops/save-fw >/dev/null
+  run opsget --outdated
+  [ "$status" -eq 0 ]
+  has "都和 main 一致"
+}
+
+@test "--outdated：工具箱本身（引导器、公共库、菜单）也一起对比" {
+  opsget -u >/dev/null
+  echo '# 新版本' >> "$MOCK/main/bin/opsbox"
+  run opsget --outdated
+  grep -q "^bin/opsbox	" <<<"$output"
+  lacks "bin/opsget"
+}

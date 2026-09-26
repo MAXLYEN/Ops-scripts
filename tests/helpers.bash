@@ -38,7 +38,10 @@ reset_host() {
   rm -rf "${MOCK:?}"/*; cp -a "$BASE_DIR"/. "$MOCK"/
   install -m 755 "$MOCK/main/bin/opsget" /usr/local/bin/opsget
   unset OPS_REF EDITOR
-  export NO_COLOR=1 LC_ALL=C.UTF-8 TERM=xterm
+  # 上个用例留下的后台更新检查会往这次的新环境里写结果，先清掉
+  pkill -f /usr/local/bin/opsbox 2>/dev/null || true; pkill -f 'opsget --outdated' 2>/dev/null || true
+  # 启动时的后台更新检查默认关掉，只在专门测它的用例里打开，免得其他用例受时序影响
+  export NO_COLOR=1 LC_ALL=C.UTF-8 TERM=xterm OPSBOX_NO_CHECK=1
 }
 
 # ── 桩脚本 ──────────────────────────────────────────────────
