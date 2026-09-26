@@ -117,6 +117,14 @@ declared_all() {
   done < "$TMP/scripts"
 }
 
+# 菜单的确认一律默认「否」：回车不执行任何改动。confirm 不再接受默认值参数，
+# 再写 confirm "…" y 或 [Y/n] 就是回退（测试机上就出过「没输入就执行了」）
+confirm_no_default() {
+  local bad
+  bad=$(grep -nE 'confirm "[^"]*" +[yn]([^a-z]|$)|\[Y/n\]' bin/opsbox)
+  [ -z "$bad" ] || err bin/opsbox "确认提示不能带默认值: $bad"
+}
+
 printf '共 %s 个脚本\n' "$(wc -l < "$TMP/scripts")"
 check "换行符都是 LF" lf_only
 check "语法" syntax
@@ -126,4 +134,5 @@ check "MANIFEST 与文件一致" manifest
 check "opsbox 菜单与 MANIFEST 一致" menu
 check "ENV-REQUIRED 的键都在配置模板里" env_keys
 check "运行时要求的键都已声明" declared_all
+check "菜单的确认一律默认「否」" confirm_no_default
 exit "$BAD"

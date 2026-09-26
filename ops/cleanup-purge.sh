@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/cleanup-purge.sh — 按安装台账移除 ops-scripts 及其产物
-# VERSION: 1.0.6
-# 1.0.6: 没有台账时也移除菜单 opsbox（opsget 1.5.0 起随 -u 安装）。
+# VERSION: 1.0.7
+# 1.0.7: 一并清掉 opsget / opsbox 自身的旧版备份；KEEP_ENV=1 只保留 env.conf 与版本固定记录 ref，其余（如 env.conf 的历史备份）照删；重装提示按是否保留配置区分。
 # 默认预演，--apply 才执行移除并要求确认。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -77,8 +77,9 @@ add /usr/local/bin/opsget /usr/local/bin/opsbox /usr/local/lib/ops-common.sh
 add /var/lib/ops-scripts
 
 section "2. 脚本的旧版备份"
-# glob 没匹配时保持字面值，add() 的 [ -e ] 会跳过它
-add /usr/local/bin/*.sh.bak.*
+# glob 没匹配时保持字面值，add() 的 [ -e ] 会跳过它。
+# opsget / opsbox 自身更新时也会留 .bak（它们没有 .sh 后缀，原先漏掉了）
+add /usr/local/bin/*.sh.bak.* /usr/local/bin/opsget.bak.* /usr/local/bin/opsbox.bak.*
 
 section "3. 运行产物"
 add /root/inventory_*.txt /root/verify_*.txt /root/fwstate_* /root/crontab.bak.*
@@ -100,7 +101,12 @@ fi
 
 section "5. 配置"
 if [ "${KEEP_ENV:-0}" = 1 ]; then
-  echo "  保留 /etc/ops-scripts/env.conf（KEEP_ENV=1）"
+  # 只留 env.conf 和版本固定记录 ref：ref 也删了，下次重装就悄悄跟 main 走，
+  # 生产机最怕的正是这个。env.conf 的历史备份等其余文件照删
+  echo "  保留 /etc/ops-scripts/env.conf 与版本固定记录 ref（KEEP_ENV=1）"
+  for f in /etc/ops-scripts/* /etc/ops-scripts/.[!.]*; do
+    case "$f" in /etc/ops-scripts/env.conf|/etc/ops-scripts/ref) ;; *) add "$f" ;; esac
+  done
 else
   echo "  /etc/ops-scripts/（含 env.conf，里面是你的拓扑配置）"
   add /etc/ops-scripts
@@ -141,11 +147,21 @@ done < "$TARGETS"
 
 section 完成
 ok "已移除，磁盘剩余：$(df -h / | tail -1 | awk '{print $4}')"
-cat <<EOF
+if [ "${KEEP_ENV:-0}" = 1 ] && [ -f /etc/ops-scripts/env.conf ]; then
+  cat <<EOF
+
+  配置保留在 /etc/ops-scripts/env.conf，重装后不用再填。想装回来：
+    curl -fsSL $BASE/bin/opsget \\
+      -o /usr/local/bin/opsget && chmod +x /usr/local/bin/opsget
+    opsget      # 在终端里运行，会装上并打开菜单
+EOF
+else
+  cat <<EOF
 
   想重新装回来：
     curl -fsSL $BASE/bin/opsget \\
       -o /usr/local/bin/opsget && chmod +x /usr/local/bin/opsget
     opsget -c   # 重新生成配置
 EOF
+fi
 finish
