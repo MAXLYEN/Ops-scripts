@@ -142,8 +142,20 @@ note() { printf '%s%s%s\n' "$Y" "$*" "$N"; }
 # 认不出就只能默默刷新，看起来像「按了没反应」—— 真机上就这样丢过一次按键
 FW='０１２３４５６７８９ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ？'
 HW='0123456789abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz?'
-norm() {  # norm <输入>：去首尾空白、全角转半角、转小写
-  local s=$1 i
+# 终端的退格键可能发 ^H 而 stty 认的是 DEL（或反过来），read 就把它当普通字符收进来：
+# 「输 3 再删掉」变成认不出的选项，填配置时更会把 ^H 存进文件。所有输入都先过这一道
+bs() {  # bs <输入>：^H / DEL 按删除处理，删掉它前面那个字符
+  local s=$1 out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    if [ "$c" = $'\b' ] || [ "$c" = $'\x7f' ]; then out=${out%?}; else out+=$c; fi
+  done
+  printf '%s' "$out"
+}
+
+norm() {  # norm <输入>：处理退格、去首尾空白、全角转半角、转小写
+  local s i
+  s=$(bs "$1")
   s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"
   s=${s//　/}   # 全角空格
   for ((i = 0; i < ${#FW}; i++)); do s=${s//"${FW:i:1}"/"${HW:i:1}"}; done
@@ -160,6 +172,7 @@ ask() {  # ask <提示> [默认值]；结果放在 ANS
   local p=$1
   [ -n "${2:-}" ] && p="$p [$2]"
   read -r -p "$p: " ANS </dev/tty || ANS=""
+  ANS=$(bs "$ANS")
   [ -n "$ANS" ] || ANS=${2:-}
 }
 confirm() {  # confirm <问题> [y|n，默认 n]
@@ -173,6 +186,7 @@ gate_host() {  # 高危操作手输主机名：防止在错的机器上顺手回
   local h a; h=$(hostname)
   printf '\n%s⚠ 高危：%s%s\n' "$R" "$1" "$N"
   read -r -p "  确认在这台机器上执行，请输入主机名 ${H}${h}${N}: " a </dev/tty
+  a=$(bs "$a")
   [ "$a" = "$h" ] && return 0
   echo "  主机名不符，已取消"; return 1
 }
@@ -260,20 +274,36 @@ set_key() {  # set_key <键> <值>：写进 env.conf；用单引号原样保存�
   rm -f "$tmp"
 }
 
-fill_key() {  # fill_key <键>：显示说明，读一个值写进 env.conf；回车跳过（返回 1）
-  local k=$1 v p help
+fill_key() {  # fill_key <键>：显示说明和当前值，读一个值写进 env.conf；回车保留当前值 / 跳过
+  local k=$1 v p help cur show keep
   printf '\n%s── %s ──%s\n' "$H" "$k" "$N"
   help=$(key_help "$k")
   if [ -n "$help" ]; then printf '%s\n' "$help" | sed 's/^/  /'
   else printf '  %s（没有说明，见仓库 config/env.example.conf）%s\n' "$D" "$N"; fi
-  if is_secret "$k"; then
-    read -r -s -p "  填写（输入不显示，回车跳过）: " v </dev/tty; echo
-  else
-    read -r -p "  填写（回车跳过）: " v </dev/tty
+  # 模板里带默认值的键（如 MYSQL_DEFAULTS_FILE=/root/.my.cnf）补进来时已经有值：
+  # 摆出来让人看一眼，回车保留，而不是悄悄当成「填好了」
+  cur=$(env_get "$k")
+  keep="回车跳过"
+  if [ -n "$cur" ]; then
+    show=$cur; is_secret "$k" && show="${cur:0:4}***"
+    printf '  当前：%s%s%s（模板默认值或之前填的）\n' "$B" "$show" "$N"
+    keep="回车保留当前值"
   fi
-  [ -n "$v" ] || { printf '  %s已跳过%s\n' "$D" "$N"; return 1; }
-  set_key "$k" "$v" || { note "  写入 $ENV_FILE 失败"; return 1; }
-  printf '  %s✓ 已保存%s\n' "$G" "$N"
+  if is_secret "$k"; then
+    read -r -s -p "  填写（输入不显示，$keep）: " v </dev/tty; echo
+  else
+    read -r -p "  填写（$keep）: " v </dev/tty
+  fi
+  v=$(bs "$v")
+  if [ -z "$v" ] && [ -n "$cur" ]; then
+    printf '  %s保留：%s%s\n' "$D" "$show" "$N"
+    v=$cur
+  elif [ -z "$v" ]; then
+    printf '  %s已跳过%s\n' "$D" "$N"; return 1
+  else
+    set_key "$k" "$v" || { note "  写入 $ENV_FILE 失败"; return 1; }
+    printf '  %s✓ 已保存%s\n' "$G" "$N"
+  fi
   # 路径类填错最常见：不拦，只提醒
   case "$k" in
     *_DIR|*_FILE|*_ROOT|*_DIRS|*_FILES)
@@ -304,8 +334,10 @@ cfg_guide() {  # 执行失败后：若是缺配置，就地逐项带着填。补
 
 cfg_fill_all() {  # 已装功能缺的配置一次问完
   local miss k n=0
-  opsget -c >/dev/null || return 1
+  # 先算缺哪些，再让 opsget -c 补键：-c 会顺手填上模板默认值，之后再算就「都齐了」，
+  # 人一项都没看到（测试机上 MYSQL_DEFAULTS_FILE 就这样被悄悄填成了不存在的路径）
   miss=$(installed_missing)
+  opsget -c >/dev/null || return 1
   if [ -z "$miss" ]; then
     printf '%s✓ 本机已装的功能需要的配置都填好了%s\n' "$G" "$N"
     printf '%s还没用过的功能，第一次执行时缺什么会当场问你%s\n' "$D" "$N"
@@ -934,7 +966,8 @@ upgrade_flow() {
   fi
   # 定时任务会在无人值守时用上新版：先手动跑一次，别让第一次运行发生在凌晨
   for p in "${remind[@]}"; do note "  定时任务在用，建议现在手动跑一次：$p"; done
-  rm -f "$UPD_CACHE"   # 结果已过时，下次打开菜单重新检查
+  rm -f "$UPD_CACHE"   # 结果已过时：马上在后台重查，头部别停在「还没检查」
+  start_update_check
   after=$(cksum < "$BIN_DIR/opsbox" 2>/dev/null)
   if [ -n "$after" ] && [ "$before" != "$after" ]; then
     note "菜单本身也更新了，重新载入…"; sleep 1
@@ -989,7 +1022,10 @@ upd_line() {  # 头部的「更新」一行；顺带设置 UPD_N
   fi
   [ -f "$UPD_CACHE" ] && IFS=$'\t' read -r ref ts st < "$UPD_CACHE"
   if [ -z "${ref:-}" ] || [ "$ref" != "$(cur_ref)" ]; then
-    [ -n "${OPSBOX_NO_CHECK:-}" ] || printf '  更新  %s还没检查%s\n' "$D" "$N"
+    # 没有这个 ref 的结果（刚更新完、中途换了固定版本）：就地补查，不停在「还没检查」
+    [ -n "${OPSBOX_NO_CHECK:-}" ] && return
+    start_update_check
+    printf '  更新  %s正在后台检查更新…（回车刷新）%s\n' "$D" "$N"
     return
   fi
   if [ "$st" = fail ]; then

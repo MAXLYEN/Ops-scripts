@@ -514,3 +514,36 @@ upd_cache() { cat /var/lib/ops-scripts/opsbox.updates 2>/dev/null; }
   drive opsbox "" q
   lacks "没有这个选项"
 }
+
+# ── 测试机第四轮 ─────────────────────────────────────────────
+@test "一键更新后立刻重新检查，头部不停在「还没检查」" {
+  two_outdated
+  opsbox --check-updates
+  unset OPSBOX_NO_CHECK
+  drive opsbox u y "" q
+  lacks "还没检查"
+}
+
+@test "逐项填写：模板有默认值的项也列出来，显示默认值，回车保留" {
+  stub ops/komari-metrics-check 0 MYSQL_DEFAULTS_FILE
+  opsget -i ops/komari-metrics-check >/dev/null
+  env_conf "# 只有说明头"
+  drive opsbox 9 4 "" 1 "" "" 0 q
+  has "还有 1 项没填"
+  has "当前：/root/.my.cnf"
+  has "/root/.my.cnf 现在不存在"
+  lacks "都填好了"
+  grep -q '^MYSQL_DEFAULTS_FILE="/root/.my.cnf"' /etc/ops-scripts/env.conf
+}
+
+@test "退格键：终端发来的 ^H / DEL 按删除处理" {
+  drive opsbox $'3\b' $'x\x7f?' 0 q
+  lacks "没有这个选项"
+  has "按要办的事找"
+}
+
+@test "退格键：填配置值时不会把 ^H 存进文件" {
+  stub ops/preflight-backup 0 BACKUP_DIRS
+  drive opsbox 1 2 "" y $'/bakx\b' "" 0 q
+  grep -qx "BACKUP_DIRS='/bak'" /etc/ops-scripts/env.conf
+}
