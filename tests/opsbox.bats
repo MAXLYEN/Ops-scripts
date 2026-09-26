@@ -216,7 +216,7 @@ exit 0
 # ── 向导 ────────────────────────────────────────────────────
 @test "初始化向导：回车执行下一步并记住进度，头部提示下一步" {
   stub init/00-precheck 0
-  drive opsbox 6 "" "" "" 0 "" q
+  drive opsbox 6 "" "" y "" 0 "" q
   calls_are "init/00-precheck"
   [[ "$(state)" == *"INIT_DONE=00"* ]]
   drive opsbox q
@@ -225,13 +225,13 @@ exit 0
 
 @test "初始化向导：阶段 03 主机名不符就不执行" {
   stub init/03-ssh-firewall 0
-  drive opsbox 6 "" 03 wrong-host "" 0 "" q
+  drive opsbox 6 "" 03 y wrong-host "" 0 "" q
   [ -z "$(calls)" ]
 }
 
 @test "初始化向导：阶段 03 过两道确认后执行，并记下待重启" {
   stub init/03-ssh-firewall 0
-  drive opsbox 6 "" 03 ops-test yes n "" 0 "" q
+  drive opsbox 6 "" 03 y ops-test yes n "" 0 "" q
   calls_are "init/03-ssh-firewall"
   [[ "$(state)" == *"INIT_BOOT="* ]]
   drive opsbox q
@@ -536,14 +536,36 @@ upd_cache() { cat /var/lib/ops-scripts/opsbox.updates 2>/dev/null; }
   grep -q '^MYSQL_DEFAULTS_FILE="/root/.my.cnf"' /etc/ops-scripts/env.conf
 }
 
-@test "退格键：终端发来的 ^H / DEL 按删除处理" {
+# ── 测试机第五轮：屏幕上显示「1^H^H^H」，实际内容却是空，回车触发了初始化阶段 00 ──
+# 终端的退格键发 ^H、tty 认的删除键是 DEL 时，内核把 ^H 原样回显。事后在程序里把它当删除，
+# 修的只是内容，屏幕照样是一串 ^H —— 看到的和实际输入的对不上，才会误触发。
+# 改成 read -e（bash 自带的行编辑）：两种删除键都真的删掉字符，看到什么就是什么。
+
+@test "退格键：屏幕上不再出现 ^H，两种删除键（^H / DEL）都真正删掉字符" {
   drive opsbox $'3\b' $'x\x7f?' 0 q
+  lacks "^H"
+  lacks "^?"
   lacks "没有这个选项"
   has "按要办的事找"
 }
 
-@test "退格键：填配置值时不会把 ^H 存进文件" {
+@test "向导：选了阶段不确认就不执行" {
+  stub init/00-precheck 0
+  drive opsbox 6 "" "" n 0 "" q
+  has "执行阶段 00"
+  [ -z "$(calls)" ]
+}
+
+@test "向导：输入删光后回车也只是「选中下一步」，仍要确认才执行" {
+  stub init/00-precheck 0
+  drive opsbox 6 "" $'1\b\b\b' n 0 "" q
+  has "执行阶段 00"
+  [ -z "$(calls)" ]
+}
+
+@test "填配置值：删除键真正删掉字符，文件里不会有控制字符" {
   stub ops/preflight-backup 0 BACKUP_DIRS
   drive opsbox 1 2 "" y $'/bakx\b' "" 0 q
   grep -qx "BACKUP_DIRS='/bak'" /etc/ops-scripts/env.conf
+  lacks "^H"
 }

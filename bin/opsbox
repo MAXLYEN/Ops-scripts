@@ -142,7 +142,8 @@ note() { printf '%s%s%s\n' "$Y" "$*" "$N"; }
 # 认不出就只能默默刷新，看起来像「按了没反应」—— 真机上就这样丢过一次按键
 FW='０１２３４５６７８９ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ？'
 HW='0123456789abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz?'
-# 终端的退格键可能发 ^H 而 stty 认的是 DEL（或反过来），read 就把它当普通字符收进来：
+# 终端的退格键可能发 ^H 而 stty 认的是 DEL（或反过来）。菜单的输入都用 read -e（行编辑，两种都认）；
+# 这里是兜底：不回显的密码输入用不了行编辑，退格仍会当普通字符收进来。原先的症状：
 # 「输 3 再删掉」变成认不出的选项，填配置时更会把 ^H 存进文件。所有输入都先过这一道
 bs() {  # bs <输入>：^H / DEL 按删除处理，删掉它前面那个字符
   local s=$1 out="" c i
@@ -171,21 +172,22 @@ ask_choice() {  # ask_choice <提示> [默认值]：选项用的 ask，结果做
 ask() {  # ask <提示> [默认值]；结果放在 ANS
   local p=$1
   [ -n "${2:-}" ] && p="$p [$2]"
-  read -r -p "$p: " ANS </dev/tty || ANS=""
+  read -e -r -p "$p: " ANS </dev/tty || ANS=""
   ANS=$(bs "$ANS")
   [ -n "$ANS" ] || ANS=${2:-}
 }
 confirm() {  # confirm <问题> [y|n，默认 n]
   local a def=${2:-n} hint='[y/N]'
   [ "$def" = y ] && hint='[Y/n]'
-  read -r -p "$1 $hint " a </dev/tty || a=""
+  read -e -r -p "$1 $hint " a </dev/tty || a=""
   a=$(norm "$a")
   case "${a:-$def}" in y|yes) return 0 ;; *) return 1 ;; esac
 }
 gate_host() {  # 高危操作手输主机名：防止在错的机器上顺手回车
   local h a; h=$(hostname)
   printf '\n%s⚠ 高危：%s%s\n' "$R" "$1" "$N"
-  read -r -p "  确认在这台机器上执行，请输入主机名 ${H}${h}${N}: " a </dev/tty
+  # 提示里的颜色码要用 \001 \002 包起来，行编辑才算得对提示宽度
+  read -e -r -p "  确认在这台机器上执行，请输入主机名 "$'\001'"${H}"$'\002'"${h}"$'\001'"${N}"$'\002'": " a </dev/tty
   a=$(bs "$a")
   [ "$a" = "$h" ] && return 0
   echo "  主机名不符，已取消"; return 1
@@ -292,7 +294,7 @@ fill_key() {  # fill_key <键>：显示说明和当前值，读一个值写进 e
   if is_secret "$k"; then
     read -r -s -p "  填写（输入不显示，$keep）: " v </dev/tty; echo
   else
-    read -r -p "  填写（$keep）: " v </dev/tty
+    read -e -r -p "  填写（$keep）: " v </dev/tty
   fi
   v=$(bs "$v")
   if [ -z "$v" ] && [ -n "$cur" ]; then
@@ -766,7 +768,7 @@ do_wizard() {
     printf '  %s阶段 03 之前：先另开一个 SSH 窗口连着，并确认带外控制台（VNC）能进%s\n\n' "$Y" "$N"
     printf '  回车 执行下一步%s   输入编号 单独执行该阶段   r 重置进度   0 返回\n' "${next:+ $next}"
     show_msg
-    read -r -p "请选择 > " sel </dev/tty || return
+    read -e -r -p "请选择 > " sel </dev/tty || return
     sel=$(norm "$sel")
     case "$sel" in
       0|q) return ;;
@@ -776,6 +778,11 @@ do_wizard() {
     esac
     [[ "$sel" =~ ^0?[0-4]$ ]] || { bad_choice "$sel"; continue; }
     sel=$(printf '%02d' "$((10#$sel))")
+    # 各阶段都会动系统（00 就会 apt upgrade）：回车只是「选中」，执行要明确说 y。
+    # 测试机上就发生过：屏幕上一串 ^H、实际内容是空，回车直接跑了阶段 00
+    t=$(sed -n "s/^$sel|//p" <<<"$INIT_STAGES")
+    if [ "$sel" = 04 ]; then confirm "执行阶段 $sel（$t，只读检查）？" n || continue
+    else confirm "执行阶段 $sel（$t）？会改动系统" n || continue; fi
     init_stage "$sel"
     pause
   done
@@ -877,7 +884,7 @@ do_migrate() {
     printf '\n  %s按编号从小到大做；每一步的执行机器和产物见 migrate/README.md%s\n' "$D" "$N"
     printf '  输入编号执行   c 切换角色   0 返回\n'
     show_msg
-    read -r -p "请选择 > " sel </dev/tty || return
+    read -e -r -p "请选择 > " sel </dev/tty || return
     sel=$(norm "$sel")
     case "$sel" in
       0|q|'') return ;;
@@ -1121,7 +1128,7 @@ open_item() {  # 先给说明卡片，再执行
        [ -n "$a" ] && printf '  %s%s%s缺 %s（执行时会引导补齐）%s\n' "$D" "$(pad 本机配置 12)" "$N$Y" "$a" "$N" ;;
   esac
   echo
-  read -r -p "回车开始，0 返回 > " a </dev/tty || return
+  read -e -r -p "回车开始，0 返回 > " a </dev/tty || return
   a=$(norm "$a")
   case "$a" in 0|q) return ;; esac
   if declare -F "do_$1" >/dev/null; then "do_$1"; else run_ops "$I_PATHS"; fi
@@ -1145,7 +1152,7 @@ cat_menu() {  # cat_menu <分类ID> <分类名>
     done
     printf '\n  [0] 返回\n'
     show_msg
-    read -r -p "请选择 > " sel </dev/tty || return
+    read -e -r -p "请选择 > " sel </dev/tty || return
     sel=$(norm "$sel")
     case "$sel" in 0|'') return ;; q) exit 0 ;; esac
     if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#keys[@]} ]; then
@@ -1168,7 +1175,7 @@ scene_menu() {
     done <<<"$SCENES"
     printf '\n  [0] 返回\n'
     show_msg
-    read -r -p "请选择 > " sel </dev/tty || return
+    read -e -r -p "请选择 > " sel </dev/tty || return
     sel=$(norm "$sel")
     case "$sel" in 0|'') return ;; q) exit 0 ;; esac
     if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#keys[@]} ]; then
@@ -1252,7 +1259,7 @@ main_menu() {
     [ "${UPD_N:-0}" -gt 0 ] && printf '  %s[u] 一键更新（%s 个）%s\n' "$Y" "$UPD_N" "$N"
     printf '  [q] 退出\n\n'
     show_msg
-    read -r -p "请选择 > " sel </dev/tty || exit 0
+    read -e -r -p "请选择 > " sel </dev/tty || exit 0
     sel=$(norm "$sel")
     case "$sel" in
       q|0) exit 0 ;;
