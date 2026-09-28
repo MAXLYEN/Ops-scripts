@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.2.0
-# 1.2.0: 新增备份包公共函数：rootfs 采集与还原清单（bk_*）、MySQL 全账号与业务库导出、镜像 digest、GFS 分级保留。
+# VERSION: 1.2.1
+# 1.2.1: 备份采集 /usr/local/bin 时跳过与系统命令同名的文件（放回会遮住真命令）。
 
 set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 # shellcheck disable=SC2034  # 供调用方查询公共库版本
-OPS_COMMON_VERSION="1.2.0"
+OPS_COMMON_VERSION="1.2.1"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
@@ -399,10 +399,16 @@ bk_link() {
 
 # /usr/local/bin 逐个文件收：rclone 这类几十 MB 的静态二进制不进包（记进
 # rootfs-skipped.txt，换机时重装），脚本全收。不用 dir：整棵替换会把没收的二进制删掉。
+# 与系统目录同名的也不收：/usr/local/bin 在 PATH 里排在前面，放回新机会遮住
+# 真的命令（例如调试时放的 docker 桩）。记进 rootfs-skipped.txt，确实要的手动放回。
 bk_usr_local_bin() {
-  local f max=$((5 * 1024 * 1024))
+  local f d n max=$((5 * 1024 * 1024))
   for f in /usr/local/bin/*; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
+    n=${f##*/}
+    for d in /usr/bin /bin /usr/sbin /sbin; do
+      [ -e "$d/$n" ] && { bk_skip "$f" "与 $d/$n 同名，放回会遮住系统命令"; continue 2; }
+    done
     if [ "$(stat -c %s "$f")" -gt "$max" ]; then
       bk_skip "$f" "超过 5MB 的二进制（$(du -h "$f" | cut -f1)），换机时重新安装"
       continue

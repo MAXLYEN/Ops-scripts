@@ -198,6 +198,18 @@ PY
   rm -rf /tmp/bk-live
 }
 
+@test "/usr/local/bin：与系统命令同名的不收（会遮住真命令），自装脚本照收" {
+  printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/sleep
+  printf '#!/bin/sh\necho hi\n' > /usr/local/bin/bk-own-tool
+  bk_init "$T/pkg"
+  bk_usr_local_bin
+  [ ! -e "$T/pkg/rootfs/usr/local/bin/sleep" ]
+  grep -qP '^/usr/local/bin/sleep\t与 /(usr/)?bin/sleep 同名' "$T/pkg/system/rootfs-skipped.txt"
+  [ -f "$T/pkg/rootfs/usr/local/bin/bk-own-tool" ]
+  grep -qP '^/usr/local/bin/bk-own-tool\t\d+\troot:root\tfile$' "$T/pkg/restore-manifest.tsv"
+  rm -f /usr/local/bin/sleep /usr/local/bin/bk-own-tool
+}
+
 @test "systemd：启用的记 systemd-unit，未启用的记 file，mask 的另记，软链接不收" {
   S=/etc/systemd/system; mkdir -p $S/multi-user.target.wants $S/foo-tunnel.service.d
   printf '[Service]\nExecStart=/bin/true\n' > $S/foo-tunnel.service

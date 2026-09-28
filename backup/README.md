@@ -82,7 +82,7 @@ new-api 包只新增 `images.tsv`，没有 rootfs 与还原清单（见下节「
 
 | 类别 | 内容 | 说明 |
 | --- | --- | --- |
-| 工具箱 | `/etc/ops-scripts`（`env.conf`、版本固定 `ref`）、`/usr/local/lib/ops-common.sh`、`/usr/local/bin` 下 5MB 以内的文件 | 大的二进制（如 rclone）记进 `rootfs-skipped.txt`，换机时重装 |
+| 工具箱 | `/etc/ops-scripts`（`env.conf`、版本固定 `ref`）、`/usr/local/lib/ops-common.sh`、`/usr/local/bin` 下 5MB 以内的文件 | 大的二进制（如 rclone）、与系统命令同名的文件（放回会遮住真命令）记进 `rootfs-skipped.txt` |
 | 凭据 | `MYSQL_DEFAULTS_FILE`、`XBOARD_DB_PASS_FILE`、`/root/.config/rclone`、`/etc/msmtprc` | 包本身 AES 加密、文件名也加密 |
 | SSH | `sshd_config` 与 `sshd_config.d`、主机密钥 `ssh_host_*`、`/root/.ssh`（私钥、authorized_keys、known_hosts、config）、`/root/.vps-hosts.txt`、`/root/.ssh_base.txt` | 带主机密钥：新机沿用原指纹，客户端不报主机变更；隧道与 new-api 拉取用的私钥也在里面 |
 | 防火墙与系统 | `/etc/ufw`、`/etc/default/ufw`、`/etc/fail2ban`、`/etc/sysctl.conf`、`/etc/sysctl.d`、`/etc/modules-load.d`、`/etc/udev/rules.d`、`/etc/gai.conf`、`/etc/security/limits.d`、journald / timesyncd 的 `.conf.d`、`/etc/docker/daemon.json`、`/etc/cron.d`、`/etc/logrotate.d`、`/etc/my.cnf` | 覆盖 init/ 写过的系统文件 |
