@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # backup/xboard-fullbackup.sh — 生成 Xboard 加密备份包并上传云端
-# VERSION: 2.3.3
-# 2.3.3: option 文件的密码加引号转义（含 # 时原先会被截断）；未设静态资源站时不再把整个 wwwroot 收进包。
+# VERSION: 2.4.0
+# 2.4.0: 新增 rootfs/ 与 restore-manifest.tsv（整个 Xboard 目录、系统配置、crontab、全部 MySQL 账号与业务库、镜像 digest），包内先打 tar 保留属主，改为 GFS 分级保留，防重入锁。
 # ENV-REQUIRED: SVC_XBOARD_DIR XBOARD_DB_NAME XBOARD_DB_USER XBOARD_DB_PASS_FILE XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH RCLONE_REMOTES BACKUP_PASS_FILE|VW_PASS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
 # 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
 
 set -uo pipefail
+
+# 公共库：rootfs 采集、还原清单、分级保留。opsget -i 安装本脚本时会同步到同一版本。
+# 先加载，下面本脚本自己的 log / warn 会覆盖库里的同名函数。
+LIB_OK=0
+# shellcheck disable=SC1091
+{ . /usr/local/lib/ops-common.sh || . "$(dirname "$0")/../lib/common.sh"; } 2>/dev/null && LIB_OK=1
 
 # 配置（全部来自 env.conf）
 ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
@@ -32,6 +38,10 @@ BACKUP_PASS_FILE="${BACKUP_PASS_FILE:-${VW_PASS_FILE:-}}"
 req BACKUP_PASS_FILE
 
 BACKUP_DIR="$XBOARD_BACKUP_DIR"
+# 分级保留：全留 / 每天一份 / 每周一份 / 每月一份直到上限（本地与云端上限不同）
+KEEP_ALL_DAYS="${BACKUP_KEEP_ALL_DAYS:-7}"
+KEEP_DAILY_DAYS="${BACKUP_KEEP_DAILY_DAYS:-30}"
+KEEP_WEEKLY_DAYS="${BACKUP_KEEP_WEEKLY_DAYS:-90}"
 LOCAL_KEEP_DAYS="${BACKUP_KEEP_LOCAL_DAYS:-180}"
 CLOUD_KEEP_DAYS="${BACKUP_KEEP_CLOUD_DAYS:-400}"
 RCLONE_TARGETS=(); for r in $RCLONE_REMOTES; do RCLONE_TARGETS+=("${r}:${XBOARD_REMOTE_PATH}"); done
@@ -115,9 +125,17 @@ hb() {
         || printf '[%s] [WARN] 心跳上报失败%s\n' "$(date -u '+%F %T')" "${1:-}" >&2
 }
 
+# 防重入：每 6 小时一次时，上一轮若因上传慢还没结束，两轮会同时清理同一批包。
+# 撞上就直接退出、不报心跳：偶尔一次无妨，一直撞上时由心跳监控发现「没按时完成」。
+mkdir -p /run/lock
+exec 9>/run/lock/xboard-fullbackup.lock || fail "无法创建锁文件 /run/lock/xboard-fullbackup.lock"
+flock -n 9 || { log "上一轮备份还在运行，本次跳过"; exit 0; }
+
 # 前置检查
 log "=== Xboard 备份开始 ==="
 hb /start
+[ "$LIB_OK" -eq 1 ] && declare -F bk_gfs_select >/dev/null \
+    || fail "公共库缺失或版本过旧（需要 1.2.0 起，含 bk_* 函数），先运行 opsget -u"
 
 need mysqldump
 need 7z
@@ -261,6 +279,30 @@ mkdir -p "$WORK/deploy"
 # 配置本身也进包：换机器时照着它填（里面没有密码，只有路径与名称）
 cp -a "$ENV_FILE" "$WORK/deploy/env.conf" 2>/dev/null
 
+# 4b. rootfs 与还原清单：新机按 restore-manifest.tsv 自动放回，约定见 backup/README.md「包结构」。
+# 上面按旧布局收的内容照旧保留；rootfs 里重复的部分 7z 固实压缩时只存一份。
+log "--- 收集 rootfs 与还原清单 ---"
+bk_init "$WORK"
+bk_row "db/${DB_NAME}.sql" - - mysql-db
+# 整个 Xboard 目录（含 git 检出、.env、compose、容器数据、主题、插件）原样放回，
+# 不用再 git clone 一个可能更新的版本。框架日志不收。
+bk_dir "$XBOARD_DIR" "$XBOARD_DIR/storage/logs" || fail "Xboard 目录收进 rootfs 失败"
+for f in compose.yaml compose.yml docker-compose.yml docker-compose.yaml; do
+    [ -f "$XBOARD_DIR/$f" ] || continue
+    bk_row "$XBOARD_DIR/$f" "$(stat -c %a "$XBOARD_DIR/$f")" "$(bk_owner "$XBOARD_DIR/$f")" file
+    bk_row "$XBOARD_DIR" - - compose-project
+done
+bk_opt /root/deploy
+bk_opt /etc/xboard-toolkit.conf
+bk_system
+if bk_mysql_ready; then
+    bk_mysql_users db/mysql-users.sql
+    bk_mysql_dbs "$DB_NAME"
+fi
+bk_compose_projects
+bk_images "$WORK/images.tsv"
+log "rootfs $(du -sh "$WORK/rootfs" | cut -f1)，还原清单 $(grep -vc '^#' "$BK_MANIFEST") 项"
+
 # 5. 清单
 cat > "$WORK/MANIFEST.txt" <<EOF
 Xboard 备份包
@@ -287,12 +329,18 @@ Xboard 目录: $XBOARD_DIR
   nginx/cert             各站点的证书
   nginx/assets-site      LOGO / 用户条款静态文件
   deploy/                机器清单、中转路径表、工具箱配置、env.conf
+  rootfs/                原样放回新机的文件（整个 Xboard 目录、系统配置、SSH、面板等）
+  restore-manifest.tsv   还原清单：path mode owner kind，还原脚本据此自动放回
+  images.tsv             每个容器的镜像与 RepoDigest，还原时按 digest 拉取
+  db/mysql-users.sql     全部 MySQL 账号（带密码哈希）与授权
+  system/crontab.txt     root 的 crontab
+  system/rootfs-skipped.txt  没进包的项与原因（如解密密码）
 
 不在包里（可重建，无需备份）
   · Redis                纯缓存
   · 各节点的 xboard-node 配置    面板里重装即可，machine token 存在数据库里
-  · Docker 镜像          docker compose pull 拉回来
-  · **面板的证书续期记录**       恢复后必须逐站重新申请，见 RESTORE.md
+  · Docker 镜像          按 images.tsv 里的 digest 拉回来
+  · 解密密码             备份包的密码不进包，另行保管
 
 恢复要点
   1. APP_KEY 必须和数据库配套，用错会导致加密字段全部解不开
@@ -308,9 +356,17 @@ cat > "$WORK/RESTORE.md" <<'RESTOREEOF'
 > 顺序不能乱。完整版见《Xboard备份与恢复》，此处是灾难现场自足版。
 > `deploy/env.conf` 里是本机的路径与名称配置，新机照着填能省很多回忆。
 
+## 自动还原
+`restore-manifest.tsv` 列出了原样放回新机的全部内容（文件在 `rootfs/<原路径>`），
+还原脚本 `migrate/restore-from-backup.sh` 按它放回配置、建账号、导入库、按
+`images.tsv` 里的 digest 拉镜像并启动 compose 项目、启用 systemd 单元、导入 crontab。
+没进包的东西和原因见 `system/rootfs-skipped.txt`；`system/ref/` 里的 fstab、IP 等
+只作参考，不会自动放回。下面的手动步骤在没有还原脚本、或需要逐项核对时使用。
+
 ## 0. 解包
 
     7z x xboard_YYYYMMDD_HHMMSS.7z
+    tar xzf payload.tar.gz        # 2.4.0 起内容在这一层里（保留属主），路径与旧版相同
     cat MANIFEST.txt
 
 ## 1. 建库建账号
@@ -345,9 +401,10 @@ ufw 要放行容器到宿主机：
 ⚠️ 绝对不要跑 `xboard:install`。它会重新生成 APP_KEY 并清空数据库，
    而 APP_KEY 一旦和数据库对不上，加密字段全部解不开。
 
-⚠️ 镜像别重新 pull。compose 里是 `:latest`，重拉可能拿到更新的版本，
+⚠️ 镜像别按标签重新 pull。compose 里是 `:latest`，重拉可能拿到更新的版本，
    而 Xboard 启动时会跑数据库 migration，把按旧版结构恢复的库改掉。
-   原机还在的话用 `docker save` 把镜像搬过去，版本锁死。
+   按 `images.tsv` 里的 digest 拉（`docker pull <repo>@sha256:...` 后
+   `docker tag` 成 compose 里写的名字）；原机还在的话也可以 `docker save` 搬过去。
 
 ## 4. 起容器 + Redis 属主修复
 
@@ -376,9 +433,12 @@ ufw 要放行容器到宿主机：
 面板里需要重新「添加站点」，否则面板认不得这些配置。
 DNS 要先改到新 IP，否则证书续期会失败。
 
-⚠️ **证书文件能用 ≠ 会自动续期。** 面板的续期记录**不在这个包里**，
-恢复后必须**逐站重新申请一次**（算法选 EC256），否则到期那天
-面板、订阅、静态站会同时失效。
+按还原清单自动还原时，面板的 `vhost/`、`config/`、`data/` 整个放回，
+站点记录与续期记录都在其中。
+
+⚠️ **证书文件能用 ≠ 会自动续期。** 面板目录整体还原这条路**尚未在真机验证过**：
+还原后在面板里逐站确认续期任务还在；不在就**逐站重新申请一次**（算法选 EC256），
+否则到期那天面板、订阅、静态站会同时失效。
 
 ## 7. 部署元数据
 
@@ -414,9 +474,17 @@ sed -i "s|{{DB_NAME}}|${DB_NAME}|g; s|{{DB_USER}}|${DB_USER}|g;
 # 6. 打包加密
 log "--- 7z 打包（AES-256，文件名一并加密）---"
 
+# 先打成 tar 再加密：7z 不记文件属主，rootfs 里容器数据（redis 等）的属主会全变成 root。
+# 包内路径与旧版一致，只是多解一层 payload.tar.gz；清单和还原说明在外层也放一份。
+PACK="$BACKUP_DIR/.pack_${STAMP}"
+mkdir -p "$PACK" || fail "无法创建 $PACK"
+trap 'rm -rf "$WORK" "$PACK"' EXIT
+tar czf "$PACK/payload.tar.gz" -C "$WORK" . || fail "tar 打包失败"
+cp "$WORK/MANIFEST.txt" "$WORK/RESTORE.md" "$PACK/"
 7z a -t7z -m0=lzma2 -mx=6 -mhe=on -p"$BACKUP_PASS" \
-     "$ARCHIVE" "$WORK"/* >/dev/null
+     "$ARCHIVE" "$PACK"/* >/dev/null
 SEVEN_RC=$?
+rm -rf "$PACK"
 [ "$SEVEN_RC" -eq 0 ] || fail "7z 打包失败，退出码 $SEVEN_RC"
 
 log "--- 自检 ---"
@@ -431,6 +499,7 @@ log "包体: $ARCHIVE ($(numfmt --to=iec "$ARCHIVE_SIZE"))"
 log "校验和: $(cut -d' ' -f1 < "${ARCHIVE}.sha256")"
 
 # 7. 上传
+UPLOAD_FAIL=0
 if command -v rclone >/dev/null 2>&1; then
     for remote in "${RCLONE_TARGETS[@]}"; do
         log "--- 上传到 $remote ---"
@@ -441,26 +510,25 @@ if command -v rclone >/dev/null 2>&1; then
             if rclone check "$ARCHIVE" "$remote" --size-only >/dev/null 2>&1; then
                 log "$remote 校验通过"
             else
-                warn "$remote 上传后校验未通过"
+                warn "$remote 上传后校验未通过"; UPLOAD_FAIL=1
             fi
         else
-            warn "$remote 上传失败"
+            warn "$remote 上传失败"; UPLOAD_FAIL=1
         fi
     done
 else
-    warn "未安装 rclone，跳过云端上传（备份只存在于本机）"
+    warn "未安装 rclone，跳过云端上传（备份只存在于本机）"; UPLOAD_FAIL=1
 fi
 
-# 8. 保留策略
-log "--- 清理过期备份 ---"
-
-DELETED=$(find "$BACKUP_DIR" -name 'xboard_*.7z*' -mtime "+$LOCAL_KEEP_DAYS" -print -delete | wc -l)
-[ "$DELETED" -gt 0 ] && log "本地清理 $DELETED 个（保留 $LOCAL_KEEP_DAYS 天）"
-
-if command -v rclone >/dev/null 2>&1; then
+# 8. 分级保留（GFS，按文件名里的时间戳）。本次上传有失败就一个都不删：
+# 这时旧包可能是某个远端上唯一完好的那份。致命错误在前面已经 fail 退出，走不到这里。
+log "--- 分级保留：全留 ${KEEP_ALL_DAYS} 天，每天一份至 ${KEEP_DAILY_DAYS} 天，每周一份至 ${KEEP_WEEKLY_DAYS} 天，每月一份至上限 ---"
+if [ "$UPLOAD_FAIL" -ne 0 ]; then
+    log "本次上传有失败，跳过清理"
+else
+    bk_prune_local "$BACKUP_DIR" xboard "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$LOCAL_KEEP_DAYS"
     for remote in "${RCLONE_TARGETS[@]}"; do
-        rclone delete "$remote" --min-age "${CLOUD_KEEP_DAYS}d" --include 'xboard_*.7z*' 2>/dev/null \
-            || warn "$remote 清理过期文件失败"
+        bk_prune_remote "$remote" xboard "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$CLOUD_KEEP_DAYS"
     done
 fi
 

@@ -2,6 +2,12 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-09-28：备份分级保留与完整性
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `env.example.conf` | 1.8.0 → 1.9.0 | 新增分级保留档位 `BACKUP_KEEP_ALL_DAYS`、`BACKUP_KEEP_DAILY_DAYS`、`BACKUP_KEEP_WEEKLY_DAYS`、`NEWAPI_KEEP_ALL_DAYS`，模板里补上 new-api 早已读取的 `NEWAPI_LOCAL_KEEP_DAYS`、`NEWAPI_CLOUD_KEEP_DAYS`；新增 `BACKUP_SKIP_DBS`、`BACKUP_IGNORE_CONTAINERS`。`MYSQL_DEFAULTS_FILE` 注明备份脚本也会用它 |
+
 ## 2026-09-25：/proc hidepid
 
 | 文件 | 原版本 → 当前版本 | 变更 |

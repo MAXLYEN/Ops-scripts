@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # backup/newapi-fullbackup.sh — 从汇总机拉取 new-api 数据，生成一致性快照并加密上传
-# VERSION: 1.0.4
-# 1.0.4: umask 077，暂存区与成品包不再对其他用户可读；webhook 的 JSON 正确转义。
+# VERSION: 1.1.0
+# 1.1.0: 改为 GFS 分级保留（每小时一次时全留 2 天），防重入锁，包内新增 images.tsv（镜像 digest）。
 # ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_BAK_DIR BACKUP_PASS_FILE MAIL_TO
 # 定时任务调用已安装的本地脚本；SQLite 使用在线备份生成一致性快照。
 
@@ -10,12 +10,22 @@ set -o pipefail
 # 文件是 644。之后新建的目录一律 700、文件 600。
 umask 077
 
+# 公共库：分级保留。opsget -i 安装本脚本时会同步到同一版本。
+# 先加载，下面本脚本自己的 log / warn / finish 等会覆盖库里的同名函数。
+LIB_OK=0
+# shellcheck disable=SC1091
+{ . /usr/local/lib/ops-common.sh || . "$(dirname "$0")/../lib/common.sh"; } 2>/dev/null && LIB_OK=1
+
 # 配置载入
 ENV_FILE=/etc/ops-scripts/env.conf
 [ -r "$ENV_FILE" ] && . "$ENV_FILE"
 
 TS="$(date -u +%Y%m%d_%H%M%S)"
 LOG="${NEWAPI_BACKUP_LOG:-/var/log/newapi-fullbackup.log}"
+# 分级保留：每小时一次，全留期短一些；日 / 周档与 vw、xboard 共用
+KEEP_ALL_DAYS="${NEWAPI_KEEP_ALL_DAYS:-2}"
+KEEP_DAILY_DAYS="${BACKUP_KEEP_DAILY_DAYS:-30}"
+KEEP_WEEKLY_DAYS="${BACKUP_KEEP_WEEKLY_DAYS:-90}"
 LOCAL_KEEP_DAYS="${NEWAPI_LOCAL_KEEP_DAYS:-180}"
 CLOUD_KEEP_DAYS="${NEWAPI_CLOUD_KEEP_DAYS:-400}"
 CLOUD_DIR="${NEWAPI_CLOUD_DIR:-Backup-NewAPI}"
@@ -93,8 +103,16 @@ require_env() {
   done
 }
 
+# 防重入：每小时一次，上一轮若因上传慢还没结束，两轮会同时清理同一批包。
+# 撞上就直接退出、不报心跳：偶尔一次无妨，一直撞上时由心跳监控发现「没按时完成」。
+mkdir -p /run/lock
+exec 9>/run/lock/newapi-fullbackup.lock || { fail "无法创建锁文件 /run/lock/newapi-fullbackup.lock"; finish 1; }
+flock -n 9 || { log "上一轮备份还在运行，本次跳过"; exit 0; }
+
 hb /start
 log "===== new-api 备份开始 $TS ====="
+[ "$LIB_OK" -eq 1 ] && declare -F bk_gfs_select >/dev/null \
+  || { fail "公共库缺失或版本过旧（需要 1.2.0 起，含 bk_* 函数），先运行 opsget -u"; finish 1; }
 
 require_env NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_BAK_DIR BACKUP_PASS_FILE MAIL_TO
 
@@ -161,6 +179,14 @@ docker ps -a --filter name=${CONTAINER} --format '{{.Names}}\t{{.Image}}\t{{.Sta
 uname -a > "\$D/system/uname.txt" 2>/dev/null || true
 (. /etc/os-release 2>/dev/null && echo "\$PRETTY_NAME") > "\$D/system/os-release.txt" 2>/dev/null || true
 df -h "\$SRC" > "\$D/system/df.txt" 2>/dev/null || true
+# 镜像 digest：还原时按 digest 拉，不按可能已漂移的标签
+{
+  printf '# container\timage\trepo_digest\n'
+  img=\$(docker inspect -f '{{.Config.Image}}' ${CONTAINER} 2>/dev/null)
+  id=\$(docker inspect -f '{{.Image}}' ${CONTAINER} 2>/dev/null)
+  dig=\$(docker image inspect -f '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "\$id" 2>/dev/null)
+  printf '%s\t%s\t%s\n' ${CONTAINER} "\${img:--}" "\${dig:--}"
+} > "\$D/images.tsv"
 
 tar czf - -C "\$D" . || exit 1
 rm -rf "\$D"
@@ -332,16 +358,19 @@ for R in $RCLONE_REMOTES; do
 done
 [ "$UPLOADED" -eq 0 ] && fail "所有云端目标都没上传成功"
 
-# 保留策略
-log "清理本地超过 ${LOCAL_KEEP_DAYS} 天的包"
-find "$NEWAPI_BAK_DIR" -maxdepth 1 -name 'newapi_*.7z*' -mtime "+${LOCAL_KEEP_DAYS}" \
-  -print -delete >>"$LOG" 2>&1
-
-log "清理云端超过 ${CLOUD_KEEP_DAYS} 天的包"
-for R in $RCLONE_REMOTES; do
-  rclone delete "${R}:/${CLOUD_DIR}" --min-age "${CLOUD_KEEP_DAYS}d" \
-    --include 'newapi_*' >>"$LOG" 2>&1 || warn "${R} 云端清理失败"
-done
+# 分级保留（GFS，按文件名里的时间戳）。有任何远端没传成功就一个都不删：
+# 这时旧包可能是某个远端上唯一完好的那份。
+read -r -a REMOTE_LIST <<< "$RCLONE_REMOTES"
+NREMOTES=${#REMOTE_LIST[@]}
+if [ "$FAIL" -gt 0 ] || [ "$UPLOADED" -lt "$NREMOTES" ]; then
+  log "本次有失败（成功上传 ${UPLOADED}/${NREMOTES}），跳过清理"
+else
+  log "分级保留：全留 ${KEEP_ALL_DAYS} 天，每天一份至 ${KEEP_DAILY_DAYS} 天，每周一份至 ${KEEP_WEEKLY_DAYS} 天，每月一份至上限"
+  bk_prune_local "$NEWAPI_BAK_DIR" newapi "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$LOCAL_KEEP_DAYS"
+  for R in $RCLONE_REMOTES; do
+    bk_prune_remote "${R}:/${CLOUD_DIR}" newapi "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$CLOUD_KEEP_DAYS"
+  done
+fi
 
 log "汇总：包体 ${PKGSIZE} 字节，成功上传 ${UPLOADED} 处，WARN=${WARN} FAIL=${FAIL}"
 finish 0

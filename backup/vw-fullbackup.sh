@@ -1,7 +1,7 @@
 #!/bin/bash
 # backup/vw-fullbackup.sh — 备份 Vaultwarden、Komari、SubConverter 与系统配置
-# VERSION: 2.4.0
-# 2.4.0: 包内新增 /etc/msmtprc 与 new-api 隧道 systemd 单元，RESTORE.md 补对应还原步骤。
+# VERSION: 2.5.0
+# 2.5.0: 新增 rootfs/ 与 restore-manifest.tsv（系统配置、全部 MySQL 账号与业务库、镜像 digest），改为 GFS 分级保留，防重入锁。
 # ENV-REQUIRED: VW_BACKUP_DIR BACKUP_PASS_FILE|VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
 # 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
 
@@ -11,6 +11,12 @@ set -o pipefail
 # 本机任何用户（例如面板上以 www 运行的站点）都能读到。之后新建的目录一律 700、
 # 文件 600；成品 7z 也随之变为 600，不影响 root 执行的上传与还原。
 umask 077
+
+# 公共库：rootfs 采集、还原清单、分级保留。opsget -i 安装本脚本时会同步到同一版本。
+# 先加载，下面本脚本自己的 log / warn / die 会覆盖库里的同名函数。
+LIB_OK=0
+# shellcheck disable=SC1091
+{ . /usr/local/lib/ops-common.sh || . "$(dirname "$0")/../lib/common.sh"; } 2>/dev/null && LIB_OK=1
 
 # 配置（全部来自 env.conf，本文件不含任何域名/路径硬编码）
 ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
@@ -31,6 +37,10 @@ LOG_FILE="${VW_LOG_FILE:-/var/log/vw-fullbackup.log}"
 BACKUP_PASS_FILE="${BACKUP_PASS_FILE:-${VW_PASS_FILE:-}}"
 req BACKUP_PASS_FILE
 PASS_FILE="$BACKUP_PASS_FILE"
+# 分级保留：全留 / 每天一份 / 每周一份 / 每月一份直到上限（本地与云端上限不同）
+KEEP_ALL_DAYS="${BACKUP_KEEP_ALL_DAYS:-7}"
+KEEP_DAILY_DAYS="${BACKUP_KEEP_DAILY_DAYS:-30}"
+KEEP_WEEKLY_DAYS="${BACKUP_KEEP_WEEKLY_DAYS:-90}"
 KEEP_LOCAL_DAYS="${BACKUP_KEEP_LOCAL_DAYS:-180}"
 KEEP_CLOUD_DAYS="${BACKUP_KEEP_CLOUD_DAYS:-400}"
 # 远端由「远端名列表 × 目录名」组合，换云盘或改目录只动 env.conf
@@ -97,9 +107,17 @@ hb() {
         || echo "[$(date '+%F %T')] [WARN] 心跳上报失败${1:-}" >> "$LOG_FILE"
 }
 
+# 防重入：每 6 小时一次时，上一轮若因上传慢还没结束，两轮会同时清理同一批包。
+# 撞上就直接退出、不报心跳：偶尔一次无妨，一直撞上时由心跳监控发现「没按时完成」。
+mkdir -p /run/lock
+exec 9>/run/lock/vw-fullbackup.lock || die "无法创建锁文件 /run/lock/vw-fullbackup.lock"
+flock -n 9 || { log "上一轮备份还在运行，本次跳过"; exit 0; }
+
 # 前置检查
 log "========== 开始备份 ${NAME} =========="
 hb /start
+[ "$LIB_OK" -eq 1 ] && declare -F bk_gfs_select >/dev/null \
+    || die "公共库缺失或版本过旧（需要 1.2.0 起，含 bk_* 函数），先运行 opsget -u"
 need tar; need 7z; need rclone; need sqlite3
 [ -r "$PASS_FILE" ] || die "密码文件不存在或不可读: $PASS_FILE"
 PASS="$(head -n1 "$PASS_FILE")"
@@ -281,6 +299,44 @@ for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null); do
     } >> "$STAGE/system/docker/run-commands.sh" 2>/dev/null
 done
 
+# 5b. rootfs 与还原清单：新机按 restore-manifest.tsv 自动放回，约定见 backup/README.md「包结构」。
+# 上面按旧布局收的内容照旧保留（旧的还原步骤和工具还认它们），业务数据硬链接进
+# rootfs，tar 对硬链接只存一份，不增加包体积。
+log "收集 rootfs 与还原清单 ..."
+bk_init "$STAGE"
+# 公共库的 bk_mysql_* 读这两个变量
+# shellcheck disable=SC2034
+BK_MYSQL="$MYSQL_BIN"
+# shellcheck disable=SC2034
+BK_MYSQLDUMP="$MYSQLDUMP_BIN"
+[ -f "$STAGE/db/${DBNAME:-}.sql.gz" ] && bk_row "db/${DBNAME}.sql.gz" - - mysql-db
+bk_link "$VW_DIR/data" vaultwarden/data
+bk_link "$VW_DIR/vaultwarden.env" vaultwarden/vaultwarden.env
+bk_link "$VW_DIR/compose.yaml" vaultwarden/compose.yaml && bk_row "$VW_DIR" - - compose-project
+if [ -n "$KOMARI_DATA" ]; then
+    KOMARI_DIR="$(dirname "$KOMARI_DATA")"
+    bk_link "$KOMARI_DATA/komari.db" komari/komari.db sqlite
+    for d in plugin plugin-data; do bk_link "$KOMARI_DATA/$d" "komari/$d"; done
+    bk_link "$KOMARI_DIR/compose.yaml" komari/compose.yaml && bk_row "$KOMARI_DIR" - - compose-project
+fi
+[ -n "$KOMARI_EXTRA" ] && bk_link "$KOMARI_EXTRA/auto-discovery.json" komari/auto-discovery.json
+if [ -n "$SUBCONV_DIR" ] && bk_link "$SUBCONV_DIR" subconverter; then
+    for f in compose.yaml compose.yml docker-compose.yml docker-compose.yaml; do
+        [ -f "$SUBCONV_DIR/$f" ] || continue
+        bk_row "$SUBCONV_DIR/$f" "$(stat -c %a "$SUBCONV_DIR/$f")" "$(bk_owner "$SUBCONV_DIR/$f")" file
+        bk_row "$SUBCONV_DIR" - - compose-project
+    done
+fi
+bk_system
+# 全部 MySQL 账号（带密码哈希）与其余业务库。metrics 大库按方案只留本地、不进包。
+if bk_mysql_ready; then
+    bk_mysql_users db/mysql-users.sql
+    bk_mysql_dbs "${DBNAME:-}" "${METRICS_DB_NAME:-metrics}"
+fi
+bk_compose_projects
+bk_images "$STAGE/images.tsv"
+log "  ✓ rootfs $(du -sh "$STAGE/rootfs" | cut -f1)，还原清单 $(grep -vc '^#' "$BK_MANIFEST") 项"
+
 # 6. 清单与还原说明
 log "生成清单 ..."
 {
@@ -301,6 +357,10 @@ log "生成清单 ..."
     echo "---- 站点 ----"
     for f in "$BT_VHOST"/*.conf; do [ -e "$f" ] || continue; basename "$f"; done
     echo
+    echo "---- 还原清单（restore-manifest.tsv）按类别 ----"
+    grep -v '^#' "$BK_MANIFEST" | cut -f4 | sort | uniq -c
+    echo "未进包的项见 system/rootfs-skipped.txt（$(wc -l < "$BK_SKIPPED") 项）"
+    echo
     echo "---- 内容校验和 ----"
     (cd "$STAGE" && find . -type f -exec sha256sum {} \; | sort -k2)
 } > "$STAGE/manifest.txt" 2>&1
@@ -314,6 +374,13 @@ cat > "$STAGE/RESTORE.md" <<'RESTOREEOF'
 > 解压：`7z x srvbak_YYYYMMDD_HHMMSS.7z`（会提示输密码），再 `tar xzf payload.tar.gz`
 > 先读 `manifest.txt` 确认版本和域名，照着装同版本，避免数据库结构不匹配。
 > `system/env.conf` 里是本机的路径与名称配置，新机照着填能省很多回忆。
+
+## 自动还原
+`restore-manifest.tsv` 列出了原样放回新机的全部内容（文件在 `rootfs/<原路径>`），
+还原脚本 `migrate/restore-from-backup.sh` 按它放回配置、建账号、导入库、按
+`images.tsv` 里的 digest 拉镜像并启动 compose 项目、启用 systemd 单元、导入 crontab。
+没进包的东西和原因见 `system/rootfs-skipped.txt`；`system/ref/` 里的 fstab、IP 等
+只作参考，不会自动放回。下面的手动步骤在没有还原脚本、或需要逐项核对时使用。
 
 ## 0. 新机器准备
 1. 装 Docker：`curl -fsSL https://get.docker.com | sh && systemctl enable --now docker`
@@ -377,10 +444,13 @@ cp system/nginx/*.conf /www/server/panel/vhost/nginx/
 cp -a system/cert/. /www/server/panel/vhost/cert/
 nginx -t && systemctl reload nginx
 ```
-面板里需要重新"添加站点"，否则面板认不得这些配置。
+只手动放这两处的话，面板里需要重新"添加站点"，否则面板认不得这些配置。
+按还原清单自动还原时，面板的 `vhost/`（含 proxy、rewrite、extension、well-known）、
+`config/`、`data/` 整个放回，站点记录与续期记录都在其中。
 
-⚠️ **证书文件能用 ≠ 会自动续期。** 面板的续期记录**不在这个包里**，
-恢复后必须**逐站重新申请一次**（算法选 EC256），否则到期那天全站一起挂。
+⚠️ **证书文件能用 ≠ 会自动续期。** 面板目录整体还原这条路**尚未在真机验证过**：
+还原后在面板里逐站确认续期任务还在；不在就**逐站重新申请一次**（算法选 EC256），
+否则到期那天全站一起挂。
 
 ## 6. rclone、告警邮件与定时任务
 ```bash
@@ -403,8 +473,8 @@ cp -a system/systemd/. /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now {{TUNNEL_UNIT}}
 systemctl status {{TUNNEL_UNIT}} --no-pager
 ```
-⚠️ 单元 `ExecStart` 里用到的 SSH 私钥和落地机的 host key（通常在 `/root/.ssh/`）
-**不在这个包里**，先放好再 `enable`，否则隧道反复重启。
+⚠️ 单元 `ExecStart` 里用到的 SSH 私钥和落地机的 host key 在 `rootfs/root/.ssh/`，
+手动还原时先 `cp -a rootfs/root/.ssh /root/` 再 `enable`，否则隧道反复重启。
 落地机 IP 或 SSH 端口变了的话，先改单元里的目标地址，并与 `env.conf` 的
 `NEWAPI_HOST` / `NEWAPI_SSH_PORT` 保持一致。
 
@@ -469,14 +539,17 @@ for remote in "${REMOTES[@]}"; do
     fi
 done
 
-# 9. 保留策略
-log "清理本地超过 ${KEEP_LOCAL_DAYS} 天的备份 ..."
-find "$OUT_DIR" -maxdepth 1 -name 'srvbak_*.7z*' -type f -mtime +$KEEP_LOCAL_DAYS -print -delete | tee -a "$LOG_FILE"
-
-for remote in "${REMOTES[@]}"; do
-    rclone delete "$remote/" --include 'srvbak_*.7z*' --min-age "${KEEP_CLOUD_DAYS}d" \
-        >>"$LOG_FILE" 2>&1 && log "  ✓ ${remote%%:*} 已清理 ${KEEP_CLOUD_DAYS} 天前的备份"
-done
+# 9. 分级保留（GFS，按文件名里的时间戳）。本次上传有失败就一个都不删：
+# 这时旧包可能是某个远端上唯一完好的那份。致命错误在前面已经 die，走不到这里。
+if [ "$UPLOAD_FAIL" -ne 0 ]; then
+    log "本次上传有失败，跳过清理"
+else
+    log "分级保留：全留 ${KEEP_ALL_DAYS} 天，每天一份至 ${KEEP_DAILY_DAYS} 天，每周一份至 ${KEEP_WEEKLY_DAYS} 天，每月一份至上限 ..."
+    bk_prune_local "$OUT_DIR" srvbak "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$KEEP_LOCAL_DAYS"
+    for remote in "${REMOTES[@]}"; do
+        bk_prune_remote "$remote" srvbak "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$KEEP_CLOUD_DAYS"
+    done
+fi
 
 # 收尾
 if [ "$UPLOAD_FAIL" -ne 0 ]; then

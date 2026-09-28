@@ -2,6 +2,16 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-09-28：整机可还原的包结构与分级保留
+
+目标：新机按包还原后与原机一致，还原尽量自动。包结构、覆盖范围与保留规则见 [README.md](README.md)。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `vw-fullbackup.sh` | 2.4.0 → 2.5.0 | 新增 `rootfs/`、`restore-manifest.tsv`、`images.tsv`、`db/mysql-users.sql`（全部账号带密码哈希）、其余业务库 dump；系统配置补齐 SSH（含主机密钥与 root 私钥）、fail2ban、sysctl、面板整个 `vhost/`（旧版漏了 proxy、rewrite、extension、well-known）、面板 `config/` 与 `data/`、nginx 主配置、自定义 systemd 单元等。业务数据硬链接进 rootfs，包不变大。清理改为 GFS 分级保留，上传有失败时不清理。加防重入锁。 |
+| `xboard-fullbackup.sh` | 2.3.3 → 2.4.0 | 同上的 rootfs、还原清单、账号与业务库、镜像 digest；整个 Xboard 目录进 rootfs；新增 crontab（旧版没收）。**包内改为先打 `payload.tar.gz` 再 7z 加密**：7z 不记属主，旧版解开后容器数据属主全变 root（RESTORE.md 里「Redis 属主修复」即因此而来）；包内路径不变，多解一层。上传失败时不清理，GFS 分级保留，防重入锁。 |
+| `newapi-fullbackup.sh` | 1.0.4 → 1.1.0 | GFS 分级保留（全留 2 天，供每小时一次使用），任一远端上传失败时不清理；远端生成 `images.tsv`；防重入锁 |
+
 ## 2026-09-28：告警邮件配置与 new-api 隧道单元进每日包
 
 | 文件 | 原版本 → 当前版本 | 变更 |

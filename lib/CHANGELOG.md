@@ -2,6 +2,12 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-09-28：备份包公共函数
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `common.sh` | 1.1.4 → 1.2.0 | 新增 `bk_*` 一组函数，供 `backup/` 下三个脚本共用：rootfs 采集与 `restore-manifest.tsv`（`bk_init`、`bk_file`、`bk_dir`、`bk_link`、`bk_opt`、`bk_system`、`bk_systemd_units`、`bk_compose_projects`），MySQL 全部账号（带密码哈希）与业务库导出（`bk_mysql_users`、`bk_mysql_dbs`），镜像 digest（`bk_images`），GFS 分级保留（`bk_gfs_select`、`bk_prune_local`、`bk_prune_remote`）。原有函数未改 |
+
 ## 2026-09-24：清理 shellcheck 警告
 
 CI 的 shellcheck 门槛由 error 收紧到 warning。仓库根目录新增 `.shellcheckrc` 关闭 SC1090（source 的是运行时才存在的文件）。
