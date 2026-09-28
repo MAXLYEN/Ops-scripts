@@ -1,7 +1,7 @@
 #!/bin/bash
 # backup/vw-fullbackup.sh — 备份 Vaultwarden、Komari、SubConverter 与系统配置
-# VERSION: 2.3.8
-# 2.3.8: umask 077，暂存区与明文中间包不再对其他用户可读。
+# VERSION: 2.4.0
+# 2.4.0: 包内新增 /etc/msmtprc 与 new-api 隧道 systemd 单元，RESTORE.md 补对应还原步骤。
 # ENV-REQUIRED: VW_BACKUP_DIR BACKUP_PASS_FILE|VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
 # 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
 
@@ -215,6 +215,45 @@ cp -a "$0" "$STAGE/system/" 2>/dev/null
 # 配置本身也进包：换机器时照着它填，比回忆快得多。
 # 注意 env.conf 并非全无凭据（NEWAPI_ROOT_PAT、心跳与 webhook URL），只能随加密包走。
 cp -a "$ENV_FILE" "$STAGE/system/env.conf" 2>/dev/null
+# 告警邮件配置，所有备份脚本的 msmtp 都读它。里面有 SMTP 密码：原文件可能是
+# 640 root:msmtp，cp -a 会原样保留，所以用 install 直接以 600 落进暂存区。
+# 没配 MAIL_TO 的机器本来就不发邮件，缺它不算异常，不计告警。
+if [ -f /etc/msmtprc ]; then
+    install -p -m 600 /etc/msmtprc "$STAGE/system/msmtprc" || warn "msmtprc 复制异常"
+elif [ -n "$MAIL_TO" ]; then
+    warn "配置了 MAIL_TO 但没有 /etc/msmtprc：告警邮件发不出去，包里也没有它"
+else
+    log "  i 没有 /etc/msmtprc（未配置 MAIL_TO），跳过"
+fi
+# new-api 隧道单元（本机 → 落地机的 SSH 隧道）。单元名只认 env.conf 的
+# NEWAPI_TUNNEL_UNIT，不按 *tunnel*.service 通配去猜：猜中别的隧道，还原时就会
+# 启用错的服务；未配置这个键的机器也不一定有 new-api 隧道。
+TUNNEL_UNIT="${NEWAPI_TUNNEL_UNIT:-}"
+if [ -n "$TUNNEL_UNIT" ]; then
+    # 和 systemctl 一样，不写后缀按 .service 处理
+    case "$TUNNEL_UNIT" in *.service) ;; *) TUNNEL_UNIT="${TUNNEL_UNIT}.service" ;; esac
+    case "$TUNNEL_UNIT" in
+        */*|.*|*[!A-Za-z0-9@._:-]*)
+            warn "NEWAPI_TUNNEL_UNIT 不是合法的单元名（${NEWAPI_TUNNEL_UNIT}），隧道单元未进包"
+            TUNNEL_UNIT="" ;;
+        *)
+            if [ -f "/etc/systemd/system/$TUNNEL_UNIT" ]; then
+                mkdir -p "$STAGE/system/systemd"
+                # -L：单元若是 systemctl link 出来的软链，要带走的是文件本身
+                cp -pL "/etc/systemd/system/$TUNNEL_UNIT" "$STAGE/system/systemd/" \
+                    || warn "隧道单元 $TUNNEL_UNIT 复制异常"
+                # systemctl edit 产生的 drop-in 也一起带上，否则还原出来的是改动前的单元
+                if [ -d "/etc/systemd/system/$TUNNEL_UNIT.d" ]; then
+                    cp -a "/etc/systemd/system/$TUNNEL_UNIT.d" "$STAGE/system/systemd/" \
+                        || warn "隧道单元的 drop-in 复制异常"
+                fi
+            else
+                warn "没有 /etc/systemd/system/$TUNNEL_UNIT（NEWAPI_TUNNEL_UNIT），隧道单元未进包"
+            fi ;;
+    esac
+else
+    log "  i 未配置 NEWAPI_TUNNEL_UNIT，不收集隧道单元"
+fi
 ufw status verbose > "$STAGE/system/ufw-status.txt" 2>/dev/null
 # 容器网段：compose 起的服务会有独立网络，和默认 bridge 不在同一网段
 {
@@ -343,16 +382,33 @@ nginx -t && systemctl reload nginx
 ⚠️ **证书文件能用 ≠ 会自动续期。** 面板的续期记录**不在这个包里**，
 恢复后必须**逐站重新申请一次**（算法选 EC256），否则到期那天全站一起挂。
 
-## 6. rclone 与定时任务
+## 6. rclone、告警邮件与定时任务
 ```bash
 mkdir -p /root/.config/rclone && cp system/rclone.conf /root/.config/rclone/
 rclone listremotes
+apt-get install -y msmtp msmtp-mta   # 没装的话；msmtp-mta 会替换系统自带的 MTA，属预期
+cp system/msmtprc /etc/msmtprc && chmod 600 /etc/msmtprc
 crontab system/crontab.txt   # 先看一遍再导入
 ```
+`msmtprc` 里有 SMTP 密码，必须 600。包里没有它说明原机没配告警邮件（或备份时就缺失，
+看备份日志的 WARN）。导入 crontab **之前**先确认能发信：`opsget ops/mail-doctor --send`，
+否则备份失败的告警会无声消失。
+
 ⚠️ crontab 顶部必须有 `PATH=`，且每行都要有输出重定向 —— 缺了会让脚本
 在手动跑正常、定时跑失败，且报错发给收不到的 root@主机名。
 
-## 7. 验收
+## 7. new-api 隧道（包里有 `system/systemd/` 才需要）
+```bash
+cp -a system/systemd/. /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now {{TUNNEL_UNIT}}
+systemctl status {{TUNNEL_UNIT}} --no-pager
+```
+⚠️ 单元 `ExecStart` 里用到的 SSH 私钥和落地机的 host key（通常在 `/root/.ssh/`）
+**不在这个包里**，先放好再 `enable`，否则隧道反复重启。
+落地机 IP 或 SSH 端口变了的话，先改单元里的目标地址，并与 `env.conf` 的
+`NEWAPI_HOST` / `NEWAPI_SSH_PORT` 保持一致。
+
+## 8. 验收
 - [ ] `https://域名/alive` 返回 200
 - [ ] 用原邮箱 + 原主密码登录，条目数与 manifest 对得上
 - [ ] TOTP 二步验证可用
@@ -360,8 +416,11 @@ crontab system/crontab.txt   # 先看一遍再导入
 - [ ] Komari 面板能看到原有被控端，且日志有 `Metric store initialized successfully`
 - [ ] 订阅转换接口能正常返回
 - [ ] `SELECT user,host FROM information_schema.processlist` 里来源是容器网段地址
+- [ ] `opsget ops/mail-doctor --send` 能收到测试邮件
+- [ ] 有隧道的话：`systemctl is-active {{TUNNEL_UNIT}}` 为 active，`opsget ops/newapi-linkcheck` 通过
 RESTOREEOF
-sed -i "s|{{DB_CLIENT_HOST}}|${DB_CLIENT_HOST}|g; s|{{DOCKER_CIDR}}|${DOCKER_CIDR}|g" \
+# TUNNEL_UNIT 已按单元名规则校验过，不含 | & \，可以直接进 sed
+sed -i "s|{{DB_CLIENT_HOST}}|${DB_CLIENT_HOST}|g; s|{{DOCKER_CIDR}}|${DOCKER_CIDR}|g; s|{{TUNNEL_UNIT}}|${TUNNEL_UNIT:-<隧道单元名>}|g" \
     "$STAGE/RESTORE.md"
 
 # 7. 打包加密
