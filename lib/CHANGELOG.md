@@ -6,7 +6,13 @@
 
 | 文件 | 原版本 → 当前版本 | 变更 |
 | --- | --- | --- |
-| `common.sh` | 1.2.1 → 1.2.2 | `bk_images` 可只列给定的容器（不给就和原来一样列全部），不存在的容器记 `-` 并告警；赋值失败不再让开着 `set -e` 的调用方中止。它只依赖 docker 与 `warn`，`litellm-fullbackup` 用 `declare -f` 把它送到节点上执行。新增 `vps_host_port`：按 `~/.vps-hosts.txt`（`user@host:端口`）取端口，主机整段比较、跳过注释，不会像正则匹配那样让 `1.2.3.4` 命中 `11.2.3.45`。`LITELLM_BACKUP_DIR` 算作备份落盘目录，vw / xboard 采集时不会把它收进包 |
+| `common.sh` | 1.2.2 → 1.2.3 | `bk_images` 可只列给定的容器（不给就和原来一样列全部），不存在的容器记 `-` 并告警；赋值失败不再让开着 `set -e` 的调用方中止。它只依赖 docker 与 `warn`，`litellm-fullbackup` 用 `declare -f` 把它送到节点上执行。新增 `vps_host_port`：按 `~/.vps-hosts.txt`（`user@host:端口`）取端口，主机整段比较、跳过注释，不会像正则匹配那样让 `1.2.3.4` 命中 `11.2.3.45`。`LITELLM_BACKUP_DIR` 算作备份落盘目录，vw / xboard 采集时不会把它收进包 |
+
+## 2026-09-28：备份包收 SSH 两步验证
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `common.sh` | 1.2.1 → 1.2.2 | `bk_system` 新收 `/etc/pam.d/sshd` 与 `/root/.google_authenticator`（TOTP 密钥与应急码）。原机 SSH 开了 Google 两步验证时，`sshd_config` 要求 keyboard-interactive，缺这两样在新机上重启 SSH 后就登不进去；密钥原样放回，手机上原来的验证器条目继续可用 |
 
 ## 2026-09-28：/usr/local/bin 同名文件不进包
 

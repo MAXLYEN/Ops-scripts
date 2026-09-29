@@ -577,3 +577,83 @@ cron_install() { run bash "$SRC/ops/install-backup-cron.sh" "$@"; }
   has "一个备份脚本都没装"
   [ "$(crontab -l)" = '15 2 * * * /usr/local/bin/other.sh' ]
 }
+
+# ── SSH 两步验证 ─────────────────────────────────────────────
+make_v2_2fa() {  # 在 make_v2 的新布局包里加上 Google 两步验证的 PAM 配置与 TOTP 密钥
+  make_v2
+  local s=/tmp/pkgsrc/v2
+  mkdir -p "$s/rootfs/etc/pam.d"
+  printf '%s\n' '@include common-auth' 'auth required pam_google_authenticator.so nullok' > "$s/rootfs/etc/pam.d/sshd"
+  printf 'TOTPSECRET\n" TOTP_AUTH\n12345678\n' > "$s/rootfs/root/.google_authenticator"
+  chmod 400 "$s/rootfs/root/.google_authenticator"
+  printf '%s\t%s\t%s\t%s\n' /etc/pam.d/sshd 644 root:root file /root/.google_authenticator 400 root:root file \
+    >> "$s/restore-manifest.tsv"
+  rm -f "$V2"; seal "$s" "$V2" tar
+}
+fake_apt() {  # apt-get 只记录调用，不联网
+  printf '#!/bin/sh\necho "$*" >> /tmp/apt.log\n' > /usr/local/bin/apt-get
+  chmod 755 /usr/local/bin/apt-get; : > /tmp/apt.log
+}
+
+@test "SSH 两步验证：PAM 配置与 TOTP 密钥照原机放回，自动装 PAM 模块，提醒先用新窗口测试登录" {
+  rm -f /etc/pam.d/sshd /root/.google_authenticator
+  make_v2_2fa; v2_local; fake_apt
+  restore restore "$V2" --no-start
+  [ "$status" -eq 0 ]
+  grep -q pam_google_authenticator /etc/pam.d/sshd
+  [ "$(stat -c '%a %U' /root/.google_authenticator)" = "400 root" ]
+  grep -q 'install .*libpam-google-authenticator' /tmp/apt.log
+  has "另开一个窗口用原来的密钥加手机上的验证码测试登录"
+  lacks "/root/.google_authenticator 不在本机"
+  rm -f /etc/pam.d/sshd /root/.google_authenticator
+}
+
+@test "SSH：放回的配置过不了 sshd -t 时告警，要求修好之前不要重启 SSH" {
+  rm -f /etc/pam.d/sshd /root/.google_authenticator
+  make_v2_2fa; v2_local; fake_apt
+  printf '#!/bin/sh\nexit 1\n' > /usr/local/bin/sshd; chmod 755 /usr/local/bin/sshd
+  restore restore "$V2" --no-start
+  has "sshd -t 没通过"
+  has "修好 sshd 配置"
+  rm -f /etc/pam.d/sshd /root/.google_authenticator
+}
+
+@test "SSH：原机没开两步验证时不装 PAM 模块，也不出相关提示" {
+  rm -f /etc/pam.d/sshd /root/.google_authenticator
+  make_v2; v2_local; fake_apt
+  restore restore "$V2" --no-start
+  none 'libpam-google-authenticator' "$(cat /tmp/apt.log)"
+  lacks "验证码"
+}
+
+# ── SSH 来源 IP 放行名单 ─────────────────────────────────────
+make_v2_ufw() {  # 在 make_v2 的包里加上原机的 sshd 端口与只放行两个 IP 的 ufw 规则
+  make_v2
+  local s=/tmp/pkgsrc/v2
+  mkdir -p "$s/rootfs/etc/ssh" "$s/rootfs/etc/ufw"
+  printf 'Port 2222\nPubkeyAuthentication yes\n' > "$s/rootfs/etc/ssh/sshd_config"
+  printf '%s\n' '*filter' ':ufw-user-input - [0:0]' \
+    '-A ufw-user-input -p tcp --dport 2222 -s 198.51.100.7 -j ACCEPT' \
+    '-A ufw-user-input -p tcp --dport 2222 -s 203.0.113.9 -j ACCEPT' \
+    '-A ufw-user-input -p tcp --dport 443 -j ACCEPT' 'COMMIT' > "$s/rootfs/etc/ufw/user.rules"
+  printf '%s\t%s\t%s\t%s\n' /etc/ssh/sshd_config 644 root:root file /etc/ufw 755 root:root dir \
+    >> "$s/restore-manifest.tsv"
+  rm -f "$V2"; seal "$s" "$V2" tar
+}
+ufw_cleanup() { rm -rf /etc/ufw /etc/ufw.bak.* /etc/ssh/sshd_config.bak.*; }
+
+@test "SSH 放行名单：当前会话的 IP 不在原机名单里时，给出带端口的放行命令" {
+  ufw_cleanup; make_v2_ufw; v2_local
+  SSH_CONNECTION="192.0.2.50 51000 10.0.0.2 2222" restore restore "$V2" --no-start
+  has "原机的 SSH 放行名单里没有你现在的 IP（192.0.2.50）"   # 告警，所以退出码非零
+  has "ufw allow from 192.0.2.50 to any port 2222 proto tcp"
+  ufw_cleanup
+}
+
+@test "SSH 放行名单：当前会话的 IP 在名单里时不打扰" {
+  ufw_cleanup; make_v2_ufw; v2_local
+  SSH_CONNECTION="203.0.113.9 51000 10.0.0.2 2222" restore restore "$V2" --no-start
+  has "SSH 放行名单里有你现在的 IP（203.0.113.9）"
+  lacks "ufw allow from 203.0.113.9"
+  ufw_cleanup
+}

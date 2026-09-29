@@ -22,7 +22,7 @@
 - **`LITELLM_SALT_KEY` 在 LiteLLM 包的 `workdir/.env` 里**：面板里加的模型和上游 Key 在 Postgres 里用它加密，恢复时必须用原来那一个，换了就永远解不开。包里 `RESTORE.md` 开头就讲这一点，并附盐值的指纹（sha256 前 12 位）供核对。
 - 备份是否可解开，另用 `ops/verify-backup-pass.sh` 检查；完整恢复能力仍需演练。
 
-- 各脚本都依赖公共库 `lib/common.sh` 1.2.0 起的 `bk_*` 函数（`litellm-fullbackup` 要 1.2.2 起：`bk_images` 只列指定容器、`vps_host_port`）；`opsget -i` 会一并同步，库缺失或过旧时脚本报失败并告警。
+- 各脚本都依赖公共库 `lib/common.sh` 1.2.0 起的 `bk_*` 函数（`litellm-fullbackup` 要 1.2.3 起：`bk_images` 只列指定容器、`vps_host_port`）；`opsget -i` 会一并同步，库缺失或过旧时脚本报失败并告警。
 - 各脚本各自持有 `/run/lock/<脚本名>.lock`，上一轮没结束时新一轮直接退出、不报心跳。
 
 各脚本在头部声明 `ENV-REQUIRED`。版本记录见 [CHANGELOG.md](CHANGELOG.md)。

@@ -80,16 +80,18 @@ cat "$(. /etc/ops-scripts/env.conf; echo "${BACKUP_PASS_FILE:-$VW_PASS_FILE}")"
 
 下面按"前置机彻底没了"来写。只是落地机没了的话，直接看第 4.8 节；只是 LiteLLM 节点没了，直接看第 4.9 节。
 
-### 4.0 准备一台能用的电脑（约 5 分钟）
+### 4.0 准备一台能用的电脑，以及 SSH 登录的三道关
 
 1. 安装 **7-Zip**。Windows 10/11 自带 `ssh` 和 `scp`；macOS 和 Linux 也都自带。
-2. 生成这台电脑的 SSH 密钥：
+2. **SSH 登录要过三道关**，恢复前先确认每一道都过得去：
 
-   ```bash
-   ssh-keygen -t ed25519
-   ```
+| 关卡 | 现状 | 恢复时 |
+| --- | --- | --- |
+| **密钥** | 前置机和所有节点机用的是**同一把密钥**，不用新建 | 把这把私钥放到这台电脑的 `~/.ssh/`（Windows 是 `C:\Users\<你>\.ssh\`）。私钥存在 **Vaultwarden** 里（服务器挂了也能从已登录客户端的缓存里取），本地另有两份 |
+| **Google 两步验证** | 登录时除了密钥，还要输手机验证器里的 6 位验证码 | TOTP 密钥随备份包恢复（`/root/.google_authenticator`），**手机上原来那个验证器条目继续可用，不用重新绑定**。手机丢了的话：备份包里 `rootfs/root/.google_authenticator` 文件末尾那几行 8 位数字是一次性应急码，每个只能用一次 |
+| **来源 IP 放行名单** | 每台机器用 **ufw** 只允许**本地出口 IP、前置机、各节点机**连 SSH（规则在 `/etc/ufw`，随备份包恢复）。本地 IP 变了的话，先连上某台节点机的代理，再从它那里登录 | 见第 4.6 节最后和第 4.8 节：新前置机的 IP 要加进其他机器的名单；恢复出来的名单里要有你现在的 IP |
 
-   公钥在 `~/.ssh/id_ed25519.pub`（Windows 上是 `C:\Users\<你>\.ssh\id_ed25519.pub`）。
+**刚开的新机器还没有恢复，所以没有两步验证，也没有放行名单**，只用密钥（或商家给的 root 密码）就能登录。恢复完成、重启 SSH 之后，三道关才全部生效。
 
 ### 4.1 判断范围
 
@@ -125,13 +127,19 @@ cat "$(. /etc/ops-scripts/env.conf; echo "${BACKUP_PASS_FILE:-$VW_PASS_FILE}")"
 ### 4.3 开新机器
 
 - 系统选 **Debian 12**；配置不低于原机（在 `manifest.txt` 里看原机用了多少资源，宁可高一点）。
-- 商家有"SSH 密钥"选项的话，填 4.0 生成的公钥。没有的话，先用商家给的 root 密码登录，然后执行：
+- 商家有"SSH 密钥"选项的话，填**原来那把密钥的公钥**。没有的话，先用商家给的 root 密码登录，然后执行：
 
   ```bash
-  mkdir -p ~/.ssh && echo '<你的公钥>' >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
+  mkdir -p ~/.ssh && echo '<原来那把密钥的公钥>' >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
   ```
 
-- 恢复时，脚本会把 `/root/.ssh` 换成原机的，**但会把恢复前就能登录的公钥加回去**，所以这台电脑的密钥不会失效。
+  公钥可以从私钥算出来（在电脑上运行，把 `id_ed25519` 换成你的私钥文件名）：
+
+  ```bash
+  ssh-keygen -y -f ~/.ssh/id_ed25519
+  ```
+
+- 恢复时，脚本会把 `/root/.ssh` 换成原机的，里面本来就有这把公钥；恢复前能登录的公钥也会再加回去，所以不会被关在外面。
 
 ### 4.4 系统初始化
 
@@ -226,6 +234,20 @@ restore-from-backup.sh restore /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7z
 opsget migrate/08-post-start-check
 ```
 
+**重启 SSH 或重启机器之前（很重要，否则可能把自己锁在外面）：**
+
+恢复出来的 SSH 配置、防火墙都是原机的，**恢复脚本故意没有重载它们**。重载之前：
+
+1. **放行名单**：脚本会检查你当前这个 SSH 会话的 IP 在不在原机的放行名单里。不在的话，"还要手动做的事"里会给出一条 `ufw allow from <你的IP> to any port <端口> proto tcp`，**先执行它**。
+2. **两步验证**：原机开了 Google 两步验证的话，脚本已经自动装好了 PAM 模块，并用 `sshd -t` 检查过配置。
+3. **保持当前这个 SSH 窗口不断开**，然后重载：
+
+   ```bash
+   systemctl restart ssh && ufw reload && systemctl restart fail2ban
+   ```
+
+4. **另开一个窗口**，用密钥加手机验证码登录（端口是原机的 SSH 端口，可能跟现在不一样）。**能登录上，再关掉旧窗口。**登不上的话，回到旧窗口排查。
+
 ### 4.7 切换 DNS
 
 登录 Cloudflare（密码在 Vaultwarden 客户端的缓存里；找不到就走 Cloudflare 的找回密码），把 `system/nginx/` 里列出的**所有域名**的 A 记录都改成新机器的 IP。代理状态（灰色还是橙色云朵）保持原样。
@@ -234,7 +256,27 @@ opsget migrate/08-post-start-check
 
 ### 4.8 落地机（new-api）
 
-**落地机还活着**：什么都不用做。隧道单元和私钥都随备份恢复了，检查一下：
+**先把新前置机的 IP 加进其他机器的 SSH 放行名单。** 落地机、LiteLLM 节点只允许原来那台前置机的 IP 连 SSH。新前置机的 IP 不一样，不加的话，隧道连不上落地机，new-api 和 LiteLLM 的备份也拉不下来。
+
+从你本地（或经某台节点机的代理）登录落地机和 LiteLLM 节点，分别执行（端口换成那台机器的 SSH 端口）：
+
+```bash
+ufw allow from <新前置机IP> to any port <SSH端口> proto tcp
+```
+
+原前置机的 IP 已经没用了，可以顺手删掉那条规则：
+
+```bash
+ufw status numbered
+```
+
+找到旧 IP 那条规则的编号，然后：
+
+```bash
+ufw delete <编号>
+```
+
+**落地机还活着**：加好放行名单之后，其余都不用做。隧道单元和私钥都随备份恢复了，检查一下：
 
 ```bash
 systemctl status newapi-tunnel --no-pager
@@ -246,7 +288,7 @@ curl -s http://127.0.0.1:3000/api/status | head -c 100
 
 **落地机也没了：**
 
-1. 开一台新的落地机。**必须是日本、美国这类上游 API 支持的地区**，而且**不能用国内厂商**（有被上游屏蔽的风险）。
+1. 开一台新的落地机。**必须是日本、美国这类上游 API 支持的地区**，而且**不能用国内厂商**（有被上游屏蔽的风险）。放行名单、两步验证这些，按原落地机的做法重新配一遍：只允许本地出口 IP、前置机和各节点机连 SSH。
 2. 装 Docker：
 
    ```bash
@@ -289,7 +331,7 @@ curl -s http://127.0.0.1:3000/api/status | head -c 100
 
 LiteLLM 和 new-api 在同一台机器上时，那台机器没了就 4.8 和本节都做。
 
-**LiteLLM 节点还活着**：什么都不用做。`env.conf` 里的 `LITELLM_HOST` 和连它用的私钥都随前置机的备份恢复了，下一次定时备份会照常连上。手动跑一次确认：
+**LiteLLM 节点还活着**：前置机是新的话，先按 4.8 开头把新前置机的 IP 加进 LiteLLM 节点的 SSH 放行名单，其余都不用做。`env.conf` 里的 `LITELLM_HOST` 和连它用的私钥都随前置机的备份恢复了。手动跑一次确认备份能拉下来：
 
 ```bash
 litellm-fullbackup.sh
@@ -299,7 +341,7 @@ litellm-fullbackup.sh
 
 > ⚠️ **盐值 `LITELLM_SALT_KEY` 必须用包里原来那一个。** 面板里加的模型和上游 API Key 都用它加密存在 Postgres 里，换了盐值就再也解不开，而且没有任何办法找回。**不要用 `opsget ops/deploy-litellm` 重新部署**：它会生成一套新的 `.env`，也就是新的盐值。
 
-1. 开一台新机器。和落地机一样，**要在上游 API 支持的地区**。
+1. 开一台新机器。和落地机一样，**要在上游 API 支持的地区**。放行名单、两步验证按原节点的做法重新配一遍：只允许本地出口 IP、前置机和各节点机连 SSH。**前置机的 IP 一定要放行**，前置机的定时备份用密钥非交互登录（输不了验证码），原节点上前置机怎么登录的，新节点照原样配；否则 `litellm-fullbackup` 连不上，每 6 小时失败一次。
 2. 装 Docker：
 
    ```bash
@@ -314,13 +356,14 @@ litellm-fullbackup.sh
 4. 验证：`/health/liveliness` 返回 200；带 master key 列出的模型和包里 `db/row-counts.tsv` 对得上；**在面板里对每个模型点一次 Test**，能调通才说明盐值是对的（模型列表本身不加密，列得出来不代表凭据能解开）。
 5. 如果 IP 变了，在前置机上：
    - 改 `/etc/ops-scripts/env.conf` 里的 `LITELLM_HOST`，端口写进 `LITELLM_SSH_PORT` 或 `/root/.vps-hosts.txt`；
-   - 把前置机的公钥加进新节点的 `/root/.ssh/authorized_keys`，首次连接确认新的主机指纹：
+   - 把前置机的公钥加进新节点的 `/root/.ssh/authorized_keys`（放行名单见第 1 步），首次连接确认新的主机指纹：
 
      ```bash
      ssh -p 端口 root@新节点IP true
      ```
 
-   - 前置机到 LiteLLM 的隧道、Nginx 反代里的目标 IP 也要改。
+   - 前置机到 LiteLLM 的隧道、Nginx 反代里的目标 IP 也要改；
+   - 手动跑一次 `litellm-fullbackup.sh`，确认新节点的备份能拉下来。
 
 ### 4.10 恢复备份体系
 
@@ -388,6 +431,7 @@ litellm-fullbackup.sh
 | --- | --- |
 | 4.3 开新机器 | 开一台**按小时计费**的 Debian 12 就行，配置可以低一些（比如 2 核 4G）。**最好换一家商家** |
 | 4.6 正式恢复 | 命令末尾加 `--drill`：不装定时任务，不启用 systemd 单元，所以隧道不会去连生产环境的落地机 |
+| 4.6 重启 SSH | 也要做一遍，顺带验证密钥、两步验证、放行名单这三道关在新机器上都正常 |
 | 4.7 切换 DNS | **不做**。改用电脑上的 hosts 文件，把域名临时指向临时机来检查；**只看不改**，看完马上删掉 hosts 里加的那几行 |
 | 4.8 到 4.11 | **不做**（LiteLLM 另有单独的演练，见本节最后） |
 

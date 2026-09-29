@@ -6,7 +6,13 @@
 
 | 文件 | 原版本 → 当前版本 | 变更 |
 | --- | --- | --- |
-| `restore-from-backup.sh` | 1.0.0 → 1.0.1 | `litellm_*` 包明确拒绝，指明正式恢复照包里的 `RESTORE.md` 在 LiteLLM 节点上做、演练用 `ops/litellm-drill`（原先会报「认不出的包布局」） |
+| `restore-from-backup.sh` | 1.0.1 → 1.0.2 | `litellm_*` 包明确拒绝，指明正式恢复照包里的 `RESTORE.md` 在 LiteLLM 节点上做、演练用 `ops/litellm-drill`（原先会报「认不出的包布局」） |
+
+## 2026-09-28：恢复时别把自己锁在 SSH 外面
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `restore-from-backup.sh` | 1.0.0 → 1.0.1 | 放回的 `/etc/pam.d/sshd` 用到 `pam_google_authenticator.so` 时自动装 `libpam-google-authenticator`（模块不在，重启 SSH 后所有登录都失败），缺 `/root/.google_authenticator` 时列进手动步骤；放回 SSH / PAM 配置后跑 `sshd -t`，不通过就告警并要求修好前不要重启 SSH。原机 ufw 只放行部分 IP 连 SSH 时，核对当前会话的来源 IP，不在名单里就给出带端口的 `ufw allow` 命令。仍不自动重载 SSH 与防火墙；手动步骤提醒保持旧会话、新窗口测试登录 |
 
 ## 2026-09-28：从备份包恢复整机
 

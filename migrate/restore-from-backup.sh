@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # migrate/restore-from-backup.sh — 原机已不在时，用每日加密备份包把新机恢复成原样
-# VERSION: 1.0.1
-# 1.0.1: LiteLLM 包（litellm_*）明确拒绝，指向 ops/litellm-drill 与包里的 RESTORE.md。
+# VERSION: 1.0.2
+# 1.0.2: LiteLLM 包（litellm_*）明确拒绝，指向 ops/litellm-drill 与包里的 RESTORE.md。
+# 1.0.1: 放回的 SSH 配置要求 Google 两步验证时，自动装 libpam-google-authenticator，并用 sshd -t 检查配置；手动步骤里提醒先用新窗口测试登录。原机 ufw 只放行部分 IP 连 SSH 时，核对当前会话的来源 IP，不在名单里就给出放行命令。
 # 1.0.0: 首版。vw / xboard 包（现有布局与 rootfs + restore-manifest.tsv 新布局）：取包、解密、校验，按包还原配置、库与账号、数据、compose 项目（镜像按清单锁版本）、systemd 单元、nginx、定时任务并启动；可重跑；--drill 演练与 teardown 清理。
 # ENV-REQUIRED: BACKUP_PASS_FILE|VW_PASS_FILE DB_CLIENT_HOST MYSQL_DEFAULTS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR
 # 在 init/ 做完、配好 env.conf / 备份密码文件 / rclone 的新机上运行。原机还在时走 03 冷快照 → 07。
@@ -1093,6 +1094,62 @@ restore_cron() {
   [ -f /etc/msmtprc ] || manual "告警邮件：/etc/msmtprc 不在本机" "旧版备份包不收它；照原机配置补上后用 opsget ops/mail-doctor --send 验证"
 }
 
+# 原机 SSH 开了 Google 两步验证：PAM 配置和 TOTP 密钥随包放回，但模块是个软件包，新机上没有。
+# 不装的话，重启 SSH（或重启机器）后 PAM 找不到模块，所有登录都会失败。
+ssh_2fa_check() {
+  local pam=/etc/pam.d/sshd
+  if [ -f "$pam" ] && grep -qE '^[[:space:]]*[^#].*pam_google_authenticator\.so' "$pam"; then
+    if dpkg -s libpam-google-authenticator >/dev/null 2>&1; then
+      ok "SSH 两步验证：PAM 模块已在"
+    else
+      log "SSH 两步验证：安装 libpam-google-authenticator"
+      if DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -qq libpam-google-authenticator >/dev/null; then
+        ok "SSH 两步验证：PAM 模块已安装"
+      else
+        warn "libpam-google-authenticator 没装上"
+        manual "装好 libpam-google-authenticator 之前，不要重启 SSH 或重启机器" \
+               "原机的 SSH 要求 Google 两步验证，模块不在时重启 SSH 后所有登录都会失败"
+      fi
+    fi
+    [ -f /root/.google_authenticator ] \
+      || manual "root 的 /root/.google_authenticator 不在本机：两步验证会拒绝 root 登录" "旧版备份包不收这个文件；在原机上用 google-authenticator 重新生成，或暂时从 /etc/pam.d/sshd 去掉这一行"
+    manual "重启 SSH 前保持当前会话不断开，另开一个窗口用原来的密钥加手机上的验证码测试登录" \
+           "两步验证的密钥已换成原机的，手机上原来的验证器条目继续可用；新窗口能登录再关掉旧会话"
+  fi
+  if command -v sshd >/dev/null 2>&1 && { touched_under /etc/ssh || touched_under /etc/pam.d; }; then
+    if sshd -t 2>/dev/null; then ok "sshd 配置检查通过"
+    else
+      warn "sshd -t 没通过：放回的 SSH 配置有问题"
+      manual "修好 sshd 配置（sshd -t 能通过）之前，不要重启 SSH 或重启机器" "配置有错时 SSH 起不来，会把自己锁在外面"
+    fi
+  fi
+}
+
+# 原机的 ufw 只放行名单里的 IP 连 SSH（本地出口、前置机、各节点）。放回的是原机的名单，
+# 恢复时用的这台电脑、这个出口可能不在里面：重载 ufw 或重启后就把自己锁在外面。
+# 这里不重载，只核对当前 SSH 会话的来源 IP，不在名单里就把放行命令列进手动步骤。
+ufw_ssh_self_check() {
+  local rules=/etc/ufw/user.rules ip port lines
+  touched_under /etc/ufw && [ -f "$rules" ] || return 0
+  port=$(grep -hiE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null \
+         | awk '{ print $2; exit }')
+  port=${port:-22}
+  lines=$(grep -E -- "^-A ufw-user-input .*--dport $port( |$).*-j ACCEPT" "$rules")
+  [ -n "$lines" ] || return 0                       # 没有按端口号写的规则（比如按服务名），不判断
+  grep -qv -- ' -s ' <<<"$lines" && return 0        # 有一条不限来源，谁都能连
+  ip=${SSH_CONNECTION%% *}
+  if [ -z "$ip" ]; then
+    manual "重载防火墙或重启前，确认你连 SSH 的 IP 在原机的放行名单里：grep -- '--dport $port' $rules" \
+           "原机的防火墙只允许名单里的 IP 连 SSH（端口 $port），不在名单里一重载就连不上"
+  elif grep -qE -- "-s $ip(/32)? " <<<"$lines"; then
+    ok "SSH 放行名单里有你现在的 IP（$ip）"
+  else
+    warn "原机的 SSH 放行名单里没有你现在的 IP（$ip）"
+    manual "重载防火墙或重启前先放行你现在的 IP：ufw allow from $ip to any port $port proto tcp" \
+           "原机的防火墙只允许名单里的 IP 连 SSH（端口 $port），名单里没有 $ip；不放行的话一重载就连不上"
+  fi
+}
+
 apply_all() {
   local n
   [ -n "$(st_mode)" ] || st_add MODE "$([ "$DRILL" = 1 ] && echo drill || echo real)"
@@ -1135,6 +1192,8 @@ apply_all() {
     [ "${IT_KIND[n]}" = compose-project ] && st_add PLACED "${IT_DST[n]}" "${P_SHA[IT_PKG[n]]}"
   done
   touched_under /etc/systemd && { systemctl daemon-reload 2>/dev/null || warn "systemctl daemon-reload 失败"; }
+  ssh_2fa_check
+  ufw_ssh_self_check
   touched_under /etc/sysctl && { sysctl --system >/dev/null 2>&1 && ok "内核参数已按原机生效" || warn "sysctl --system 失败"; }
   if touched_under /etc/ssh || touched_under /etc/ufw || touched_under /etc/default/ufw || touched_under /etc/fail2ban; then
     manual "重启机器（或 systemctl restart ssh; ufw reload; systemctl restart fail2ban），让原机的 SSH、防火墙、封禁配置生效" \
