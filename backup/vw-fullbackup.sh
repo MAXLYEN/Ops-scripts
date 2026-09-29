@@ -1,11 +1,21 @@
 #!/bin/bash
 # backup/vw-fullbackup.sh — 备份 Vaultwarden、Komari、SubConverter 与系统配置
-# VERSION: 2.5.0
+# VERSION: 2.6.0
+# 2.6.0: 新增 --local-only <目录>：包只写到该目录，不上传、不清理、不报心跳、不发告警；上一轮还在跑就等它结束（一键迁移现做包用）。
 # 2.5.0: 新增 rootfs/ 与 restore-manifest.tsv（系统配置、全部 MySQL 账号与业务库、镜像 digest），改为 GFS 分级保留，防重入锁。
 # ENV-REQUIRED: VW_BACKUP_DIR BACKUP_PASS_FILE|VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
 # 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
+# 用法：vw-fullbackup.sh [--local-only <目录>]
 
 set -o pipefail
+# --local-only：一键迁移（migrate/live-migrate）在旧机上现做包、经 SSH 直传新机。
+# 不上传、不清理：这份包不是例行备份，不该挤掉网盘上的旧包；不报心跳：心跳的意思是「例行备份已上云」
+LOCAL_ONLY=""
+case "${1:-}" in
+    --local-only) LOCAL_ONLY=${2:-}; [ -n "$LOCAL_ONLY" ] || { echo "[FATAL] --local-only 后面要跟目录"; exit 1; } ;;
+    "") ;;
+    *) echo "[FATAL] 未知参数: $1（只认 --local-only <目录>）"; exit 1 ;;
+esac
 # 暂存区里是明文：数据库 dump、容器 inspect（含环境变量里的密钥）、证书私钥、
 # 打包好的 payload.tar.gz。默认 umask 022 下它们是 644、目录 755，备份窗口内
 # 本机任何用户（例如面板上以 www 运行的站点）都能读到。之后新建的目录一律 700、
@@ -32,6 +42,8 @@ req VW_BACKUP_DIR VW_REMOTE_PATH RCLONE_REMOTES \
 
 STAGE_ROOT="$VW_BACKUP_DIR"
 OUT_DIR="$STAGE_ROOT"
+# 本地模式的包放到指定目录；这个目录也不进包（bk_init 把 BACKUP_DIRS 当成落盘目录排除）
+[ -n "$LOCAL_ONLY" ] && { OUT_DIR="$LOCAL_ONLY"; BACKUP_DIRS="${BACKUP_DIRS:-} $LOCAL_ONLY"; }
 LOG_FILE="${VW_LOG_FILE:-/var/log/vw-fullbackup.log}"
 # 新键优先、旧键回落 —— 现有机器的 env.conf 一个字不用动
 BACKUP_PASS_FILE="${BACKUP_PASS_FILE:-${VW_PASS_FILE:-}}"
@@ -45,6 +57,7 @@ KEEP_LOCAL_DAYS="${BACKUP_KEEP_LOCAL_DAYS:-180}"
 KEEP_CLOUD_DAYS="${BACKUP_KEEP_CLOUD_DAYS:-400}"
 # 远端由「远端名列表 × 目录名」组合，换云盘或改目录只动 env.conf
 REMOTES=(); for r in $RCLONE_REMOTES; do REMOTES+=("${r}:${VW_REMOTE_PATH}"); done
+[ -n "$LOCAL_ONLY" ] && REMOTES=()
 MAIL_TO="${MAIL_TO:-}"
 
 VW_DIR="$SVC_VW_DIR"
@@ -74,6 +87,7 @@ die()  { echo "[$(date '+%F %T')] [FATAL] $*" | tee -a "$LOG_FILE"; hb /fail; no
 # 会让告警**直接消失**，而告警消失正是这套系统最怕的那类故障。
 notify() {
     local msg="$1" i sent=0
+    [ -z "$LOCAL_ONLY" ] || return 0     # 本地模式由调用方看退出码和输出
     if [ -n "$MAIL_TO" ] && command -v msmtp >/dev/null 2>&1; then
         for i in 1 2 3; do
             printf 'To: %s\nSubject: [%s] 备份告警\nContent-Type: text/plain; charset=UTF-8\n\n%s\n\n主机: %s\n时间: %s\n日志: %s\n' \
@@ -102,6 +116,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "缺少依赖: $1"; }
 #   hb /start  开始    hb  成功    hb /fail  失败
 # 用 --retry：心跳本身也走出网，而出网正是可能抖动的那一环。
 hb() {
+    [ -z "$LOCAL_ONLY" ] || return 0
     [ -n "${VW_HEARTBEAT_URL:-}" ] || return 0
     curl -fsS -m 10 --retry 3 "${VW_HEARTBEAT_URL}${1:-}" >/dev/null 2>&1 \
         || echo "[$(date '+%F %T')] [WARN] 心跳上报失败${1:-}" >> "$LOG_FILE"
@@ -111,7 +126,12 @@ hb() {
 # 撞上就直接退出、不报心跳：偶尔一次无妨，一直撞上时由心跳监控发现「没按时完成」。
 mkdir -p /run/lock
 exec 9>/run/lock/vw-fullbackup.lock || die "无法创建锁文件 /run/lock/vw-fullbackup.lock"
-flock -n 9 || { log "上一轮备份还在运行，本次跳过"; exit 0; }
+# 本地模式是有人等着要包：等上一轮跑完（它也可能正卡在上传），而不是跳过
+if [ -n "$LOCAL_ONLY" ]; then
+    flock -w 7200 9 || die "等了 2 小时，上一轮备份还没结束"
+else
+    flock -n 9 || { log "上一轮备份还在运行，本次跳过"; exit 0; }
+fi
 
 # 前置检查
 log "========== 开始备份 ${NAME} =========="
@@ -541,7 +561,9 @@ done
 
 # 9. 分级保留（GFS，按文件名里的时间戳）。本次上传有失败就一个都不删：
 # 这时旧包可能是某个远端上唯一完好的那份。致命错误在前面已经 die，走不到这里。
-if [ "$UPLOAD_FAIL" -ne 0 ]; then
+if [ -n "$LOCAL_ONLY" ]; then
+    log "只在本地生成（--local-only）：${ARCHIVE}；不上传、不清理"
+elif [ "$UPLOAD_FAIL" -ne 0 ]; then
     log "本次上传有失败，跳过清理"
 else
     log "分级保留：全留 ${KEEP_ALL_DAYS} 天，每天一份至 ${KEEP_DAILY_DAYS} 天，每周一份至 ${KEEP_WEEKLY_DAYS} 天，每月一份至上限 ..."

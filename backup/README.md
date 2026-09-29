@@ -8,8 +8,8 @@
 | --- | --- | --- |
 | `litellm-fullbackup.sh` | 1.0.0 | 从汇总机拉取 LiteLLM 节点的库导出与工作目录，加密上传 |
 | `newapi-fullbackup.sh` | 1.1.0 | 从汇总机拉取 new-api 数据，生成一致性快照并加密上传 |
-| `vw-fullbackup.sh` | 2.5.0 | 备份 Vaultwarden、Komari、SubConverter 与系统配置 |
-| `xboard-fullbackup.sh` | 2.4.1 | 生成 Xboard 加密备份包并上传云端 |
+| `vw-fullbackup.sh` | 2.6.0 | 备份 Vaultwarden、Komari、SubConverter 与系统配置 |
+| `xboard-fullbackup.sh` | 2.5.0 | 生成 Xboard 加密备份包并上传云端 |
 
 ## 运行与更新
 
@@ -24,6 +24,7 @@
 
 - 各脚本都依赖公共库 `lib/common.sh` 1.2.0 起的 `bk_*` 函数（`litellm-fullbackup` 要 1.2.3 起：`bk_images` 只列指定容器、`vps_host_port`）；`opsget -i` 会一并同步，库缺失或过旧时脚本报失败并告警。
 - 各脚本各自持有 `/run/lock/<脚本名>.lock`，上一轮没结束时新一轮直接退出、不报心跳。
+- `vw-fullbackup.sh` 与 `xboard-fullbackup.sh` 支持 `--local-only <目录>`：包（连同 `.sha256`）只写进这个目录，不上传、不做分级保留清理、不报心跳、不发告警邮件；上一轮还在跑时等它结束（最多 2 小时）而不是跳过。给 `migrate/live-migrate` 在旧机上现做包、经 SSH 直传新机用；这份包不是例行备份，不该挤掉网盘上的旧包，也不该让心跳监控以为例行备份已上云。
 
 各脚本在头部声明 `ENV-REQUIRED`。版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
