@@ -276,24 +276,6 @@ ufw status numbered
 ufw delete <编号>
 ```
 
-**两步验证的豁免也要跟着换。** 前置机的隧道和定时备份用密钥非交互登录，输不了验证码，所以落地机、LiteLLM 节点对前置机的 IP 免了两步验证。这条豁免同样写的是原前置机的 IP，只改 ufw 不改它，照样连不上。在落地机和 LiteLLM 节点上找出写着原前置机 IP 的 SSH / PAM 配置：
-
-```bash
-grep -rn '<原前置机IP>' /etc/ssh /etc/pam.d /etc/security
-```
-
-把找到的 IP 改成新前置机的，然后检查配置：
-
-```bash
-sshd -t
-```
-
-**保持当前窗口不断开**，重载 SSH（`systemctl restart ssh`），另开一个窗口确认自己还能登录，再到前置机上确认能免验证码连过去：
-
-```bash
-ssh -o BatchMode=yes -p <SSH端口> root@<那台机器的IP> true
-```
-
 **落地机还活着**：加好放行名单之后，其余都不用做。隧道单元和私钥都随备份恢复了，检查一下：
 
 ```bash
@@ -349,7 +331,7 @@ curl -s http://127.0.0.1:3000/api/status | head -c 100
 
 LiteLLM 和 new-api 在同一台机器上时，那台机器没了就 4.8 和本节都做。
 
-**LiteLLM 节点还活着**：前置机是新的话，先按 4.8 开头，在 LiteLLM 节点上把新前置机的 IP 加进 ufw 放行名单，**两步验证的豁免也改成新 IP**，其余都不用做。`env.conf` 里的 `LITELLM_HOST` 和连它用的私钥都随前置机的备份恢复了。手动跑一次确认备份能拉下来：
+**LiteLLM 节点还活着**：前置机是新的话，先按 4.8 开头把新前置机的 IP 加进 LiteLLM 节点的 SSH 放行名单，其余都不用做。`env.conf` 里的 `LITELLM_HOST` 和连它用的私钥都随前置机的备份恢复了。手动跑一次确认备份能拉下来：
 
 ```bash
 litellm-fullbackup.sh
@@ -359,7 +341,7 @@ litellm-fullbackup.sh
 
 > ⚠️ **盐值 `LITELLM_SALT_KEY` 必须用包里原来那一个。** 面板里加的模型和上游 API Key 都用它加密存在 Postgres 里，换了盐值就再也解不开，而且没有任何办法找回。**不要用 `opsget ops/deploy-litellm` 重新部署**：它会生成一套新的 `.env`，也就是新的盐值。
 
-1. 开一台新机器。和落地机一样，**要在上游 API 支持的地区**。放行名单、两步验证按原节点的做法重新配一遍：只允许本地出口 IP、前置机和各节点机连 SSH。**对前置机的 IP 要做两件事，缺一件 `litellm-fullbackup` 就连不上、每 6 小时失败一次**：ufw 放行它；两步验证对它豁免（定时备份用密钥非交互登录，输不了验证码），豁免怎么写照原节点或落地机抄（`grep -rn '<前置机IP>' /etc/ssh /etc/pam.d /etc/security` 能找到）。以后前置机换 IP，这两处都要跟着改（见 4.8 开头）。
+1. 开一台新机器。和落地机一样，**要在上游 API 支持的地区**。放行名单、两步验证按原节点的做法重新配一遍：只允许本地出口 IP、前置机和各节点机连 SSH。**前置机的 IP 一定要放行**，前置机的定时备份用密钥非交互登录（输不了验证码），原节点上前置机怎么登录的，新节点照原样配；否则 `litellm-fullbackup` 连不上，每 6 小时失败一次。
 2. 装 Docker：
 
    ```bash
