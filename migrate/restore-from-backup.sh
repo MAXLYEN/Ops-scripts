@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/restore-from-backup.sh — 原机已不在时，用每日加密备份包把新机恢复成原样
-# VERSION: 1.0.1
+# VERSION: 1.0.2
+# 1.0.2: LiteLLM 包（litellm_*）明确拒绝，指向 ops/litellm-drill 与包里的 RESTORE.md。
 # 1.0.1: 放回的 SSH 配置要求 Google 两步验证时，自动装 libpam-google-authenticator，并用 sshd -t 检查配置；手动步骤里提醒先用新窗口测试登录。原机 ufw 只放行部分 IP 连 SSH 时，核对当前会话的来源 IP，不在名单里就给出放行命令。
 # 1.0.0: 首版。vw / xboard 包（现有布局与 rootfs + restore-manifest.tsv 新布局）：取包、解密、校验，按包还原配置、库与账号、数据、compose 项目（镜像按清单锁版本）、systemd 单元、nginx、定时任务并启动；可重跑；--drill 演练与 teardown 清理。
 # ENV-REQUIRED: BACKUP_PASS_FILE|VW_PASS_FILE DB_CLIENT_HOST MYSQL_DEFAULTS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR
@@ -142,7 +143,10 @@ open_pkg() {  # open_pkg <包路径> <解开到的父目录>
   local f i=${#P_FILE[@]} sha dir x layout kind
   f=$(readlink -f "$1") && [ -f "$f" ] || die "包不存在: $1"
   section "包 $(basename "$f")"
-  case "$(basename "$f")" in newapi_*) die "new-api 包用 ops/newapi-drill 恢复与演练（本脚本只认 vw / xboard 包）" ;; esac
+  case "$(basename "$f")" in
+    newapi_*)  die "new-api 包用 ops/newapi-drill 恢复与演练（本脚本只认 vw / xboard 包）" ;;
+    litellm_*) die "LiteLLM 包不归本脚本（只认 vw / xboard 包）：正式恢复照包里的 RESTORE.md 在 LiteLLM 节点上做，备用机演练用 ops/litellm-drill" ;;
+  esac
   sha=$(sha256sum "$f" | cut -d' ' -f1)
   case "$SHAS" in *" $sha "*) log "和前面的包是同一个，跳过"; return 0 ;; esac
   if [ -f "$f.sha256" ]; then

@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 什么时候用 | 原机已经没了 | 原机还能登录，计划内换机 |
 | 数据从哪来 | 网盘上最近一次的备份包 | 迁移时从原机现做一份，直接传到新机 |
-| 会丢什么 | 最近一次备份之后的改动（vw、xboard 最多 6 小时，new-api 最多 1 小时） | 不丢 |
+| 会丢什么 | 最近一次备份之后的改动（vw、xboard、LiteLLM 最多 6 小时，new-api 最多 1 小时） | 不丢 |
 
 本文放在公开仓库里，**不写任何真实的密码、IP、域名**。
 
@@ -43,7 +43,7 @@
 
 ## 2. 唯一需要手动保存的：备份解密密码
 
-所有备份包（vw、xboard、new-api，以及之后的 LiteLLM）**都用同一个密码加密**。它存在前置机的 `/root/.vw_backup_pass` 里，也就是 `env.conf` 中 `BACKUP_PASS_FILE` 指向的文件。
+所有备份包（vw、xboard、new-api、LiteLLM）**都用同一个密码加密**。它存在前置机的 `/root/.vw_backup_pass` 里，也就是 `env.conf` 中 `BACKUP_PASS_FILE` 指向的文件。
 
 **这个文件不会进任何备份包**（否则拿到包的人就同时拿到了钥匙），所以它**必须手动保存**。在前置机上查看：
 
@@ -55,7 +55,7 @@ cat "$(. /etc/ops-scripts/env.conf; echo "${BACKUP_PASS_FILE:-$VW_PASS_FILE}")"
 - **至少两处，而且都不能只依赖 Vaultwarden**，比如一张纸，加上手机里的一条离线备忘。Vaultwarden 就在要恢复的备份包里，只存在它里面就成了死循环。
 - **不要轻易换这个密码**。换了之后，旧的包仍然只能用旧密码打开。真要换，旧密码也要一直留着，直到旧包全部过期删完（云端最长保留 400 天）。
 
-**其他一切都不需要单独保存**：MySQL 各账号密码、Xboard 的 `APP_KEY` 和数据库密码、rclone 授权、邮件配置、SSH 密钥、证书、`env.conf`、服务器清单，都在加密包里。
+**其他一切都不需要单独保存**：MySQL 各账号密码、Xboard 的 `APP_KEY` 和数据库密码、LiteLLM 的 `.env`（含 `LITELLM_SALT_KEY` 和 master key）、rclone 授权、邮件配置、SSH 密钥、证书、`env.conf`、服务器清单，都在加密包里。
 
 ---
 
@@ -78,7 +78,7 @@ cat "$(. /etc/ops-scripts/env.conf; echo "${BACKUP_PASS_FILE:-$VW_PASS_FILE}")"
 
 ## 4. 恢复流程：从零开始
 
-下面按"前置机彻底没了"来写。只是落地机没了的话，直接看第 4.8 节。
+下面按"前置机彻底没了"来写。只是落地机没了的话，直接看第 4.8 节；只是 LiteLLM 节点没了，直接看第 4.9 节。
 
 ### 4.0 准备一台能用的电脑，以及 SSH 登录的三道关
 
@@ -97,28 +97,30 @@ cat "$(. /etc/ops-scripts/env.conf; echo "${BACKUP_PASS_FILE:-$VW_PASS_FILE}")"
 
 | 情况 | 做什么 |
 | --- | --- |
-| 前置机没了，落地机正常 | 4.2 到 4.7，然后 4.9、4.10 |
+| 前置机没了，落地机和 LiteLLM 节点正常 | 4.2 到 4.7，然后 4.10、4.11 |
 | 落地机没了，前置机正常 | 只做 4.8 |
-| 两台都没了 | 全部都做 |
+| LiteLLM 节点没了，前置机正常 | 只做 4.9 |
+| 都没了 | 全部都做 |
 
 **前置机没了、落地机还活着的时候**，可以先用落地机上的 Cloudflare 备用通道，让 new-api 几分钟内恢复使用，见第 4.7 节最后。
 
 ### 4.2 下载备份包，读出服务器清单
 
-登录 OneDrive 网页版（进不去就换 Google Drive），从三个目录里各下载**最新**的一份：
+登录 OneDrive 网页版（进不去就换 Google Drive），从四个目录里各下载**最新**的一份（LiteLLM 节点还活着的话，`Backup-LiteLLM` 可以不下）：
 
 | 目录 | 文件 |
 | --- | --- |
 | `Backup-Server` | `srvbak_YYYYMMDD_HHMMSS.7z` |
 | `Backup-Xboard` | `xboard_YYYYMMDD_HHMMSS.7z` |
 | `Backup-NewAPI` | `newapi_YYYYMMDD_HHMMSS.7z`，旁边的 `.sha256` 也一起下载 |
+| `Backup-LiteLLM` | `litellm_YYYYMMDD_HHMMSS.7z`，旁边的 `.sha256` 也一起下载 |
 
 用 7-Zip 打开 `srvbak_*.7z`，再打开里面的 `payload.tar.gz`。**恢复需要的信息都在这里：**
 
 | 文件 | 看什么 |
 | --- | --- |
 | `manifest.txt` | 原机的 **MySQL、Nginx 版本**，有哪些站点，有哪些容器 |
-| `rootfs/etc/ops-scripts/env.conf` | 落地机的 IP 和 SSH 端口（`NEWAPI_HOST`、`NEWAPI_SSH_PORT`）、网盘目录名等 |
+| `rootfs/etc/ops-scripts/env.conf` | 落地机的 IP 和 SSH 端口（`NEWAPI_HOST`、`NEWAPI_SSH_PORT`）、LiteLLM 节点的 IP（`LITELLM_HOST`）、网盘目录名等 |
 | `rootfs/root/.vps-hosts.txt` | 其他机器的清单 |
 | `system/nginx/` | 所有站点的域名（每个 `.conf` 文件对应一个站点），切 DNS 时要用 |
 
@@ -325,7 +327,45 @@ curl -s http://127.0.0.1:3000/api/status | head -c 100
 
 6. 在 new-api 后台 → 渠道列表，每个渠道点一次"测试"。
 
-### 4.9 恢复备份体系
+### 4.9 LiteLLM 节点
+
+LiteLLM 和 new-api 在同一台机器上时，那台机器没了就 4.8 和本节都做。
+
+**LiteLLM 节点还活着**：前置机是新的话，先按 4.8 开头把新前置机的 IP 加进 LiteLLM 节点的 SSH 放行名单，其余都不用做。`env.conf` 里的 `LITELLM_HOST` 和连它用的私钥都随前置机的备份恢复了。手动跑一次确认备份能拉下来：
+
+```bash
+litellm-fullbackup.sh
+```
+
+**LiteLLM 节点也没了：**
+
+> ⚠️ **盐值 `LITELLM_SALT_KEY` 必须用包里原来那一个。** 面板里加的模型和上游 API Key 都用它加密存在 Postgres 里，换了盐值就再也解不开，而且没有任何办法找回。**不要用 `opsget ops/deploy-litellm` 重新部署**：它会生成一套新的 `.env`，也就是新的盐值。
+
+1. 开一台新机器。和落地机一样，**要在上游 API 支持的地区**。放行名单、两步验证按原节点的做法重新配一遍：只允许本地出口 IP、前置机和各节点机连 SSH。**前置机的 IP 一定要放行**，否则 `litellm-fullbackup` 连不上，每 6 小时失败一次。
+2. 装 Docker：
+
+   ```bash
+   curl -fsSL https://get.docker.com | sh
+   ```
+
+3. 从网盘 `Backup-LiteLLM` 下载最新的 `litellm_*.7z`，传到新机器，用 7-Zip 解开，**严格按包里的 `RESTORE.md` 做**，顺序不能乱：
+   - 先把 `workdir/` 放回 `/opt/litellm`，`.env` 设成 600，compose 换成包里锁了 digest 的 `system/docker-compose.pinned.yml`；
+   - 只起数据库：`docker compose up -d postgres`（服务名是 `postgres`，容器名才是 `litellm-postgres`）；
+   - 用 `pg_restore --clean --if-exists` 导入 `db/litellm.dump`；
+   - 再 `docker compose up -d` 起全部。**镜像不要改成 `latest`**。
+4. 验证：`/health/liveliness` 返回 200；带 master key 列出的模型和包里 `db/row-counts.tsv` 对得上；**在面板里对每个模型点一次 Test**，能调通才说明盐值是对的（模型列表本身不加密，列得出来不代表凭据能解开）。
+5. 如果 IP 变了，在前置机上：
+   - 改 `/etc/ops-scripts/env.conf` 里的 `LITELLM_HOST`，端口写进 `LITELLM_SSH_PORT` 或 `/root/.vps-hosts.txt`；
+   - 把前置机的公钥加进新节点的 `/root/.ssh/authorized_keys`（放行名单见第 1 步），首次连接确认新的主机指纹：
+
+     ```bash
+     ssh -p 端口 root@新节点IP true
+     ```
+
+   - 前置机到 LiteLLM 的隧道、Nginx 反代里的目标 IP 也要改；
+   - 手动跑一次 `litellm-fullbackup.sh`，确认新节点的备份能拉下来。
+
+### 4.10 恢复备份体系
 
 1. **网盘授权还能不能用：**
 
@@ -354,6 +394,10 @@ curl -s http://127.0.0.1:3000/api/status | head -c 100
    newapi-fullbackup.sh
    ```
 
+   ```bash
+   litellm-fullbackup.sh
+   ```
+
 4. **确认云端最新的包都能解开：**
 
    ```bash
@@ -366,9 +410,9 @@ curl -s http://127.0.0.1:3000/api/status | head -c 100
    crontab -l
    ```
 
-6. **心跳**：心跳地址随 `env.conf` 一起恢复了。等下一次定时备份跑完，到 Healthchecks.io 上确认三个检查项都是绿色。
+6. **心跳**：心跳地址随 `env.conf` 一起恢复了。等下一次定时备份跑完，到 Healthchecks.io 上确认四个检查项都是绿色。
 
-### 4.10 收尾
+### 4.11 收尾
 
 - 删掉 `/root/pkgs/` 里的备份包，以及恢复时的临时目录。
 - 电脑上下载的备份包也删掉。
@@ -389,7 +433,7 @@ curl -s http://127.0.0.1:3000/api/status | head -c 100
 | 4.6 正式恢复 | 命令末尾加 `--drill`：不装定时任务，不启用 systemd 单元，所以隧道不会去连生产环境的落地机 |
 | 4.6 重启 SSH | 也要做一遍，顺带验证密钥、两步验证、放行名单这三道关在新机器上都正常 |
 | 4.7 切换 DNS | **不做**。改用电脑上的 hosts 文件，把域名临时指向临时机来检查；**只看不改**，看完马上删掉 hosts 里加的那几行 |
-| 4.8、4.9、4.10 | **不做** |
+| 4.8 到 4.11 | **不做**（LiteLLM 另有单独的演练，见本节最后） |
 
 演练恢复的命令：
 
@@ -409,13 +453,30 @@ restore-from-backup.sh teardown
 
 **记下来**：日期、总耗时（从开机器到服务能用）、脚本列出的手动步骤、遇到的问题。
 
+**LiteLLM 单独演练**：不用开整套大演练，有一台空闲机器就行。首次上线 LiteLLM 备份后做一次，之后每季度、或改了 LiteLLM 部署之后做一次。在前置机上：
+
+```bash
+opsget ops/litellm-drill restore <备用机IP>
+```
+
+```bash
+opsget ops/litellm-drill verify <备用机IP>
+```
+
+它按包里 `RESTORE.md` 的步骤在备用机上恢复一份，再和线上比行数、列模型。然后照 `verify` 最后给的隧道命令进面板，对模型点 Test，确认盐值是对的。看完清理：
+
+```bash
+opsget ops/litellm-drill teardown <备用机IP>
+```
+
+脚本拒绝对 LiteLLM 生产节点、落地机和前置机本机动手。
+
 ---
 
 ## 6. 不在备份范围内的东西
 
 | 项目 | 现状 | 出事时怎么办 |
 | --- | --- | --- |
-| **LiteLLM 节点**（LiteLLM、Postgres、Redis） | **暂时还没有备份**（正在补） | 用 `opsget ops/deploy-litellm` 重新部署；模型、密钥这些配置要重新填写。**在备份补上之前**，`/opt/litellm/.env` 里的 `LITELLM_SALT_KEY` 丢了，存量凭据就再也解不开 |
 | Xboard 的代理节点机器 | 不在这套备份里 | 面板域名不变的话，节点会自己重新连上；域名变了，要在每台节点上重新指定面板地址 |
 | Komari 的历史监控数据（`metrics` 库） | 按设计只在本地保留，不上传云端 | 恢复后从零开始记录 |
 | 宝塔面板的站点记录和证书自动续期 | 包里只有 Nginx 配置和证书文件 | 在面板里"添加站点"，然后逐个站点重新申请证书（第 4.6 节） |

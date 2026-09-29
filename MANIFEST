@@ -25,6 +25,7 @@ migrate/restore-from-backup     原机已不在：用每日备份包恢复整机
 backup/vw-fullbackup            全服务备份：密码库+监控+订阅转换+系统配置
 backup/xboard-fullbackup        Xboard 单包备份
 backup/newapi-fullbackup        new-api 中转平台备份（从汇总机拉取落地机数据）
+backup/litellm-fullbackup       LiteLLM 节点备份（从汇总机拉取 Postgres 导出、.env 与 compose）
 
 # ── ops/ 日常运维 ──────────────────────────────────────────
 ops/save-fw                     改防火墙前保存现状
@@ -47,6 +48,7 @@ ops/panel-backup-upload         把面板整机备份包加密上传到网盘（
 ops/newapi-linkcheck            new-api 链路健康检查（隧道 + 公网全链路，cron 5 分钟）
 ops/newapi-drill                new-api 灾难恢复演练（restore/verify/teardown，备用机上验证备份可还原）
 ops/deploy-litellm              在落地机部署 LiteLLM+Postgres+Redis 三容器（与 new-api 并行）
+ops/litellm-drill               LiteLLM 灾难恢复演练（restore/verify/teardown，备用机上验证备份可还原）
 ops/check-llm-security          LLM 两站访问控制现状盘点（只读，改动前先跑）
 ops/sync-llm-allowlist          同步 LiteLLM 白名单、fail2ban ignoreip 与 401 jail
 ops/containerize-and-pin        容器转 compose 管理并把镜像锁定为 digest

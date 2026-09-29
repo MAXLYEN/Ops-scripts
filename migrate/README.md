@@ -15,7 +15,7 @@
 | `07-restore-containers.sh` | 2.0.2 | 在迁入机恢复容器数据并生成启动命令 |
 | `08-post-start-check.sh` | 2.1.2 | 在迁入机执行容器与站点端到端验收 |
 | `09-restore-backup-stack.sh` | 2.0.1 | 在迁入机重建备份依赖和配置 |
-| `restore-from-backup.sh` | 1.0.1 | 原机已不在时，用每日加密备份包把新机恢复成原样 |
+| `restore-from-backup.sh` | 1.0.2 | 原机已不在时，用每日加密备份包把新机恢复成原样 |
 
 `01` 和 `04` 在新旧机各运行一次并比较输出；`02` 用迁入机监听、迁出机探测入站端口；`03` 与 `06` 在迁出机运行，其余恢复和验收步骤在迁入机运行。具体参数见各脚本头部及命令输出。
 
@@ -48,6 +48,6 @@ opsget migrate/restore-from-backup restore /root/srvbak_x.7z /root/xboard_y.7z  
 - **季度演练**：在临时机上 `restore --drill`，本机有任何数据就拒绝，不装定时任务（否则会从演练机往生产网盘传包并按保留期删云端旧包），不启用 systemd 单元（隧道会连到生产机）；验证完 `teardown` 删掉恢复出来的容器、库、账号、文件，替换过的系统配置从 `.bak` 放回，`env.conf` 还原，演练时装的 docker 一并卸载。正式恢复过的机器拒绝 `teardown`。
 - 暂存目录 `/root/dr_restore` 里是解开的明文包（dump、密钥、证书私钥），验证完删掉。
 
-包的两种布局都认：现有的 vw（`payload.tar.gz` 内 `db/ vaultwarden/ komari/ subconverter/ system/`）与 xboard（`db/ app/ nginx/ deploy/`），以及新布局 `rootfs/` + `restore-manifest.tsv`（列：路径、权限、属主、类型；类型有 `file` `dir` `sqlite` `systemd-unit` `mysql-db` `mysql-user` `compose-project` `crontab`）。旧版包只收 vhost 目录顶层的 `*.conf`，站点 include 的伪静态、反代配置缺失时 `nginx -t` 不通过，这时不重载并列进手动步骤；新布局收了整个面板 `vhost/`。new-api 的包不归这个脚本，用 `ops/newapi-drill`。
+包的两种布局都认：现有的 vw（`payload.tar.gz` 内 `db/ vaultwarden/ komari/ subconverter/ system/`）与 xboard（`db/ app/ nginx/ deploy/`），以及新布局 `rootfs/` + `restore-manifest.tsv`（列：路径、权限、属主、类型；类型有 `file` `dir` `sqlite` `systemd-unit` `mysql-db` `mysql-user` `compose-project` `crontab`）。旧版包只收 vhost 目录顶层的 `*.conf`，站点 include 的伪静态、反代配置缺失时 `nginx -t` 不通过，这时不重载并列进手动步骤；新布局收了整个面板 `vhost/`。new-api 的包不归这个脚本，用 `ops/newapi-drill`；LiteLLM 的包也不归它，正式恢复照包里的 `RESTORE.md` 在 LiteLLM 节点上做，备用机演练用 `ops/litellm-drill`。
 
 版本记录见 [CHANGELOG.md](CHANGELOG.md)。

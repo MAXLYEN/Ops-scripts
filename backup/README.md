@@ -1,11 +1,12 @@
 # 生产备份
 
-本目录提供 Vaultwarden 等服务、Xboard 与 new-api 的备份脚本。备份包在本地生成并校验后上传；密码从权限受控的文件读取。脚本通过 `/etc/ops-scripts/env.conf` 获取路径、远端和告警配置。
+本目录提供 Vaultwarden 等服务、Xboard、new-api 与 LiteLLM 的备份脚本。备份包在本地生成并校验后上传；密码从权限受控的文件读取。脚本通过 `/etc/ops-scripts/env.conf` 获取路径、远端和告警配置。
 
 ## 脚本
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
+| `litellm-fullbackup.sh` | 1.0.0 | 从汇总机拉取 LiteLLM 节点的库导出与工作目录，加密上传 |
 | `newapi-fullbackup.sh` | 1.1.0 | 从汇总机拉取 new-api 数据，生成一致性快照并加密上传 |
 | `vw-fullbackup.sh` | 2.5.0 | 备份 Vaultwarden、Komari、SubConverter 与系统配置 |
 | `xboard-fullbackup.sh` | 2.4.1 | 生成 Xboard 加密备份包并上传云端 |
@@ -16,20 +17,23 @@
 
 - `vw-fullbackup.sh` 与 `xboard-fullbackup.sh` 使用 `BACKUP_PASS_FILE`，兼容旧的 `VW_PASS_FILE`；两者都是密码文件路径。
 - `newapi-fullbackup.sh` 从落地机拉取数据；SQLite 用在线备份 API 生成一致性快照，避免直接复制运行中的 WAL 数据库。
+- `litellm-fullbackup.sh` 从 LiteLLM 节点拉取数据：在节点上 `docker exec litellm-postgres pg_dump -U litellm -Fc litellm`（事务快照，一致且不停服；**绝不复制运行中的 `pgdata/`**），并用容器自己的 `pg_restore --list` 读一遍，读不开就整轮失败；工作目录 `LITELLM_WORKDIR` 除 `pgdata/` 与日志外全收（`.env`、`config.yaml`、`docker-compose.yml`）。SSH 端口取 `LITELLM_SSH_PORT`，没有就取 `~/.vps-hosts.txt`，再没有用 22。
+- **LiteLLM 的 Redis 不备份**：`ops/deploy-litellm` 起的 Redis 只作响应缓存（`config.yaml` 的 `cache_params`），compose 里就关了持久化（`--save "" --appendonly no`），重启本来就是空的，里面没有要留的状态。
+- **`LITELLM_SALT_KEY` 在 LiteLLM 包的 `workdir/.env` 里**：面板里加的模型和上游 Key 在 Postgres 里用它加密，恢复时必须用原来那一个，换了就永远解不开。包里 `RESTORE.md` 开头就讲这一点，并附盐值的指纹（sha256 前 12 位）供核对。
 - 备份是否可解开，另用 `ops/verify-backup-pass.sh` 检查；完整恢复能力仍需演练。
 
-- 三个脚本都依赖公共库 `lib/common.sh` 1.2.0 起的 `bk_*` 函数；`opsget -i` 会一并同步，库缺失或过旧时脚本报失败并告警。
-- 三个脚本各自持有 `/run/lock/<脚本名>.lock`，上一轮没结束时新一轮直接退出、不报心跳。
+- 各脚本都依赖公共库 `lib/common.sh` 1.2.0 起的 `bk_*` 函数（`litellm-fullbackup` 要 1.2.3 起：`bk_images` 只列指定容器、`vps_host_port`）；`opsget -i` 会一并同步，库缺失或过旧时脚本报失败并告警。
+- 各脚本各自持有 `/run/lock/<脚本名>.lock`，上一轮没结束时新一轮直接退出、不报心跳。
 
 各脚本在头部声明 `ENV-REQUIRED`。版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 频率与分级保留
 
-目标频率：`vw-fullbackup` 与 `xboard-fullbackup` 每 6 小时一次，`newapi-fullbackup` 每小时一次。cron 由 `ops/install-backup-cron.sh` 安装（不在本目录）；改频率后，外部心跳监控的周期也要同步改。
+目标频率：`vw-fullbackup`、`xboard-fullbackup`、`litellm-fullbackup` 每 6 小时一次，`newapi-fullbackup` 每小时一次。cron 由 `ops/install-backup-cron.sh` 安装（不在本目录）；改频率后，外部心跳监控的周期也要同步改。
 
 清理按包文件名里的时间戳（`<前缀>_YYYYMMDD_HHMMSS.7z`，按 UTC 解释）分档，本地和每个 rclone 远端各自执行：
 
-| 档位 | vw / xboard | new-api | 保留 |
+| 档位 | vw / xboard / litellm | new-api | 保留 |
 | --- | --- | --- | --- |
 | 全留 | 7 天内 | 2 天内 | 全部 |
 | 按天 | 30 天内 | 30 天内 | 每天最早的一份 |
@@ -74,6 +78,17 @@ vw 与 xboard 的 7z 里是 `payload.tar.gz`（保留属主与权限，7z 不记
 
 new-api 包只新增 `images.tsv`，没有 rootfs 与还原清单（见下节「不在包里」）。
 
+LiteLLM 包（`litellm_YYYYMMDD_HHMMSS.7z`，不套 `payload.tar.gz`）也没有 rootfs，还原照包里的 `RESTORE.md` 手动做，或先用 `ops/litellm-drill` 在备用机演练：
+
+| 路径 | 内容 |
+| --- | --- |
+| `workdir/` | 原工作目录：`.env`（含 `LITELLM_SALT_KEY`、`LITELLM_MASTER_KEY`、`POSTGRES_PASSWORD`）、`config.yaml`、`docker-compose.yml`；不含 `pgdata/` 与日志 |
+| `db/litellm.dump` | `pg_dump -Fc` 导出；`db/litellm.dump.sha256` 是节点上算的校验和（拉回后核对），`db/litellm.toc` 是 `pg_restore --list` 的输出，`db/row-counts.tsv` 是几张关键表的行数 |
+| `images.tsv` | `litellm`、`litellm-postgres`、`litellm-redis` 的镜像与 RepoDigest |
+| `system/docker-compose.pinned.yml` | 镜像换成 digest 的 compose，还原用它 |
+| `system/inspect-<容器>.json`、`container-ps.txt`、`docker-version.txt`、`os-release.txt` 等 | 现场信息，只作参考 |
+| `manifest.txt`、`RESTORE.md` | 清单（含盐值指纹）与自包含的还原步骤 |
+
 ## 备份覆盖范围
 
 目标是换一台新机能还原成与原机一致；日志不收。
@@ -107,13 +122,13 @@ new-api 包只新增 `images.tsv`，没有 rootfs 与还原清单（见下节「
 | 日志（`*.log`、`*.log.N`、`/var/log`、Xboard `storage/logs`） | 按要求不收 |
 | 备份自己的落盘目录（`*_BACKUP_DIR`、`BACKUP_DIRS`、`SNAPSHOT_ROOT` 等） | 包里套包，越滚越大 |
 | metrics 库（`METRICS_DB_NAME`） | 体积大，按方案由面板在本地 dump、不上云；还原后监控历史从零开始 |
-| Redis | 纯缓存 |
+| Redis（Xboard 的、LiteLLM 的） | 纯缓存；LiteLLM 的 Redis 连持久化都关了 |
 | Docker 镜像本体 | 按 `images.tsv` 的 digest 拉回，与原来逐字节一致 |
 | Komari 主题 | 可在面板里重新下载，清单在 `komari/theme-list.txt` |
 | 超过 5MB 的 `/usr/local/bin` 二进制 | 静态二进制（rclone 等），重装即可；每 6 小时一份时不值得反复上传 |
 | fstab、hostname、hosts、网卡与 IP、apt 源 | 带原机磁盘 UUID 或 IP，原样放回会弄坏新机；只放 `system/ref/` 作参考，挂载参数（hidepid）由 init/02 重建 |
 | 时区、swap | 由 init/ 按 `TZ_EXPECTED` 与内存重建 |
-| **new-api 落地机的系统配置**（sshd、ufw、fail2ban、docker 设置等）与 **LiteLLM**（Postgres 数据、compose、`.env`） | `newapi-fullbackup` 只从汇总机拉 new-api 的数据目录。尚未覆盖，需要另行补上 |
+| **new-api 落地机、LiteLLM 节点的系统配置**（sshd、ufw、fail2ban、docker 设置等） | `newapi-fullbackup`、`litellm-fullbackup` 只从汇总机拉各自服务的数据。系统配置尚未覆盖，换机时按 `init/` 重建 |
 | 非 compose 起的容器 | 还原脚本无法自动启动；启动参数见 vw 包的 `system/docker/run-commands.sh`，建议用 `ops/containerize-and-pin` 转成 compose。每次备份会告警 |
 | 数据没进包的 compose 项目 | 只收 compose 文件，不记 `compose-project`，并告警；需要的话把数据目录加进 `EXTRA_SNAPSHOT_PATHS`，确实无状态的写进 `BACKUP_IGNORE_CONTAINERS` |
 

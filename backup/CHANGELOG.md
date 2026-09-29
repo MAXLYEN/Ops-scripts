@@ -2,6 +2,14 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-09-28：LiteLLM 节点备份
+
+LiteLLM 节点原先没有任何备份：面板里加的模型与上游 Key 存在 Postgres 里、用 `LITELLM_SALT_KEY` 加密，节点一丢、或 `.env` 一丢，就只能重新部署、重新填，存量凭据永远解不开。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `litellm-fullbackup.sh` | 新增 → 1.0.0 | 在汇总机运行，SSH 到 `LITELLM_HOST`（端口取 `LITELLM_SSH_PORT` → `~/.vps-hosts.txt` → 22）。节点上 `docker exec litellm-postgres pg_dump -U litellm -Fc litellm` 一致性导出（不复制运行中的 `pgdata/`），用容器自己的 `pg_restore --list` 读一遍、算校验和，读不开或导出为空整轮失败；拉回后核对 `PGDMP` 文件头与校验和，目录里没有 `LiteLLM_ProxyModelTable` 的数据时告警。工作目录除 `pgdata/` 与日志外全收（`.env` 缺 `LITELLM_SALT_KEY` 时失败）。三个容器的镜像与 RepoDigest（公共库的 `bk_images` 送到节点上执行）、`docker inspect`，并生成镜像换成 digest 的 `system/docker-compose.pinned.yml`。Redis 只是缓存且关了持久化，不备份。包里的 `RESTORE.md` 自包含：装 docker → 先放回工作目录与 `.env` → `docker compose up -d postgres` → `pg_restore --clean --if-exists` → 按 digest 起全部 → `/health/liveliness` 与带 master key 列模型，并在开头警告盐值必须用原来那一个（附指纹）。7z `-mhe=on` 加密、`.sha256` 旁注、逐个远端上传并校验、GFS 分级保留（档位与 vw / xboard 共用，任一远端失败不清理）、防重入锁、心跳 `LITELLM_HEARTBEAT_URL`。 |
+
 ## 2026-09-28：xboard 包不再带指标库
 
 | 文件 | 原版本 → 当前版本 | 变更 |

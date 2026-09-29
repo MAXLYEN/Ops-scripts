@@ -5,7 +5,7 @@
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
 | `opsget` | 1.6.0 | 从仓库拉取、安装和执行运维脚本 |
-| `opsbox` | 1.3.0 | 中文菜单：按分类或场景挑功能，常用组合自动串联 |
+| `opsbox` | 1.4.0 | 中文菜单：按分类或场景挑功能，常用组合自动串联 |
 
 ## 常用命令
 
@@ -33,11 +33,11 @@ opsget --pin v2026.09.24          # 固定到验证过的 tag；--pin 查看，-
 - **向导**：新机初始化记住进度（`/var/lib/ops-scripts/opsbox.state`），重启后回来从下一步接着走；整机迁移先选迁出机或迁入机，只列这台该跑的步骤
 - 「立即备份」直接运行本机已装的备份脚本，并从 crontab 里读出同一把 flock 锁，不会和定时备份撞车
 - 「从备份包恢复整机」（备份与恢复）：可先只校验并列出恢复计划；正式恢复要输主机名，本机已有数据时脚本会拒绝，菜单不替人加 `--force`（覆盖要在命令行里明确写）；演练恢复先确认，清理演练要输主机名
-- 「定时任务」（工具箱设置）：本机装了备份脚本时，先预演统一时间表（vw / xboard 每 6 小时、newapi 每小时），确认后才写入
+- 「定时任务」（工具箱设置）：本机装了备份脚本时，先预演统一时间表（vw / xboard / litellm 每 6 小时、newapi 每小时），确认后才写入
 
 退出码分不清「有告警」和「失败」（`common.sh` 的 `finish` 与 `die` 都是 1），所以联动里的只读检查一律跑完再汇总，改动前都由菜单单独确认。
 
-**没进菜单的脚本**仍可用 `opsget <路径>` 运行，原因写在 `opsbox` 的 `MENU-EXCLUDE` 注释里：一次性的修复与部署（`apply-newapi-quota-fix`、`fix-newapi-*`、`deploy-litellm`、`containerize-and-pin`）、退役归档 `decommission-archive`、备用机演练 `newapi-drill`、改应用库连接串的 `db/sqlite-dsn`、在路由器上运行的 `openclash/`。CI 会核对 MANIFEST 里的每个脚本要么登记进菜单、要么写明排除，新增脚本忘了归类会被拦下。
+**没进菜单的脚本**仍可用 `opsget <路径>` 运行，原因写在 `opsbox` 的 `MENU-EXCLUDE` 注释里：一次性的修复与部署（`apply-newapi-quota-fix`、`fix-newapi-*`、`deploy-litellm`、`containerize-and-pin`）、退役归档 `decommission-archive`、备用机演练 `newapi-drill`、`litellm-drill`、改应用库连接串的 `db/sqlite-dsn`、在路由器上运行的 `openclash/`。CI 会核对 MANIFEST 里的每个脚本要么登记进菜单、要么写明排除，新增脚本忘了归类会被拦下。
 
 脚本头部的 `# ENV-REQUIRED:` 声明用于按需预检；`A|B` 表示两个键任一有值即可。未声明的脚本不要求 `env.conf`。`OPS_REPO` 可指定仓库。ref 按「环境变量 `OPS_REF` > `/etc/ops-scripts/ref`（`--pin` 写入）> `main`」判定，执行脚本时导出 `OPS_REF`；固定与发版流程见根目录 README 的「固定版本」。无人值守的 cron 应调用已安装脚本的本地路径。
 

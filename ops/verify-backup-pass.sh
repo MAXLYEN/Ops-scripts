@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/verify-backup-pass.sh — 验证本地密码能否解开云端备份包
-# VERSION: 2.1.0
+# VERSION: 2.2.0
+# 2.2.0: 本机装了哪个备份脚本，就把它的云端目录并入校验（不在 RCLONE_PATHS 里时自动加上并提示补配置），LiteLLM 包不会漏校验。
 # 2.1.0: 新增 --cron（失败告警 + 心跳）；检查最新包的时效，过旧即告警；按修改时间取最新包；超大包跳过。
 # ENV-REQUIRED: BACKUP_PASS_FILES RCLONE_PATHS RCLONE_REMOTES
 # 定时用法见 ops/README.md：每周一次，把「包能解开」从假设变成定期验证过的事实。
@@ -54,9 +55,32 @@ for f in $BACKUP_PASS_FILES; do
   fi
 done
 
+# 装了哪个备份脚本，它的云端目录就要校验。RCLONE_PATHS 是手填的，新增备份脚本时
+# 容易忘了补（LiteLLM 就是这样）：漏掉的目录不报错，只是永远没人校验。并进来并提示补配置
+section "校验范围"
+PATHS=""
+for p in $RCLONE_PATHS; do p=${p#/}; p=${p%/}; [ -n "$p" ] && PATHS="$PATHS $p"; done
+while read -r s k def; do
+  [ -x "${OPS_BIN_DIR:-/usr/local/bin}/$s.sh" ] || continue
+  d=${!k:-}; [ -n "$d" ] || d=$def
+  d=${d#/}; d=${d%/}
+  [ -n "$d" ] && [ "$d" != - ] || { log "$s 已安装，但没配 $k，不知道它的云端目录"; continue; }
+  case " $PATHS " in
+    *" $d "*) echo "  $s → $d" ;;
+    *) PATHS="$PATHS $d"
+       log "$s 的云端目录 $d 不在 RCLONE_PATHS 里，本次一并校验；请把它加进 env.conf 的 RCLONE_PATHS"
+       note "- $d 不在 RCLONE_PATHS（$s），已自动并入校验" ;;
+  esac
+done <<'EOF'
+vw-fullbackup VW_REMOTE_PATH -
+xboard-fullbackup XBOARD_REMOTE_PATH -
+newapi-fullbackup NEWAPI_CLOUD_DIR Backup-NewAPI
+litellm-fullbackup LITELLM_CLOUD_DIR Backup-LiteLLM
+EOF
+
 # 逐个远端目录取最新的包，逐个密码试
 for r in $RCLONE_REMOTES; do
-  for p in $RCLONE_PATHS; do
+  for p in $PATHS; do
     section "$r:/$p"
     # 按修改时间取最新，而不是按文件名：目录里可能混着不同命名的包
     LINE=$(rclone lsf "$r:/$p" --include '*.7z' --format tsp 2>/dev/null | sort | tail -1)

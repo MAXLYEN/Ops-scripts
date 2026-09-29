@@ -2,6 +2,14 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-09-28：LiteLLM 备份的定时、校验与演练
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `install-backup-cron.sh` | 1.0.0 → 1.1.0 | 时间表新增 `litellm-fullbackup`，每 6 小时 :40（与 vw :00、xboard :20 错开；newapi 仍是每小时 :05） |
+| `verify-backup-pass.sh` | 2.1.0 → 2.2.0 | 本机装了哪个备份脚本（vw / xboard / newapi / litellm），它的云端目录（`VW_REMOTE_PATH`、`XBOARD_REMOTE_PATH`、`NEWAPI_CLOUD_DIR`、`LITELLM_CLOUD_DIR`，后两个有默认值）不在 `RCLONE_PATHS` 里时自动并入本次校验，并在输出与汇总里提示补配置。原先新增备份脚本后忘了改 `RCLONE_PATHS`，那个目录就永远没人校验，也不报错 |
+| `litellm-drill.sh` | 新增 → 1.0.0 | 在备用机上演练 LiteLLM 包的恢复：`restore` 取网盘最新包或本地包，核对 sha256、导出与盐值（`.env` 没有盐值、盐值指纹与清单不符、compose 没锁 digest 都拒绝），按 `RESTORE.md` 的顺序恢复到 `/opt/litellm-drill` 并等健康检查；`verify` 与线上比行数（只读）、带 master key 列模型（key 经 stdin 给 curl）、查日志里的解密错误；`teardown` 只删带演练标记的目录，目标机原本没有 docker 就卸载。拒绝 `LITELLM_HOST`、`NEWAPI_HOST` 与本机；目标机已有 litellm 容器、生产工作目录、上次没清的演练目录或端口被占也拒绝 |
+
 ## 2026-09-28：备份定时任务安装器
 
 | 文件 | 原版本 → 当前版本 | 变更 |
