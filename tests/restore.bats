@@ -17,7 +17,8 @@ export DR_ROOT=$R/stage
 
 setup() {
   reset_host
-  rm -rf "$R" "$FDB" /tmp/pkgsrc /tmp/pkgs /root/ops-backups /root/.ssh /root/.ssh.bak.* /root/.my.cnf* /root/deploy
+  rm -rf "$R" "$FDB" /tmp/pkgsrc /tmp/pkgs /root/ops-backups /root/.ssh /root/.ssh.bak.* /root/.my.cnf* /root/deploy \
+         /usr/local/sbin/ops-drill-egress /etc/systemd/system/ops-drill-egress.service /tmp/ipt.rules
   mkdir -p /tmp/pkgs "$R/vhost"
   printf 'correct-horse-battery-staple-01\n' > "$PASSF"; chmod 600 "$PASSF"
   touch /root/.my.cnf
@@ -350,6 +351,54 @@ none() {
   [ -z "$(ls "$FDB/user")" ]
   cmp /tmp/env.before /etc/ops-scripts/env.conf
   [ ! -e /var/lib/ops-scripts/dr-restore.state ] && [ ! -e "$DR_ROOT" ]
+}
+
+# 假 iptables / ip6tables：规则按「命令 链 参数」一行记进 /tmp/ipt.rules；-D 删掉一条，没有就失败（跟真的一样）
+fake_iptables() {
+  cat > /usr/local/bin/iptables <<'SH'
+#!/usr/bin/env bash
+f=/tmp/ipt.rules; touch "$f"; me=$(basename "$0")
+[ "$1" = -w ] && shift
+op=$1; shift
+case "$op" in
+  -N) exit 0 ;;
+  -I) printf '%s %s\n' "$me" "$*" >> "$f" ;;
+  -D) l="$me $*"; grep -qxF -- "$l" "$f" || exit 1
+      awk -v l="$l" '!d && $0 == l { d = 1; next } { print }' "$f" > "$f.t" && mv "$f.t" "$f" ;;
+esac
+SH
+  chmod 755 /usr/local/bin/iptables; ln -sf iptables /usr/local/bin/ip6tables
+}
+
+@test "演练：起容器前拦下容器主动外连（开机自启、排在 docker 前），重跑不叠加；teardown 撤掉；正式恢复不加" {
+  fake_iptables
+  make_vw
+  restore restore "$VW" --no-start --drill
+  has "容器主动外连已拦下"
+  has "发信测试这类要连外网的功能会失败"
+  [ "$(grep -c '^iptables DOCKER-USER -i docker0 ! -o docker0 -m conntrack --ctstate NEW .*-j REJECT$' /tmp/ipt.rules)" = 1 ]
+  [ "$(grep -c '^iptables DOCKER-USER -i br-+ ! -o br-+ -m conntrack --ctstate NEW .*-j REJECT$' /tmp/ipt.rules)" = 1 ]
+  [ "$(grep -c '^ip6tables DOCKER-USER' /tmp/ipt.rules)" = 2 ]
+  grep -qx 'Before=docker.service' /etc/systemd/system/ops-drill-egress.service
+  grep -qx 'WantedBy=multi-user.target docker.service' /etc/systemd/system/ops-drill-egress.service
+  grep -qx 'ExecStart=/usr/local/sbin/ops-drill-egress start' /etc/systemd/system/ops-drill-egress.service
+  restore restore "$VW" --no-start --drill
+  [ "$(wc -l < /tmp/ipt.rules)" = 4 ]
+  OPS_YES=1 restore teardown
+  has "撤掉演练时加的容器外连限制"
+  [ ! -s /tmp/ipt.rules ]
+  [ ! -e /usr/local/sbin/ops-drill-egress ] && [ ! -e /etc/systemd/system/ops-drill-egress.service ]
+  make_vw
+  restore restore "$VW" --no-start
+  [ ! -s /tmp/ipt.rules ] && [ ! -e /etc/systemd/system/ops-drill-egress.service ]
+  none "外连" "$output"
+}
+
+@test "演练：加不上外连限制时，--no-start 列进手动步骤、不算告警" {
+  make_vw
+  restore restore "$VW" --no-start --drill
+  has "起容器之前先让 /usr/local/sbin/ops-drill-egress start 成功"
+  none "外连限制没加上" "$output"
 }
 
 @test "teardown：正式恢复过的机器拒绝清理" {

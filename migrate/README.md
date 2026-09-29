@@ -15,7 +15,7 @@ new-api 落地机不走这里：演练与恢复见 `ops/newapi-drill`，换落�
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
 | `live-migrate.sh` | 1.0.0 | 原机还在：一键迁移，在旧机上运行（预检 → 演练 → 停写切换 → DNS，DNS 前可回滚） |
-| `restore-from-backup.sh` | 1.1.0 | 原机已不在时，用每日加密备份包把新机恢复成原样；也是一键迁移在新机上调用的恢复步骤 |
+| `restore-from-backup.sh` | 1.2.0 | 原机已不在时，用每日加密备份包把新机恢复成原样；也是一键迁移在新机上调用的恢复步骤 |
 | `01-inventory.sh` | 2.0.1 | 旧流程：在新旧机器采集迁移前环境清单 |
 | `02-nat-probe.sh` | 2.0.2 | 旧流程：从外部验证迁入机的端口入站可达性 |
 | `03-pre-migrate.sh` | 2.0.4 | 旧流程：在迁出机停服并制作完整冷快照 |
@@ -137,7 +137,7 @@ opsget migrate/restore-from-backup restore /root/srvbak_x.7z /root/xboard_y.7z  
 - **已有数据**：有上面说的冲突时直接拒绝；加 `--force` 才覆盖，原有目录移到 `.bak.<时间>`，原有库先导出到暂存目录再删。
 - **可以重跑**：状态记在 `/var/lib/ops-scripts/dr-restore.state`。同一批包重跑时，已恢复过的跳过（服务跑起来后改过的数据目录不会被覆盖）、导了一半的库删掉重导、crontab 不重复。
 - **`--no-cron`**：正式恢复并启动，但不装定时任务（不并入原机的定时任务、不排备份）。原机还在服务时的迁移演练用（一键迁移就是这样调用的），接手服务时不带它再恢复一次。
-- **季度演练**：在临时机上 `restore --drill`，本机有任何数据就拒绝，不装定时任务（否则会从演练机往生产网盘传包并按保留期删云端旧包），不启用 systemd 单元（隧道会连到生产机）；验证完 `teardown` 删掉恢复出来的容器、库、账号、文件，替换过的系统配置从 `.bak` 放回，`env.conf` 还原，演练时装的 docker 一并卸载。正式恢复过的机器拒绝 `teardown`。
+- **季度演练**：在临时机上 `restore --drill`，本机有任何数据就拒绝，不装定时任务（否则会从演练机往生产网盘传包并按保留期删云端旧包），不启用 systemd 单元（隧道会连到生产机），起容器前在 `DOCKER-USER` 链拒绝容器主动外连（容器用的是生产数据，不拦会给真实用户发提醒邮件、往告警渠道发离线通知；写成开机自启、排在 docker 之前的 `ops-drill-egress` 单元，加不上就不起容器）；验证完 `teardown` 删掉恢复出来的容器、库、账号、文件，撤掉外连限制，替换过的系统配置从 `.bak` 放回，`env.conf` 还原，演练时装的 docker 一并卸载。正式恢复过的机器拒绝 `teardown`。
 - 暂存目录 `/root/dr_restore` 里是解开的明文包（dump、密钥、证书私钥），验证完删掉。
 
 包的两种布局都认：现有的 vw（`payload.tar.gz` 内 `db/ vaultwarden/ komari/ subconverter/ system/`）与 xboard（`db/ app/ nginx/ deploy/`），以及新布局 `rootfs/` + `restore-manifest.tsv`（列：路径、权限、属主、类型；类型有 `file` `dir` `sqlite` `systemd-unit` `mysql-db` `mysql-user` `compose-project` `crontab`）。旧版包只收 vhost 目录顶层的 `*.conf`，站点 include 的伪静态、反代配置缺失时 `nginx -t` 不通过，这时不重载并列进手动步骤；新布局收了整个面板 `vhost/`。new-api 的包不归这个脚本，用 `ops/newapi-drill`；LiteLLM 的包也不归它，正式恢复照包里的 `RESTORE.md` 在 LiteLLM 节点上做，备用机演练用 `ops/litellm-drill`。
