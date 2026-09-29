@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/restore-from-backup.sh — 原机已不在时，用每日加密备份包把新机恢复成原样
-# VERSION: 1.2.0
+# VERSION: 1.3.0
+# 1.3.0: 真机演练发现的三处：新布局整棵放回面板 vhost/ 时也检查并重载 nginx（原先只认单个 *.conf，站点全打不开）；Komari 指标库不进包，恢复时建空库并恢复它的账号（原先账号被当成「对恢复的库没有授权」跳过，Komari 起不来）；teardown 认 compose.yaml 与 docker-compose.yml 任一（原先要两个都在，容器一个都没停），停不下就中止、外连限制与库文件都不动。
 # 1.2.0: --drill 起容器前在 DOCKER-USER 链拒绝容器主动外连（开机自启、先于 docker 生效），加不上就不起容器；teardown 撤掉。演练机上的容器用的是生产数据，否则会给真实用户发提醒邮件、往告警群发离线通知。
 # 1.1.0: 新增 --no-cron：正式恢复并启动，但不装定时任务（一键迁移的演练用：原机还在服务，新机不能往网盘传包、按保留期删云端的包）。
 # 1.0.2: LiteLLM 包（litellm_*）明确拒绝，指向 ops/litellm-drill 与包里的 RESTORE.md。
@@ -106,6 +107,8 @@ dump_tables() { if [[ $1 == *.gz ]]; then zcat "$1"; else cat "$1"; fi | grep -c
 db_tables() { myq "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='$1'"; }
 acct_exists() { [ "$(myq "SELECT COUNT(*) FROM mysql.user WHERE User='$1' AND Host='$2'")" -gt 0 ]; }
 nginx_bin() { command -v nginx 2>/dev/null || { [ -x /www/server/nginx/sbin/nginx ] && echo /www/server/nginx/sbin/nginx; }; }
+compose_file() { ls "$1"/compose.y*ml "$1"/docker-compose.y*ml 2>/dev/null | head -1; }   # 目录里的 compose 文件（任一名字）
+metrics_db() { local d=${METRICS_DB_NAME:-metrics}; [[ $d =~ ^[A-Za-z0-9_]+$ ]] && printf '%s' "$d"; }
 mysql_ok() { [ -f "${MYSQL_DEFAULTS_FILE:-}" ] && command -v mysql >/dev/null 2>&1 && my -e 'SELECT 1' >/dev/null 2>&1; }
 safe_rm() {  # 只删我们建出来的路径；浅层系统目录一律拒绝
   case "$1" in
@@ -688,7 +691,8 @@ plan() {
         fi ;;
       mysql-user)
         sql="${P_DIR[IT_PKG[n]]}/users.$n.sql"
-        acc=$(python3 -c "$USER_PY" "$src" "$DB_CLIENT_HOST" "${dbs#,}" "$sql") || die "账号 SQL 不合规：$src"
+        # Komari 指标库按设计不进包，但它的账号要恢复（apply_metrics_db 建空库），否则 Komari 连不上库、起不来
+        acc=$(python3 -c "$USER_PY" "$src" "$DB_CLIENT_HOST" "${dbs#,},$(metrics_db)" "$sql") || die "账号 SQL 不合规：$src"
         while IFS=$'\t' read -r tag u h o; do
           case "$tag" in
             SKIP) log "不恢复账号 $u@'$h'：$o" ;;
@@ -941,6 +945,21 @@ apply_db() {  # apply_db <序号>
   st_add DBDONE "$db" "$sha"
 }
 
+# 恢复出来的账号里有对指标库的授权、本机又没有这个库：建空库，Komari 启动时自己建表，监控历史从零开始
+apply_metrics_db() {
+  local db n
+  db=$(metrics_db) || return 0
+  for n in "${!IT_KIND[@]}"; do
+    [ "${IT_KIND[n]}" = mysql-user ] && grep -qsE "ON [\`'\"]?${db}[\`'\"]?\." "${IT_SRC[n]}" && break
+    n=""
+  done
+  [ -n "$n" ] || return 0
+  db_exists "$db" && { log "指标库 $db 本机已有，不动"; return 0; }
+  my -e "CREATE DATABASE \`$db\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" || die "建指标库 $db 失败"
+  st_add DBCREATED "$db"
+  ok "建空的指标库 $db（按设计不进包，Komari 的监控历史从零开始）"
+}
+
 apply_users() {  # apply_users <序号>：先 DROP USER IF EXISTS 再建，重跑结果一样
   local n=$1 u h o
   my < "${IT_SRC[n]}" || die "建账号失败（${IT_SRC[n]}）"
@@ -1171,6 +1190,7 @@ apply_all() {
     [ "${IT_KIND[n]}" = mysql-db ] || continue
     case "${PL_ACT[n]}" in PLACE|REDO|CONFLICT) apply_db "$n" ;; *) log "库 ${IT_DST[n]}：已恢复过，跳过" ;; esac
   done
+  apply_metrics_db
   for n in "${!IT_KIND[@]}"; do [ "${IT_KIND[n]}" = mysql-user ] && apply_users "$n"; done
   apply_root
   printf '%s\n' "${IT_KIND[@]}" | grep -qx mysql-db && ufw_db_rule
@@ -1263,10 +1283,16 @@ post_start() {  # post_start <项目目录>：包里 RESTORE.md 要求的启动�
 }
 
 nginx_step() {
-  local ng n f inc out rc miss="" confs=()
+  local ng n d f inc out rc miss="" touched=0 confs=()
+  # 旧布局逐个放 vhost/*.conf，新布局整棵放回面板的 vhost/：放下的路径和站点目录互为上下级就算动过，
+  # 按本机站点目录里现有的 *.conf 检查、重载
   for n in "${!IT_KIND[@]}"; do
-    [[ ${IT_DST[n]} == "$PANEL_VHOST_DIR"/*.conf ]] && confs+=("${IT_DST[n]}")
+    case "${PL_ACT[n]}" in PLACE|CONFLICT|REPLACE) ;; *) continue ;; esac
+    d=${IT_DST[n]}
+    [[ $d == "$PANEL_VHOST_DIR" || $d == "$PANEL_VHOST_DIR"/* || $PANEL_VHOST_DIR == "$d"/* ]] && { touched=1; break; }
   done
+  [ "$touched" = 1 ] || return 0
+  for f in "$PANEL_VHOST_DIR"/*.conf; do [ -f "$f" ] && confs+=("$f"); done
   [ ${#confs[@]} -gt 0 ] || return 0
   section "nginx"
   # 面板站点的 conf 会 include 伪静态、反代等文件；当前备份包只收了 conf 本身
@@ -1526,16 +1552,20 @@ do_status() {
 }
 
 do_teardown() {
-  local p u h ng
+  local p u h ng stuck=""
   [ -f "$ST" ] || die "没有恢复记录（$ST），没有可清理的"
   [ "$(st_mode)" = drill ] || die "这台机器是正式恢复（不是 --drill），teardown 会删掉在用的数据，拒绝"
   confirm "删除演练恢复出来的全部内容（容器、库、账号、文件、暂存）？"
   section "容器"
+  # 容器没停下之前什么都不动：外连限制一撤，还在跑的容器就能拿生产数据往外发邮件、发通知
   if command -v docker >/dev/null 2>&1; then
     while read -r p; do
-      [ -d "$p" ] && ls "$p"/compose.y*ml "$p"/docker-compose.y*ml >/dev/null 2>&1 || continue
-      (cd "$p" && docker compose down -v --rmi all >/dev/null 2>&1) && ok "$p 已停并删除容器与镜像"
+      [ -n "$(compose_file "$p")" ] || continue
+      if (cd "$p" && docker compose down -v --rmi all >/dev/null 2>&1); then ok "$p 已停并删除容器与镜像"
+      elif (cd "$p" && docker compose down -v >/dev/null 2>&1); then ok "$p 已停并删除容器（镜像没删掉，不影响清理）"
+      else stuck="$stuck $p"; fi
     done < <(st_rows PLACED | cut -f2 | sort -u)
+    [ -z "$stuck" ] || die "这些项目的容器停不下来:$stuck。外连限制、库和文件都还没动：先 docker ps 看一下、手动 docker rm -f，再重跑 teardown"
   fi
   if [ -e "$EGRESS_UNIT" ] || [ -e "$EGRESS_BIN" ]; then
     [ -d /run/systemd/system ] && systemctl disable ops-drill-egress.service >/dev/null 2>&1

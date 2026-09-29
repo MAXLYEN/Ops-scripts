@@ -18,7 +18,8 @@ export DR_ROOT=$R/stage
 setup() {
   reset_host
   rm -rf "$R" "$FDB" /tmp/pkgsrc /tmp/pkgs /root/ops-backups /root/.ssh /root/.ssh.bak.* /root/.my.cnf* /root/deploy \
-         /usr/local/sbin/ops-drill-egress /etc/systemd/system/ops-drill-egress.service /tmp/ipt.rules
+         /usr/local/sbin/ops-drill-egress /etc/systemd/system/ops-drill-egress.service /tmp/ipt.rules \
+         /tmp/docker.calls /tmp/docker.down-fails /tmp/nginx.calls
   mkdir -p /tmp/pkgs "$R/vhost"
   printf 'correct-horse-battery-staple-01\n' > "$PASSF"; chmod 600 "$PASSF"
   touch /root/.my.cnf
@@ -165,6 +166,13 @@ SQL
     "db/mysql-users.sql	-	-	mysql-user" \
     "db/appdb.sql.gz	-	-	mysql-db" \
     "$R/opt/app	-	-	compose-project" > "$s/restore-manifest.tsv"
+  # V2_EXTRA_SQL：追加到账号 SQL；V2_VHOST=1：像生产机那样把整个站点目录（PANEL_VHOST_DIR）作为一个 dir 条目
+  [ -n "${V2_EXTRA_SQL:-}" ] && printf '%s\n' "$V2_EXTRA_SQL" >> "$s/db/mysql-users.sql"
+  if [ -n "${V2_VHOST:-}" ]; then
+    mkdir -p "$s/rootfs$R/vhost"
+    echo 'server { server_name v.example.com; }' > "$s/rootfs$R/vhost/v.example.com.conf"
+    printf '%s\t755\troot:root\tdir\n' "$R/vhost" >> "$s/restore-manifest.tsv"
+  fi
   printf '/root/bp\t备份解密密码，按约定不进包\n/usr/local/bin/rclone\t超过 5MB 的二进制，换机时重新安装\n' > "$s/system/rootfs-skipped.txt"
   echo '备份时间 : 2026-09-28' > "$s/manifest.txt"; echo '# 还原' > "$s/RESTORE.md"
   V2=/tmp/pkgs/srvbak_$ts.7z
@@ -392,6 +400,67 @@ SH
   restore restore "$VW" --no-start
   [ ! -s /tmp/ipt.rules ] && [ ! -e /etc/systemd/system/ops-drill-egress.service ]
   none "外连" "$output"
+}
+
+# 假 docker：调用记成「所在目录|参数」；compose down 在 /tmp/docker.down-fails 存在时失败。
+# 有了它（和假 nginx）才能不带 --no-start 走真正的启动、重载与 teardown 路径
+fake_docker() {
+  cat > /usr/local/bin/docker <<'SH'
+#!/usr/bin/env bash
+echo "$PWD|$*" >> /tmp/docker.calls
+case "$*" in
+  "compose down"*) [ -e /tmp/docker.down-fails ] && exit 1 ;;
+esac
+exit 0
+SH
+  chmod 755 /usr/local/bin/docker
+}
+fake_nginx() {  # 假 nginx：调用记进 /tmp/nginx.calls，-t 总是通过
+  printf '#!/bin/sh\necho "nginx $*" >> /tmp/nginx.calls\nexit 0\n' > /usr/local/bin/nginx
+  chmod 755 /usr/local/bin/nginx
+}
+
+@test "新布局整棵放回站点目录：检查并重载 nginx（不带 --no-start，docker 与 nginx 是桩）" {
+  fake_docker; fake_nginx
+  V2_VHOST=1 make_v2; v2_local
+  restore restore "$V2"
+  [ -f "$R/vhost/v.example.com.conf" ]
+  grep -qx 'nginx -t' /tmp/nginx.calls
+  grep -qx 'nginx -s reload' /tmp/nginx.calls
+  has "nginx 已重载"
+  grep -qx "$R/opt/app|compose up -d" /tmp/docker.calls
+}
+
+@test "Komari 指标库不进包：恢复时建空库、恢复它的账号；teardown 一并删掉；没有这个账号就不建库" {
+  make_v2; v2_local
+  restore restore "$V2" --no-start --drill
+  [ ! -d "$FDB/db/metrics" ]
+  OPS_YES=1 restore teardown
+  V2_EXTRA_SQL="CREATE USER IF NOT EXISTS 'metrics'@'%' IDENTIFIED WITH 'mysql_native_password' AS '*MET';
+GRANT ALL PRIVILEGES ON \`metrics\`.* TO \`metrics\`@\`%\`;" make_v2; v2_local
+  restore restore "$V2" --no-start --drill
+  [ -d "$FDB/db/metrics" ] && [ -e "$FDB/user/metrics@172.%" ]
+  has "建空的指标库 metrics"
+  none "不恢复账号 metrics" "$output"
+  OPS_YES=1 restore teardown
+  [ ! -d "$FDB/db/metrics" ] && [ ! -e "$FDB/user/metrics@172.%" ]
+}
+
+@test "演练 teardown：真的停掉只有 compose.yaml 的项目；停不下就中止，外连限制、库、文件都不动，修好后重跑能清完" {
+  fake_docker; fake_iptables
+  make_v2; v2_local
+  restore restore "$V2" --drill
+  has "容器主动外连已拦下"
+  grep -qx "$R/opt/app|compose up -d" /tmp/docker.calls
+  touch /tmp/docker.down-fails
+  OPS_YES=1 restore teardown
+  [ "$status" -ne 0 ]
+  has "容器停不下来"
+  [ -s /tmp/ipt.rules ] && [ -d "$FDB/db/appdb" ] && [ -d "$R/opt/app" ] && [ -e /var/lib/ops-scripts/dr-restore.state ]
+  rm -f /tmp/docker.down-fails
+  OPS_YES=1 restore teardown
+  has "$R/opt/app 已停并删除容器与镜像"
+  [ ! -s /tmp/ipt.rules ] && [ ! -d "$FDB/db/appdb" ] && [ ! -e "$R/opt/app" ]
 }
 
 @test "演练：加不上外连限制时，--no-start 列进手动步骤、不算告警" {
