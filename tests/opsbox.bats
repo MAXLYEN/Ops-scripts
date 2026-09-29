@@ -239,7 +239,7 @@ exit 0
 }
 
 @test "迁移向导：记住角色，只列这台该跑的步骤" {
-  drive opsbox 8 "" 1 0 "" q
+  drive opsbox 8 2 "" 1 0 "" 0 q
   has "冷快照"
   lacks "修正数据库账号"
   [[ "$(state)" == *"MIG_ROLE=out"* ]]
@@ -248,8 +248,55 @@ exit 0
 @test "迁移向导：停服步骤主机名不符就不执行" {
   stub migrate/03-pre-migrate 0
   mkdir -p /var/lib/ops-scripts; echo MIG_ROLE=out > /var/lib/ops-scripts/opsbox.state
-  drive opsbox 8 "" 03 wrong-host "" 0 "" q
+  drive opsbox 8 2 "" 03 wrong-host "" 0 "" 0 q
   [ -z "$(calls)" ]
+}
+
+# ── 一键迁移（原机还在） ────────────────────────────────────
+@test "一键迁移：预检不用确认，新机 IP 与 SSH 端口默认取 env.conf" {
+  stub migrate/live-migrate 0
+  env_conf NEW_HOST_IP=203.0.113.9 NEW_SSH_PORT=2222
+  drive opsbox 8 1 "" 1 "" "" "" 0 q
+  calls_are "migrate/live-migrate 203.0.113.9 --ssh-port 2222 --check"
+}
+
+@test "一键迁移：演练直接交给脚本（脚本自己会问），端口没配时默认 22" {
+  stub migrate/live-migrate 0
+  drive opsbox 8 1 "" 2 198.51.100.7 "" "" 0 q
+  calls_are "migrate/live-migrate 198.51.100.7 --ssh-port 22 --rehearse-only"
+}
+
+@test "一键迁移：完整迁移、只切换要输对主机名才执行" {
+  stub migrate/live-migrate 0
+  drive opsbox 8 1 "" 3 198.51.100.7 "" wrong-host "" 0 q
+  has "主机名不符"
+  [ -z "$(calls)" ]
+  drive opsbox 8 1 "" 3 198.51.100.7 "" ops-test "" 0 q
+  drive opsbox 8 1 "" 4 198.51.100.7 2222 ops-test "" 0 q
+  calls_are "migrate/live-migrate 198.51.100.7 --ssh-port 22" "migrate/live-migrate 198.51.100.7 --ssh-port 2222 --cutover"
+}
+
+@test "一键迁移：回滚要输对主机名；没填 IP 就什么都不做" {
+  stub migrate/live-migrate 0
+  drive opsbox 8 1 "" 7 wrong-host "" 0 q
+  [ -z "$(calls)" ]
+  drive opsbox 8 1 "" 5 "" "" 0 q
+  has "需要新机 IP"
+  [ -z "$(calls)" ]
+  drive opsbox 8 1 "" 7 ops-test "" 0 q
+  calls_are "migrate/live-migrate rollback"
+}
+
+@test "回车不执行：一键迁移的选择没有默认项" {
+  stub migrate/live-migrate 0
+  drive opsbox 8 1 "" "" "" 0 q
+  [ -z "$(calls)" ]
+}
+
+@test "按场景找：换机器（旧机还在）能找到一键迁移" {
+  drive opsbox "?" 0 q
+  has "要把服务搬到另一台机器（旧机器还在）"
+  has "一键迁移（原机还在）"
 }
 
 # ── 工具箱设置 ──────────────────────────────────────────────

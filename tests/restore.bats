@@ -270,6 +270,19 @@ none() {
   has "DNS 解析改到本机"
 }
 
+@test "restore --no-cron：照常恢复，但不装定时任务，列进手动步骤" {
+  make_vw
+  restore restore "$VW" --no-start --no-cron
+  [ -f "$R/opt/vaultwarden/data/rsa_key.pem" ]
+  grep -qx 'IMPORT vaultwarden' "$FDB/log"
+  [ -z "$(crontab -l 2>/dev/null)" ]
+  [ ! -e /usr/local/bin/vw-fullbackup.sh ]
+  has "--no-cron：不装定时任务"
+  has "不带 --no-cron 再跑一次恢复"
+  grep -qx 'MODE	real' /var/lib/ops-scripts/dr-restore.state
+  lacks "手动跑一次 /usr/local/bin/vw-fullbackup.sh"
+}
+
 @test "restore：重跑不冲突、不重导、crontab 不重复" {
   make_vw
   restore restore "$VW" --no-start

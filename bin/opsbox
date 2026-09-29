@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # bin/opsbox — ops-scripts 中文菜单：按场景挑功能，常用组合自动串联
-# VERSION: 1.3.0
+# VERSION: 1.4.0
+# 1.4.0: 整机迁移新增「一键迁移（原机还在）」：预检、演练、完整迁移、只切换、DNS 复核、进度、回滚；完整迁移、切换、回滚要输主机名。原来的分步向导改名「分步迁移向导（旧流程）」。
 # 1.3.0: 备份与恢复新增「从备份包恢复整机」（先校验预演；正式恢复输主机名、不自动加 --force；演练与清理）；定时任务里可按统一时间表安装备份任务（先预演再确认）。
 # 用法: opsbox（或在终端里不带参数运行 opsget）。随 opsget -u 一起更新。
 
 set -o pipefail
 
-OPSBOX_VERSION=1.3.0
+OPSBOX_VERSION=1.4.0
 BIN_DIR=/usr/local/bin
 ENV_FILE=/etc/ops-scripts/env.conf
 REF_FILE=/etc/ops-scripts/ref
@@ -75,7 +76,8 @@ init|wizard|init/run init/00-precheck init/01-swap-memory init/02-system-network
 vps|probe|vpsscore/probe|只读|本机质量采集|买了新机器，想知道 CPU、磁盘、线路和 IP 质量|在本机采集硬件与线路指标，结果存成 JSON
 vps|collect|vpsscore/collect|只读|多机汇总评分|在汇总机上，想给所有机器统一采集并排名|ssh 到清单里的每台机器收集结果并打分
 vps|score|vpsscore/score|只读|按用途排名|只想按用途（中转 / 建站 / 落地）看排名|对已收集的结果按角色权重打分
-migrate|migrate|migrate/01-inventory migrate/02-nat-probe migrate/03-pre-migrate migrate/04-verify-migration migrate/05-fix-db-grants migrate/06-export-images migrate/07-restore-containers migrate/08-post-start-check migrate/09-restore-backup-stack ops/restore-cron|向导|整机迁移向导|要把服务整体搬到另一台机器时|先选本机是迁出机还是迁入机，只列出这台该跑的步骤；停服和覆盖数据的步骤要输主机名确认
+migrate|live|migrate/live-migrate|高危|一键迁移（原机还在）|计划内换机器、换商家，旧机器还在正常服务时；在旧机上运行|先只读预检两台机器；演练时旧机照常服务，新机恢复并验证后停下；切换时旧机停写、再传一次最新数据、新机接手；DNS 由你改，改好后自动复核；DNS 切换前可一键回滚
+migrate|migrate|migrate/01-inventory migrate/02-nat-probe migrate/03-pre-migrate migrate/04-verify-migration migrate/05-fix-db-grants migrate/06-export-images migrate/07-restore-containers migrate/08-post-start-check migrate/09-restore-backup-stack ops/restore-cron|向导|分步迁移向导（旧流程）|一键迁移覆盖不到的机器（服务不在备份包里），要逐步手动迁时|先选本机是迁出机还是迁入机，只列出这台该跑的步骤；停服和覆盖数据的步骤要输主机名确认
 settings|update|-|需确认|更新工具箱|隔段时间更新一次，或刚发了新版本|按本机固定的版本更新 opsget、公共库和这个菜单
 settings|upgrade|-|需确认|更新已装脚本|更新过工具箱、切了固定版本之后，看本机脚本有没有落后|逐个对比本机已装脚本和固定版本，列出落后的；可全部或挑几个更新，旧版自动备份，定时任务在用的会提醒手动跑一次
 settings|pin|-|需确认|版本固定|发了新 tag 并验证过，要把本机切过去时|查看本机从哪个版本拉取；可固定到新 tag 或取消固定
@@ -114,7 +116,8 @@ new-api 打不开|linkcheck
 密码库要升级|vwup
 应用连不上数据库|dbcheck
 脚本提示缺配置|config
-要把服务搬到另一台机器|migrate
+要把服务搬到另一台机器（旧机器还在）|live
+DNS 切换前后悔了，想退回旧机器|live
 原机挂了，只剩云端的备份包|dr
 每季度做一次恢复演练|dr
 备份没排上定时，或想统一备份频率|crontab
@@ -866,6 +869,38 @@ do_score() {
 }
 
 # ── 功能：整机迁移 ──────────────────────────────────────────
+do_live() {
+  local p=migrate/live-migrate c ip port a=()
+  printf '  [1] 预检          只读：检查两台机器、列出迁移计划\n'
+  printf '  [2] 演练          旧机照常服务；新机恢复、验证后停下，本机不动\n'
+  printf '  [3] 完整迁移      演练 → 停写切换 → 验证 → DNS，每一段开始前还会再问\n'
+  printf '  [4] 只做切换      已经演练过、核对过差异；切换中断了也从这里接着做\n'
+  printf '  [5] DNS 改好了    列出要改的记录，改好后经公共 DNS 复核\n'
+  printf '  [6] 查看进度\n'
+  printf '  [7] 回滚          DNS 切换前：新机停下，本机恢复定时任务、启动容器\n'
+  ask_choice "选择（回车返回）"
+  c=$ANS
+  case "$c" in
+    1|2|3|4|5)
+      ask "新机 IP" "$(env_get NEW_HOST_IP)"; ip=$ANS
+      [ -n "$ip" ] || { note "需要新机 IP"; return 1; }
+      port=$(env_get NEW_SSH_PORT)
+      ask "新机 SSH 端口" "${port:-22}"; port=${ANS:-22}
+      a=("$ip" --ssh-port "$port") ;;
+  esac
+  case "$c" in
+    1) run_ops "$p" "${a[@]}" --check ;;
+    # 演练不动旧机，脚本开始前自己会问一次 yes
+    2) run_ops "$p" "${a[@]}" --rehearse-only ;;
+    3) gate_host "迁到 $ip：演练后停掉本机全部容器、暂停备份定时任务，数据切到新机" && run_ops "$p" "${a[@]}" ;;
+    4) gate_host "停掉本机全部容器、暂停备份定时任务，把最新数据切到 $ip" && run_ops "$p" "${a[@]}" --cutover ;;
+    5) run_ops "$p" "${a[@]}" --dns ;;
+    6) run_ops "$p" status ;;
+    # 脚本里还有一道 yes 确认；这里已经手输过主机名，不再重复问
+    7) gate_host "回滚：新机停下，本机恢复备份定时任务并启动切换时停掉的容器" && OPS_YES=1 run_ops "$p" rollback ;;
+  esac
+}
+
 MIG_OUT="01|环境摸底（新旧两台都要跑，输出拿去对比）
 02|入站探测：从本机探测迁入机的端口（迁入机先开监听）
 03|冷快照：停服并全量导出（执行后服务保持停止）

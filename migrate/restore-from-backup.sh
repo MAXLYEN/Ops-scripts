@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # migrate/restore-from-backup.sh — 原机已不在时，用每日加密备份包把新机恢复成原样
-# VERSION: 1.0.1
+# VERSION: 1.1.0
+# 1.1.0: 新增 --no-cron：正式恢复并启动，但不装定时任务（一键迁移的演练用：原机还在服务，新机不能往网盘传包、按保留期删云端的包）。
 # 1.0.1: 放回的 SSH 配置要求 Google 两步验证时，自动装 libpam-google-authenticator，并用 sshd -t 检查配置；手动步骤里提醒先用新窗口测试登录。原机 ufw 只放行部分 IP 连 SSH 时，核对当前会话的来源 IP，不在名单里就给出放行命令。
 # 1.0.0: 首版。vw / xboard 包（现有布局与 rootfs + restore-manifest.tsv 新布局）：取包、解密、校验，按包还原配置、库与账号、数据、compose 项目（镜像按清单锁版本）、systemd 单元、nginx、定时任务并启动；可重跑；--drill 演练与 teardown 清理。
 # ENV-REQUIRED: BACKUP_PASS_FILE|VW_PASS_FILE DB_CLIENT_HOST MYSQL_DEFAULTS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR
-# 在 init/ 做完、配好 env.conf / 备份密码文件 / rclone 的新机上运行。原机还在时走 03 冷快照 → 07。
+# 在 init/ 做完、配好 env.conf / 备份密码文件 / rclone 的新机上运行。原机还在时用 migrate/live-migrate（它在新机上调用本脚本）。
 # 用法：
 #   restore-from-backup.sh check    [vw|xboard|all|包路径...]    解开、校验，列出恢复会做什么；不动本机
-#   restore-from-backup.sh restore  [vw|xboard|all|包路径...] [--force] [--drill] [--no-start] [--image 名称=镜像]
+#   restore-from-backup.sh restore  [vw|xboard|all|包路径...] [--force] [--drill] [--no-start] [--no-cron] [--image 名称=镜像]
 #   restore-from-backup.sh status
 #   restore-from-backup.sh teardown                               只清理 --drill 恢复出来的内容
 # 不给目标等于 all：从 RCLONE_REMOTES 下的 VW_REMOTE_PATH / XBOARD_REMOTE_PATH 各取最新的包。
 # --force     本机已有数据或在跑的服务时仍然恢复：原有目录移到 .bak.<时间>，原有库先导出再删
 # --drill     临时机上演练：本机有任何数据就拒绝，不装定时任务、不启用 systemd 单元，之后可 teardown
 # --no-start  只还原文件、库与定时任务，不拉镜像、不起容器、不重载 nginx（打印这些命令）
+# --no-cron   不装定时任务（原机还在服务时的迁移演练用）；其余与正式恢复相同
 # --image     给清单里锁不住版本的容器指定镜像（tag 带版本号或 @sha256 digest），可多次
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -25,12 +27,13 @@ umask 022
 usage() { sed -n '/^# 用法：/,/^[^#]/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 1; }
 
 ACTION=${1:-}; [ -n "$ACTION" ] || usage; shift
-TARGETS=() IMAGES=() DRILL=0 FORCE=0 NOSTART=0
+TARGETS=() IMAGES=() DRILL=0 FORCE=0 NOSTART=0 NOCRON=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --drill) DRILL=1 ;;
     --force) FORCE=1 ;;
     --no-start) NOSTART=1 ;;
+    --no-cron) NOCRON=1 ;;
     --image) [ -n "${2:-}" ] || die "--image 后面要跟 名称=镜像"; IMAGES+=("$2"); shift ;;
     --image=*) IMAGES+=("${1#--image=}") ;;
     -h|--help) usage ;;
@@ -1200,6 +1203,9 @@ apply_all() {
   [ "$PANEL_STOPPED" = 1 ] && manual "登录面板核对站点、计划任务、证书续期记录" "面板配置与数据库整体放回的路径还没在真机验证过"
   if [ "$DRILL" = 1 ]; then
     log "演练：不装定时任务（会从这台机器往生产网盘传包、并按保留期删云端旧包）"
+  elif [ "$NOCRON" = 1 ]; then
+    log "--no-cron：不装定时任务（原机还在服务，这台机器不能往网盘传包）"
+    manual "接手服务时装定时任务：不带 --no-cron 再跑一次恢复" "--no-cron 跳过了原机定时任务的并入和备份任务的统一排程"
   else
     section "定时任务"
     restore_cron
@@ -1359,7 +1365,8 @@ summary() {
   2. opsget ops/preflight-backup            备份脚本的依赖与前置检查
   3. opsget ops/verify-backup-pass          云端的包能用本机密码打开
 EOF
-  [ "$DRILL" = 1 ] || echo "  4. 手动跑一次 /usr/local/bin/vw-fullbackup.sh 与 xboard-fullbackup.sh —— DNS 还没切，失败不影响任何人"
+  # 演练、--no-cron 时原机还在用网盘：这台机器上跑备份会把它的包传上去
+  [ "$DRILL" = 1 ] || [ "$NOCRON" = 1 ] || echo "  4. 手动跑一次 /usr/local/bin/vw-fullbackup.sh 与 xboard-fullbackup.sh —— DNS 还没切，失败不影响任何人"
 }
 
 # ── 动作 ────────────────────────────────────────────────────

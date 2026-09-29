@@ -20,6 +20,7 @@ migrate/07-restore-containers   迁入机：恢复数据目录，生成启动命
 migrate/08-post-start-check     迁入机：端到端验收（含切换前预演）
 migrate/09-restore-backup-stack 迁入机：重建备份体系
 migrate/restore-from-backup     原机已不在：用每日备份包恢复整机（check / restore / --drill / teardown）
+migrate/live-migrate            原机还在：一键迁移，在旧机上运行（预检 → 演练 → 停写切换 → DNS，DNS 前可回滚）
 
 # ── backup/ 生产备份（cron 调用本地路径，不要写 opsget）─────
 backup/vw-fullbackup            全服务备份：密码库+监控+订阅转换+系统配置

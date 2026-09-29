@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 # backup/xboard-fullbackup.sh — 生成 Xboard 加密备份包并上传云端
-# VERSION: 2.4.1
+# VERSION: 2.5.0
+# 2.5.0: 新增 --local-only <目录>：包只写到该目录，不上传、不清理、不报心跳、不发告警；上一轮还在跑就等它结束（一键迁移现做包用）。
 # 2.4.1: 其余业务库跳过 METRICS_DB_NAME（与 vw 一致，指标库只留本地），否则每 6 小时把整个指标库打进包上云。
 # 2.4.0: 新增 rootfs/ 与 restore-manifest.tsv（整个 Xboard 目录、系统配置、crontab、全部 MySQL 账号与业务库、镜像 digest），包内先打 tar 保留属主，改为 GFS 分级保留，防重入锁。
 # ENV-REQUIRED: SVC_XBOARD_DIR XBOARD_DB_NAME XBOARD_DB_USER XBOARD_DB_PASS_FILE XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH RCLONE_REMOTES BACKUP_PASS_FILE|VW_PASS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
 # 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
+# 用法：xboard-fullbackup.sh [--local-only <目录>]
 
 set -uo pipefail
+# --local-only：一键迁移（migrate/live-migrate）在旧机上现做包、经 SSH 直传新机。
+# 不上传、不清理：这份包不是例行备份，不该挤掉网盘上的旧包；不报心跳：心跳的意思是「例行备份已上云」
+LOCAL_ONLY=""
+case "${1:-}" in
+    --local-only) LOCAL_ONLY=${2:-}; [ -n "$LOCAL_ONLY" ] || { echo "[FATAL] --local-only 后面要跟目录"; exit 1; } ;;
+    "") ;;
+    *) echo "[FATAL] 未知参数: $1（只认 --local-only <目录>）"; exit 1 ;;
+esac
 
 # 公共库：rootfs 采集、还原清单、分级保留。opsget -i 安装本脚本时会同步到同一版本。
 # 先加载，下面本脚本自己的 log / warn 会覆盖库里的同名函数。
@@ -39,6 +49,8 @@ BACKUP_PASS_FILE="${BACKUP_PASS_FILE:-${VW_PASS_FILE:-}}"
 req BACKUP_PASS_FILE
 
 BACKUP_DIR="$XBOARD_BACKUP_DIR"
+# 本地模式的包放到指定目录；这个目录也不进包（bk_init 把 BACKUP_DIRS 当成落盘目录排除）
+[ -n "$LOCAL_ONLY" ] && BACKUP_DIRS="${BACKUP_DIRS:-} $LOCAL_ONLY"
 # 分级保留：全留 / 每天一份 / 每周一份 / 每月一份直到上限（本地与云端上限不同）
 KEEP_ALL_DAYS="${BACKUP_KEEP_ALL_DAYS:-7}"
 KEEP_DAILY_DAYS="${BACKUP_KEEP_DAILY_DAYS:-30}"
@@ -74,7 +86,7 @@ ASSETS_SITE="${XBOARD_ASSETS_SITE:-}"
 # 内部
 STAMP=$(date -u +%Y%m%d_%H%M%S)
 WORK=$(mktemp -d /tmp/xboard-bak.XXXXXX)
-ARCHIVE="$BACKUP_DIR/xboard_${STAMP}.7z"
+ARCHIVE="${LOCAL_ONLY:-$BACKUP_DIR}/xboard_${STAMP}.7z"
 # LOGPREFIX 已弃用：时间戳改为在 log/warn/fail 内实时生成
 WARNINGS=()
 FATAL=""
@@ -87,6 +99,7 @@ warn() { WARNINGS+=("$*"); printf '[%s] [WARN] %s\n' "$(date -u '+%F %T')" "$*" 
 fail() { FATAL="$*"; printf '[%s] [FATAL] %s\n' "$(date -u '+%F %T')" "$*" >&2; hb /fail; send_mail; exit 1; }
 
 send_mail() {
+    [ -z "$LOCAL_ONLY" ] || return 0     # 本地模式由调用方看退出码和输出
     [ -n "$MAIL_TO" ] || return 0
     command -v msmtp >/dev/null 2>&1 || return 0
     local subject body
@@ -121,6 +134,7 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "缺少命令: $1"; }
 
 # 反向监控心跳，留空则跳过
 hb() {
+    [ -z "$LOCAL_ONLY" ] || return 0
     [ -n "${XBOARD_HEARTBEAT_URL:-}" ] || return 0
     curl -fsS -m 10 --retry 3 "${XBOARD_HEARTBEAT_URL}${1:-}" >/dev/null 2>&1 \
         || printf '[%s] [WARN] 心跳上报失败%s\n' "$(date -u '+%F %T')" "${1:-}" >&2
@@ -130,7 +144,12 @@ hb() {
 # 撞上就直接退出、不报心跳：偶尔一次无妨，一直撞上时由心跳监控发现「没按时完成」。
 mkdir -p /run/lock
 exec 9>/run/lock/xboard-fullbackup.lock || fail "无法创建锁文件 /run/lock/xboard-fullbackup.lock"
-flock -n 9 || { log "上一轮备份还在运行，本次跳过"; exit 0; }
+# 本地模式是有人等着要包：等上一轮跑完（它也可能正卡在上传），而不是跳过
+if [ -n "$LOCAL_ONLY" ]; then
+    flock -w 7200 9 || fail "等了 2 小时，上一轮备份还没结束"
+else
+    flock -n 9 || { log "上一轮备份还在运行，本次跳过"; exit 0; }
+fi
 
 # 前置检查
 log "=== Xboard 备份开始 ==="
@@ -150,7 +169,7 @@ BACKUP_PASS=$(head -1 "$BACKUP_PASS_FILE")
 [ -n "$BACKUP_PASS" ] || fail "备份密码为空"
 [ ${#BACKUP_PASS} -ge 16 ] || fail "备份密码太短（<16 位），请换成长随机串"
 
-mkdir -p "$BACKUP_DIR" || fail "无法创建 $BACKUP_DIR"
+mkdir -p "$BACKUP_DIR" ${LOCAL_ONLY:+"$LOCAL_ONLY"} || fail "无法创建 $BACKUP_DIR ${LOCAL_ONLY}"
 
 # 用 defaults-file 传密码，避免出现在 ps 输出里。
 # 值加双引号，密码里的 # 才不会被当成注释截断；\ 和 " 按 option 文件规则转义。
@@ -502,7 +521,9 @@ log "校验和: $(cut -d' ' -f1 < "${ARCHIVE}.sha256")"
 
 # 7. 上传
 UPLOAD_FAIL=0
-if command -v rclone >/dev/null 2>&1; then
+if [ -n "$LOCAL_ONLY" ]; then
+    log "只在本地生成（--local-only）：${ARCHIVE}；不上传、不清理"
+elif command -v rclone >/dev/null 2>&1; then
     for remote in "${RCLONE_TARGETS[@]}"; do
         log "--- 上传到 $remote ---"
         if rclone copy "$ARCHIVE" "$remote" --transfers 1 --retries 3 2>&1; then
@@ -524,8 +545,10 @@ fi
 
 # 8. 分级保留（GFS，按文件名里的时间戳）。本次上传有失败就一个都不删：
 # 这时旧包可能是某个远端上唯一完好的那份。致命错误在前面已经 fail 退出，走不到这里。
-log "--- 分级保留：全留 ${KEEP_ALL_DAYS} 天，每天一份至 ${KEEP_DAILY_DAYS} 天，每周一份至 ${KEEP_WEEKLY_DAYS} 天，每月一份至上限 ---"
-if [ "$UPLOAD_FAIL" -ne 0 ]; then
+[ -n "$LOCAL_ONLY" ] || log "--- 分级保留：全留 ${KEEP_ALL_DAYS} 天，每天一份至 ${KEEP_DAILY_DAYS} 天，每周一份至 ${KEEP_WEEKLY_DAYS} 天，每月一份至上限 ---"
+if [ -n "$LOCAL_ONLY" ]; then
+    :
+elif [ "$UPLOAD_FAIL" -ne 0 ]; then
     log "本次上传有失败，跳过清理"
 else
     bk_prune_local "$BACKUP_DIR" xboard "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$LOCAL_KEEP_DAYS"
