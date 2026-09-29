@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.2.1
+# VERSION: 1.2.2
+# 1.2.2: 备份包收 SSH 两步验证：/etc/pam.d/sshd 与 /root/.google_authenticator（缺了新机上 SSH 登录会失败）。
 # 1.2.1: 备份采集 /usr/local/bin 时跳过与系统命令同名的文件（放回会遮住真命令）。
 
 set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 # shellcheck disable=SC2034  # 供调用方查询公共库版本
-OPS_COMMON_VERSION="1.2.1"
+OPS_COMMON_VERSION="1.2.2"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
@@ -483,6 +484,11 @@ bk_system() {
   bk_opt /etc/ssh/sshd_config.d
   for p in /etc/ssh/ssh_host_*; do [ -f "$p" ] && bk_file "$p"; done
   bk_opt /root/.ssh
+  # SSH 两步验证（Google Authenticator）：PAM 配置与 root 的 TOTP 密钥（含应急码）。
+  # sshd_config 要求 keyboard-interactive 时缺了这两样，新机重启 SSH 后就登不进去；
+  # 密钥原样放回，手机上原来的验证器条目继续可用，不用重新绑定。
+  bk_opt /etc/pam.d/sshd
+  bk_opt /root/.google_authenticator
   bk_opt /root/.vps-hosts.txt
   bk_opt /root/.ssh_base.txt
   # 防火墙、入侵封禁、内核参数与 init/ 写过的系统文件

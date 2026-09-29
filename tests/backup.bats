@@ -288,3 +288,16 @@ EOF
   [ "$status" -ne 0 ]
   grep -q 'MYSQL_DEFAULTS_FILE' "$WARN_LOG"
 }
+
+@test "SSH 两步验证：/etc/pam.d/sshd 与 /root/.google_authenticator 进包，权限照原样" {
+  mkdir -p /etc/pam.d
+  printf 'auth required pam_google_authenticator.so\n' > /etc/pam.d/sshd
+  printf 'SECRET\n12345678\n' > /root/.google_authenticator; chmod 400 /root/.google_authenticator
+  bk_init "$T/pkg"
+  run bk_system            # 容器里没有 ip 命令，bk_system_ref 的参考信息那一步会失败，不影响收包
+  grep -q pam_google_authenticator "$T/pkg/rootfs/etc/pam.d/sshd"
+  [ "$(stat -c %a "$T/pkg/rootfs/root/.google_authenticator")" = 400 ]
+  grep -qP '^/root/\.google_authenticator\t400\troot:root\tfile$' "$T/pkg/restore-manifest.tsv"
+  grep -qP '^/etc/pam\.d/sshd\t644\troot:root\tfile$' "$T/pkg/restore-manifest.tsv"
+  rm -f /root/.google_authenticator /etc/pam.d/sshd
+}
