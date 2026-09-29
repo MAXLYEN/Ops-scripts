@@ -1,6 +1,6 @@
 # ops-scripts
 
-服务器迁移与日常运维脚本集。环境相关的值通过本机 `/etc/ops-scripts/env.conf` 配置，仓库只保存 [配置模板](config/env.example.conf)；真实域名、IP 和凭据不进入公开仓库。`init/`、`vpsscore/` 等自包含脚本可在没有配置文件的新机上运行。
+服务器迁移与日常运维脚本集。**机器或开发电脑失联时，看 [灾难恢复手册](docs/disaster-recovery.md)。**环境相关的值通过本机 `/etc/ops-scripts/env.conf` 配置，仓库只保存 [配置模板](config/env.example.conf)；真实域名、IP 和凭据不进入公开仓库。`init/`、`vpsscore/` 等自包含脚本可在没有配置文件的新机上运行。
 
 ## 快速开始
 
@@ -52,6 +52,7 @@ opsget --pin v2026.09.24 && opsget -u
 | `vpsscore/` | VPS 质量采集与评分 | [介绍](vpsscore/README.md) · [版本记录](vpsscore/CHANGELOG.md) |
 | `openclash/` | OpenClash DNS 分流 | [介绍](openclash/README.md) · [版本记录](openclash/CHANGELOG.md) |
 | `tests/` | 静态检查与端到端测试 | [介绍](tests/README.md) |
+| `docs/` | 灾难恢复手册：离线应急包清单、从零恢复、演练 | [灾难恢复](docs/disaster-recovery.md) |
 
 `init/` 与 `vpsscore/` 不依赖 `lib/common.sh`，方便在新机上单独运行，也不强制要求 `env.conf`。`ops/decommission-archive` 同样自包含，以适应机器即将退役的场景。
 
