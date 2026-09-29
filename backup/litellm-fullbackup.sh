@@ -375,7 +375,6 @@ grep -m1 '^LITELLM_MASTER_KEY=' .env | cut -d= -f2- | sed 's/^/Authorization: Be
    - ufw 放行名单照原节点配（本地出口 IP、汇总机 / 前置机、各节点机），**汇总机的 IP 必须在里面**：
      `ufw allow from <汇总机IP> to any port <SSH端口> proto tcp`
    - 汇总机的公钥加进 `/root/.ssh/authorized_keys`
-   - 定时备份是密钥非交互登录，输不了两步验证码：原节点上汇总机怎么登录的，新节点照原样配
    - 配完在汇总机上手动跑一次 `litellm-fullbackup.sh` 确认
 3. 前置机到 LiteLLM 的 SSH 隧道与 nginx 反代里的目标 IP
 4. `LITELLM_SITE` 的白名单：新节点出口若要访问前置机，重新跑 `opsget ops/sync-llm-allowlist`
