@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.2.3
+# VERSION: 1.2.4
+# 1.2.4: 面板 data/ 不收监控历史（system.db 只留表结构）、漏洞扫描库 warning/、GeoLite2 国家库：生产机上它们占 rootfs 的 250MB 里的 245MB，vw 与 xboard 包各带一份，每 6 小时上云会塞满网盘；都能由面板重新生成或下载。
 # 1.2.3: bk_images 可只列指定容器（可整段送到远端执行）；新增 vps_host_port；LITELLM_BACKUP_DIR 算备份落盘目录。
 # 1.2.2: 备份包收 SSH 两步验证：/etc/pam.d/sshd 与 /root/.google_authenticator（缺了新机上 SSH 密码登录会失败；密钥登录不需要验证码）。
 # 1.2.1: 备份采集 /usr/local/bin 时跳过与系统命令同名的文件（放回会遮住真命令）。
@@ -470,6 +471,32 @@ bk_nginx_conf_dir() {
 }
 
 # bk_system —— 两台机器通用的系统项。各服务的数据由各脚本自己收。
+# bk_panel_data <面板 data 目录> —— 面板数据照收，但去掉体积大、又能由面板重新生成的部分：
+#   system.db             监控历史（CPU、内存、网络、磁盘曲线），生产机上 200MB 起；只留表结构，
+#                         面板照常运行，曲线从零开始记
+#   warning/              漏洞扫描规则库与扫描结果，面板会重新下载
+#   firewall/GeoLite2-Country.json  按国家屏蔽用的地理库，面板会重新下载
+# 站点、计划任务、面板账号等记录都在 db/ 等小文件里，照收。
+bk_panel_data() {
+  local d=${1%/} sdb dst
+  [ -d "$d" ] || return 0
+  bk_dir "$d" "$d/system.db" "$d/warning" "$d/firewall/GeoLite2-Country.json" || return 1
+  sdb="$d/system.db"
+  if [ -f "$sdb" ]; then
+    dst="$BK_ROOT/rootfs$sdb"
+    if command -v sqlite3 >/dev/null 2>&1 && sqlite3 "file:$sdb?mode=ro" .schema 2>/dev/null | sqlite3 "$dst" 2>/dev/null; then
+      chmod "$(stat -Lc %a "$sdb")" "$dst"; chown "$(stat -Lc %u:%g "$sdb")" "$dst"
+      bk_skip "$sdb" "面板监控历史，只收表结构（原 $(du -h "$sdb" | cut -f1)）；恢复后曲线从零开始记"
+    else
+      rm -f "$dst"
+      bk_skip "$sdb" "面板监控历史，没收（导不出表结构）；面板启动时会重建"
+    fi
+  fi
+  [ -e "$d/warning" ] && bk_skip "$d/warning" "面板漏洞扫描规则库与结果，面板会重新下载"
+  [ -e "$d/firewall/GeoLite2-Country.json" ] && bk_skip "$d/firewall/GeoLite2-Country.json" "按国家屏蔽用的地理库，面板会重新下载"
+  return 0
+}
+
 bk_system() {
   local p
   # 工具箱配置（env.conf、版本固定 ref）、告警邮件、网盘凭据、数据库凭据
@@ -515,7 +542,7 @@ bk_system() {
   if [ -n "${PANEL_ROOT:-}" ] && [ -d "$PANEL_ROOT" ]; then
     bk_opt "$PANEL_ROOT/vhost"
     bk_opt "$PANEL_ROOT/config"
-    bk_opt "$PANEL_ROOT/data"
+    bk_panel_data "$PANEL_ROOT/data"
     bk_opt "$PANEL_ROOT/ssl"
   fi
   # 面板计划任务的脚本体：crontab 里调用的是这里的文件

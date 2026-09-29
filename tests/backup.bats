@@ -337,3 +337,25 @@ EOF
   grep -qP '^/etc/pam\.d/sshd\t644\troot:root\tfile$' "$T/pkg/restore-manifest.tsv"
   rm -f /root/.google_authenticator /etc/pam.d/sshd
 }
+
+@test "面板 data：监控历史只留表结构，漏洞库与国家库不收，站点记录照收" {
+  P="$T/panel"; mkdir -p "$P/data/db" "$P/data/warning" "$P/data/firewall"
+  sqlite3 "$P/data/system.db" "CREATE TABLE cpuio(id INTEGER, pro REAL); INSERT INTO cpuio VALUES (1, 0.5), (2, 0.7);"
+  chmod 600 "$P/data/system.db"
+  sqlite3 "$P/data/db/site.db" "CREATE TABLE sites(name TEXT); INSERT INTO sites VALUES ('a.example.com');"
+  head -c 4096 /dev/zero > "$P/data/warning/vul_debian12.json"
+  head -c 4096 /dev/zero > "$P/data/firewall/GeoLite2-Country.json"
+  echo keep > "$P/data/firewall/rules.json"
+  bk_init "$T/pkg"
+  bk_panel_data "$P/data"
+  R="$T/pkg/rootfs$P/data"
+  [ "$(sqlite3 "$R/system.db" 'SELECT COUNT(*) FROM cpuio')" = 0 ]          # 表在，数据不在
+  [ "$(stat -c %a "$R/system.db")" = 600 ]
+  [ "$(sqlite3 "$R/db/site.db" 'SELECT name FROM sites')" = a.example.com ]
+  [ ! -e "$R/warning" ]
+  [ ! -e "$R/firewall/GeoLite2-Country.json" ]
+  [ -f "$R/firewall/rules.json" ]
+  grep -q "system.db"$'\t'"面板监控历史，只收表结构" "$T/pkg/system/rootfs-skipped.txt"
+  grep -q "/warning"$'\t' "$T/pkg/system/rootfs-skipped.txt"
+  grep -qP "^\Q$P/data\E\t\d+\t\S+\tdir$" "$T/pkg/restore-manifest.tsv"
+}

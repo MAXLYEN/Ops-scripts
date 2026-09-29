@@ -2,6 +2,12 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-09-29：面板监控历史不进包
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `common.sh` | 1.2.3 → 1.2.4 | 新增 `bk_panel_data`：面板 `data/` 照收，但 `system.db`（监控历史）只收表结构，`warning/`（漏洞扫描库）与 `firewall/GeoLite2-Country.json` 不收，都记进 `rootfs-skipped.txt`。生产机首轮新版备份里 rootfs 291MB，其中 `system.db` 209MB、`warning/` 28MB、GeoLite2 9MB；vw 与 xboard 包各带一份（压缩后 37MB 与 31MB），每 6 小时一次、按分级保留约 70 份，会在几周内塞满 5GB 的 OneDrive |
+
 ## 2026-09-28：LiteLLM 备份用到的公共函数
 
 | 文件 | 原版本 → 当前版本 | 变更 |

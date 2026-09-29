@@ -104,7 +104,7 @@ LiteLLM 包（`litellm_YYYYMMDD_HHMMSS.7z`，不套 `payload.tar.gz`）也没有
 | 防火墙与系统 | `/etc/ufw`、`/etc/default/ufw`、`/etc/fail2ban`、`/etc/sysctl.conf`、`/etc/sysctl.d`、`/etc/modules-load.d`、`/etc/udev/rules.d`、`/etc/gai.conf`、`/etc/security/limits.d`、journald / timesyncd 的 `.conf.d`、`/etc/docker/daemon.json`、`/etc/cron.d`、`/etc/logrotate.d`、`/etc/my.cnf` | 覆盖 init/ 写过的系统文件 |
 | systemd | `/etc/systemd/system` 下的自定义单元（非软链接）与各 `*.d` drop-in | 启用的记 `systemd-unit`；被 mask 的与模板单元的实例记在 `system/ref/` |
 | nginx 与证书 | nginx 主配置目录（按 `nginx -V` 的 conf-path）、面板整个 `vhost/`（nginx、proxy、rewrite、extension、well-known、cert、ssl）、`/root/.acme.sh`、`/etc/letsencrypt` | 旧版只收 `vhost/nginx/*.conf`，反向代理、rewrite、LLM 白名单都会丢，且 `nginx -t` 过不了 |
-| 面板 | 面板的 `config/`、`data/`（其中的 SQLite 库走在线备份）、`ssl/`、计划任务脚本目录 `PANEL_CRON_DIR`、`WWWROOT` | 站点记录、续期记录、crontab 调用的脚本体都在这里。**整体放回这条路尚未在真机验证** |
+| 面板 | 面板的 `config/`、`data/`（其中的 SQLite 库走在线备份；监控历史 `system.db` 只收表结构，漏洞扫描库 `warning/` 与 GeoLite2 国家库不收，面板会重新生成或下载）、`ssl/`、计划任务脚本目录 `PANEL_CRON_DIR`、`WWWROOT` | 站点记录、续期记录、crontab 调用的脚本体都在这里。**整体放回这条路尚未在真机验证** |
 | MySQL | 全部非系统账号（带密码哈希）与授权；除跳过项外的全部业务库 | 用 `MYSQL_DEFAULTS_FILE` 的 root 凭据；没配或连不上时告警 |
 | 容器 | 每个容器的镜像 digest；compose 项目的 compose 文件与 `.env` | 数据已进包的项目才记 `compose-project`（还原时自动启动）；数据没进包的告警 |
 | cron | root 的 crontab | |
@@ -135,6 +135,6 @@ LiteLLM 包（`litellm_YYYYMMDD_HHMMSS.7z`，不套 `payload.tar.gz`）也没有
 
 **已知限制**
 
-- 面板 `data/` 与 `WWWROOT` 不设体积上限，首轮备份后看 `manifest.txt` 里的 rootfs 大小再决定要不要排除。
+- 面板 `data/` 去掉监控历史等之后通常只有几 MB；`WWWROOT` 不设体积上限，备份后看日志里的 rootfs 大小，异常变大时再决定要不要排除。
 - 目录里的普通文件是运行中直接复制的；SQLite 库走在线备份，MySQL 走 `--single-transaction`，其余（如 `.docker/.data` 里的 Redis 文件）与旧版一样不保证一致。
 - 模板单元（`foo@.service`）的实例、被 mask 的单元只记录、不会自动恢复。
