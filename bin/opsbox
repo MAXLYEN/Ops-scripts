@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # bin/opsbox — ops-scripts 中文菜单：按场景挑功能，常用组合自动串联
-# VERSION: 1.5.0
+# VERSION: 1.5.1
+# 1.5.1: 登记表注明 ops/panel-backup-create 不进菜单（每周定时任务调用）；菜单行为不变。
 # 1.5.0: 整机迁移新增「一键迁移（原机还在）」：预检、演练、完整迁移、只切换、DNS 复核、进度、回滚；完整迁移、切换、回滚要输主机名。原来的分步向导改名「分步迁移向导（旧流程）」。
 # 1.4.0: 立即备份与定时任务认 litellm-fullbackup；立即备份在 crontab 里没有定时任务时改用 /var/lock/<名>-cron.lock（原先的 /var/lock/<名>.lock 就是备份脚本自己的锁，脚本一启动就撞上父进程、跳过不备份）。
 # 1.3.0: 备份与恢复新增「从备份包恢复整机」（先校验预演；正式恢复输主机名、不自动加 --force；演练与清理）；定时任务里可按统一时间表安装备份任务（先预演再确认）。
@@ -89,6 +90,7 @@ EOF
 )
 
 # 不进菜单的脚本。CI 据此核对：MANIFEST 里的每个脚本要么登记在上表，要么列在这里。
+# MENU-EXCLUDE: ops/panel-backup-create      每周定时任务调用；要立刻补一份就在服务器上直接跑 panel-backup-create.sh
 # MENU-EXCLUDE: ops/decommission-archive      机器退役前只用一次，且刻意不依赖任何公共组件
 # MENU-EXCLUDE: ops/apply-newapi-quota-fix    一次性历史数据修复，会停容器、改库
 # MENU-EXCLUDE: ops/fix-newapi-fallback-quota 上一项调用的组件，不单独使用

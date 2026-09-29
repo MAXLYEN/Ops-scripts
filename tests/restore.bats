@@ -702,6 +702,13 @@ cron_install() { run bash "$SRC/ops/install-backup-cron.sh" "$@"; }
   crontab -l | diff /tmp/c1 -
 }
 
+@test "安装器：panel-backup-create 每周日 UTC 19:30，锁与日志各用各的" {
+  local_stub panel-backup-create
+  cron_install --apply
+  crontab -l | grep -qx '30 19 \* \* 0 /usr/bin/flock -n /var/lock/panel-backup-create-cron.lock /usr/local/bin/panel-backup-create.sh >> /var/log/panel-backup-create-cron.log 2>&1'
+  has "面板整机备份每周"
+}
+
 @test "安装器：一个备份脚本都没装时说清楚，不动 crontab" {
   echo '15 2 * * * /usr/local/bin/other.sh' | crontab -
   cron_install --apply

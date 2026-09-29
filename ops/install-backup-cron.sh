@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/install-backup-cron.sh — 按统一时间表安装备份定时任务（幂等，可反复运行）
-# VERSION: 1.2.0
+# VERSION: 1.3.0
+# 1.3.0: 新增 panel-backup-create（面板整机备份），每周日 UTC 19:30（北京周一 03:30）：18 点那批 6 小时备份已跑完，下一次整点的 newapi 还没到，是国内用户最少的时段。
 # 1.2.0: 旧行命令前的环境变量（如 MAIL_TO=... 把某个脚本的告警发到别的邮箱）照留到新行；几个备份脚本原来共用一把外层锁时不再沿用、各用各的（旧行是 flock -w 排队，新行是 -n 撞上就跳过，共用会让每小时的 newapi 撞上正在跑的 vw 时整轮跳过）。
 # 1.1.0: 新增 litellm-fullbackup，每 6 小时（:40）。
 # 1.0.0: 首版。vw / xboard 每 6 小时（:00 / :20），newapi 每小时（:05）；外层 flock 锁用 /var/lock/<名>-cron.lock（不与脚本自己的 /run/lock/<名>.lock 同一把），输出进各自的 -cron.log，补 PATH。
@@ -19,7 +20,8 @@ DEFAULT_PATH='PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 SCHEDULE="vw-fullbackup|0 */6 * * *
 xboard-fullbackup|20 */6 * * *
 newapi-fullbackup|5 * * * *
-litellm-fullbackup|40 */6 * * *"
+litellm-fullbackup|40 */6 * * *
+panel-backup-create|30 19 * * 0"
 
 CUR=$(mktemp); NEW=$(mktemp); trap 'rm -f "$CUR" "$NEW"' EXIT
 crontab -l > "$CUR" 2>/dev/null || : > "$CUR"
@@ -126,5 +128,5 @@ cp "$CUR" "$BAK" && chmod 600 "$BAK"
 crontab "$NEW" || die "写入 crontab 失败（原内容在 $BAK）"
 ok "已写入。原 crontab 备份在 $BAK"
 log "已排任务:$ADDED"
-log "外部心跳监控的周期要跟着改：vw / xboard / litellm 6 小时，newapi 1 小时（各加宽限）。上一次还没跑完时本次直接跳过、不报心跳"
+log "外部心跳监控的周期要跟着改：vw / xboard / litellm 6 小时，newapi 1 小时，面板整机备份每周（各加宽限）。上一次还没跑完时本次直接跳过、不报心跳"
 finish

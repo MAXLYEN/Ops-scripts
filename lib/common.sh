@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.2.4
+# VERSION: 1.2.5
+# 1.2.5: 收面板的项目类站点目录 /www/server/*_project（反向代理项目等的记录，每个 ≤5MB；超过的记进 rootfs-skipped）。真机演练发现：不收的话 nginx 照常转发，面板里却看不到、改不了这些站点。
 # 1.2.4: 面板 data/ 不收监控历史（system.db 只留表结构）、漏洞扫描库 warning/、GeoLite2 国家库：生产机上它们占 rootfs 的 250MB 里的 245MB，vw 与 xboard 包各带一份，每 6 小时上云会塞满网盘；都能由面板重新生成或下载。
 # 1.2.3: bk_images 可只列指定容器（可整段送到远端执行）；新增 vps_host_port；LITELLM_BACKUP_DIR 算备份落盘目录。
 # 1.2.2: 备份包收 SSH 两步验证：/etc/pam.d/sshd 与 /root/.google_authenticator（缺了新机上 SSH 密码登录会失败；密钥登录不需要验证码）。
@@ -497,6 +498,18 @@ bk_panel_data() {
   return 0
 }
 
+# 面板的项目类站点（反向代理项目、Python / Go 项目……）各有一个 <面板上级目录>/<类型>_project，
+# 面板靠它显示和管理这些站点。只收小的（记录与配置）；大的多半是项目自己的运行环境或日志，记进 rootfs-skipped
+bk_panel_projects() {  # bk_panel_projects <面板上级目录，如 /www/server>
+  local p kb
+  for p in "$1"/*_project; do
+    [ -d "$p" ] || continue
+    kb=$(du -sk "$p" 2>/dev/null | cut -f1)
+    if [ "${kb:-0}" -le 5120 ]; then bk_opt "$p"
+    else bk_skip "$p" "超过 5MB（$(du -sh "$p" | cut -f1)），多半是项目自己的运行环境或日志；要的话照原机手动放回"; fi
+  done
+}
+
 bk_system() {
   local p
   # 工具箱配置（env.conf、版本固定 ref）、告警邮件、网盘凭据、数据库凭据
@@ -544,6 +557,7 @@ bk_system() {
     bk_opt "$PANEL_ROOT/config"
     bk_panel_data "$PANEL_ROOT/data"
     bk_opt "$PANEL_ROOT/ssl"
+    bk_panel_projects "$(dirname "$PANEL_ROOT")"
   fi
   # 面板计划任务的脚本体：crontab 里调用的是这里的文件
   [ -n "${PANEL_CRON_DIR:-}" ] && bk_opt "$PANEL_CRON_DIR"

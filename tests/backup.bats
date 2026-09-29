@@ -338,6 +338,18 @@ EOF
   rm -f /root/.google_authenticator /etc/pam.d/sshd
 }
 
+@test "面板项目类站点：<上级>/*_project 小的整目录进包（反向代理项目的记录），超过 5MB 的记进 rootfs-skipped" {
+  S="$T/server"; mkdir -p "$S/proxy_project/sites/a.example.com" "$S/python_project/venv" "$S/panel"
+  echo '{"proxy_pass":"http://127.0.0.1:10086"}' > "$S/proxy_project/sites/a.example.com/a.example.com.json"
+  head -c 6000000 /dev/urandom > "$S/python_project/venv/big"
+  bk_init "$T/pkg"
+  bk_panel_projects "$S"
+  [ -f "$T/pkg/rootfs$S/proxy_project/sites/a.example.com/a.example.com.json" ]
+  [ ! -e "$T/pkg/rootfs$S/python_project" ]
+  grep -q "^$S/python_project"$'\t'"超过 5MB" "$T/pkg/system/rootfs-skipped.txt"
+  grep -qP "^\Q$S/proxy_project\E\t\d+\t\S+\tdir$" "$T/pkg/restore-manifest.tsv"
+}
+
 @test "面板 data：监控历史只留表结构，漏洞库与国家库不收，站点记录照收" {
   P="$T/panel"; mkdir -p "$P/data/db" "$P/data/warning" "$P/data/firewall"
   sqlite3 "$P/data/system.db" "CREATE TABLE cpuio(id INTEGER, pro REAL); INSERT INTO cpuio VALUES (1, 0.5), (2, 0.7);"

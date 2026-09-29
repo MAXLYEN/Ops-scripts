@@ -49,8 +49,9 @@ opsget ops/install-backup-cron --apply    # 写入
 | `decommission-archive.sh` | 2.0.1 | 在机器退役前归档最终状态与数据 |
 | `deploy-litellm.sh` | 1.2.4 | 部署 LiteLLM、Postgres 与 Redis 容器 |
 | `panel-backup-upload.sh` | 1.0.5 | 加密并上传面板生成的整机备份包 |
+| `panel-backup-create.sh` | 1.0.0 | 照面板上次的设置生成整机备份，加密上传，本机与云端各留最近几份 |
 | `push-keys.sh` | 1.0.4 | 按主机清单批量下发 SSH 公钥 |
-| `install-backup-cron.sh` | 1.2.0 | 按统一时间表安装备份定时任务（幂等） |
+| `install-backup-cron.sh` | 1.3.0 | 按统一时间表安装备份定时任务（幂等） |
 | `restore-cron.sh` | 2.0.2 | 从快照恢复仓库管理的 cron 任务 |
 | `setup-key-login.sh` | 1.0.2 | 配置新机器的 SSH 密钥登录并验证 |
 | `sync-llm-allowlist.sh` | 2.0.4 | 同步 LLM 站点白名单与 fail2ban 规则 |
@@ -92,7 +93,7 @@ opsget ops/litellm-drill teardown <备用机IP>           # 删掉演练实例�
 
 `cleanup-tidy.sh`、`cleanup-purge.sh` 和 `bind-localhost.sh` 默认先预演，带 `--apply` 才执行。涉及数据库修正的 `fix-newapi-*.sh` 应在容器停止并完成备份后使用；`apply-newapi-quota-fix.sh` 串联停服、拉库、修正、校验和恢复。灾难恢复演练 `newapi-drill.sh`、`litellm-drill.sh` 只在备用机运行，并拒绝生产目标。
 
-`containerize-and-pin.sh` 保留改名前的旧容器以便回滚，并锁定当前镜像 digest，不执行升级。`deploy-litellm.sh` 将容器端口绑定本机；加入模型后 `LITELLM_SALT_KEY` 必须保持不变，丢失该密钥将无法解开已加密的凭据；它随 `backup/litellm-fullbackup` 的加密包备份（包里的 `workdir/.env`）。`panel-backup-upload.sh` 默认用 7z 加密，`--raw` 会上传未加密原包；`--prune N` 只清理本机上传台账 `/var/lib/ops-scripts/panel-backup-uploaded.list` 里的包，不碰其他服务器的文件。`cleanup-purge.sh` 默认保留 crontab 正在调用的脚本、`BACKUP_SCRIPTS` 及它们依赖的 `env.conf` 与 `ops-common.sh`，`PURGE_CRON_SCRIPTS=1` 才一并删除。
+`containerize-and-pin.sh` 保留改名前的旧容器以便回滚，并锁定当前镜像 digest，不执行升级。`deploy-litellm.sh` 将容器端口绑定本机；加入模型后 `LITELLM_SALT_KEY` 必须保持不变，丢失该密钥将无法解开已加密的凭据；它随 `backup/litellm-fullbackup` 的加密包备份（包里的 `workdir/.env`）。`panel-backup-upload.sh` 默认用 7z 加密，`--raw` 会上传未加密原包；`--prune N` 只清理本机上传台账 `/var/lib/ops-scripts/panel-backup-uploaded.list` 里的包，不碰其他服务器的文件。`panel-backup-create.sh` 由 `install-backup-cron` 排在每周日 UTC 19:30：复制面板「设置 → 备份还原」里最近一次备份的任务配置（备份内容一致）、换新时间戳，前台运行面板自带的 `backup_manager.py backup_data`，出了包再交给 `panel-backup-upload --prune`；本机按时间戳只留最近 `PANEL_BACKUP_KEEP` 份（包、工作目录、面板里的任务记录一起删，面板手动建的也算在内）。面板里至少要手动建过一次备份，它照那次勾选的内容备份；失败时告警、心跳 `/fail`，本机旧包不动。`cleanup-purge.sh` 默认保留 crontab 正在调用的脚本、`BACKUP_SCRIPTS` 及它们依赖的 `env.conf` 与 `ops-common.sh`，`PURGE_CRON_SCRIPTS=1` 才一并删除。
 
 `sync-llm-allowlist.sh` 的 fail2ban/ufw 封禁会影响所有端口，`ignoreip` 需覆盖整组可信机器，并检查 nginx 的 allow/deny 顺序。`upgrade-vaultwarden.sh` 即使回退 compose 配置也未必能回退数据库迁移，升级前须有近期备份。
 
