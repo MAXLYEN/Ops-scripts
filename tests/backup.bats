@@ -281,6 +281,42 @@ EOF
   rm -rf /opt/bk-u
 }
 
+@test "bk_images：给了容器名只列这些，不存在的记 -；不给就列全部" {
+  mkdir -p "$T/bin"
+  cat > "$T/bin/docker" <<'EOF'
+#!/bin/bash
+case "$*" in
+  "ps -a --format {{.Names}}") printf 'a\nb\nc\n' ;;
+  "inspect -f {{.Config.Image}} a") echo img-a ;;
+  "inspect -f {{.Image}} a") echo id-a ;;
+  "inspect -f {{.Config.Image}} b") echo img-b ;;
+  "inspect -f {{.Image}} b") echo id-b ;;
+  "image inspect -f "*" id-a") echo repo/a@sha256:aa ;;
+  "image inspect "*) echo ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$T/bin/docker"; PATH="$T/bin:$PATH"
+  bk_images "$T/i.tsv" a gone
+  [ "$(grep -vc '^#' "$T/i.tsv")" = 2 ]
+  grep -qP '^a\timg-a\trepo/a@sha256:aa$' "$T/i.tsv"
+  grep -qP '^gone\t-\t-$' "$T/i.tsv"
+  grep -q 'gone' "$WARN_LOG"
+  bk_images "$T/all.tsv"
+  [ "$(grep -vc '^#' "$T/all.tsv")" = 3 ]
+  grep -qP '^b\timg-b\t-$' "$T/all.tsv"
+}
+
+@test "vps_host_port：主机整段匹配，注释与相似 IP 不算" {
+  printf '%s\n' 'root@10.0.0.10:2200' '#root@10.0.0.1:9' 'x root@10.0.0.1:2222 y' 'admin@host.example:22' 'root@10.0.0.3' > "$T/.vps-hosts.txt"
+  HOME=$T
+  [ "$(vps_host_port 10.0.0.1)" = 2222 ]
+  [ "$(vps_host_port host.example)" = 22 ]
+  [ -z "$(vps_host_port 10.0.0.2)" ]
+  [ -z "$(vps_host_port 10.0.0.3)" ]
+  [ -z "$(vps_host_port 10.0.0)" ]
+}
+
 @test "没配 MYSQL_DEFAULTS_FILE：告警并跳过，不中断" {
   unset MYSQL_DEFAULTS_FILE
   bk_init "$T/pkg"

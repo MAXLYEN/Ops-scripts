@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.2.1
-# 1.2.1: 备份采集 /usr/local/bin 时跳过与系统命令同名的文件（放回会遮住真命令）。
+# VERSION: 1.2.2
+# 1.2.2: bk_images 可只列指定容器（可整段送到远端执行）；新增 vps_host_port；LITELLM_BACKUP_DIR 算备份落盘目录。
 
 set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 # shellcheck disable=SC2034  # 供调用方查询公共库版本
-OPS_COMMON_VERSION="1.2.1"
+OPS_COMMON_VERSION="1.2.2"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
@@ -265,7 +265,7 @@ bk_init() {  # bk_init <包根目录>
   done
   # 备份自己的落盘目录不收，否则包里套包、越滚越大
   BK_OUTDIRS=()
-  for f in ${VW_BACKUP_DIR:-} ${XBOARD_BACKUP_DIR:-} ${NEWAPI_BAK_DIR:-} ${BACKUP_DIRS:-} \
+  for f in ${VW_BACKUP_DIR:-} ${XBOARD_BACKUP_DIR:-} ${NEWAPI_BAK_DIR:-} ${LITELLM_BACKUP_DIR:-} ${BACKUP_DIRS:-} \
            ${SNAPSHOT_ROOT:-} ${PANEL_DB_BACKUP_DIR:-} ${PANEL_BACKUP_DIR:-} \
            ${RESTORE_STAGE:-} ${IMAGE_EXPORT_DIR:-}; do
     [ -n "$f" ] || continue
@@ -546,16 +546,26 @@ bk_system_ref() {
   return 0
 }
 
-# bk_images <输出文件> —— 每个容器一行：容器名、配置的镜像、RepoDigest。
+# bk_images <输出文件> [容器...] —— 每个容器一行：容器名、配置的镜像、RepoDigest。
 # :latest / :new 这类标签重拉会拿到别的版本，还原时按 digest 拉才是原来那个。
+# 不给容器名就列本机全部容器；给了只列这些，不存在的镜像与 digest 都记 -。
+# 只依赖 docker 与 warn：远端没有公共库时，可以 declare -f bk_images 连同一个 warn 送过去执行。
 bk_images() {
-  local out=$1 c img id dig
+  local out=$1 c img id dig; shift
   printf '# container\timage\trepo_digest\n' > "$out"
   command -v docker >/dev/null 2>&1 || return 0
-  for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null); do
-    img=$(docker inspect -f '{{.Config.Image}}' "$c" 2>/dev/null)
-    id=$(docker inspect -f '{{.Image}}' "$c" 2>/dev/null)
-    dig=$(docker image inspect -f '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$id" 2>/dev/null)
+  # shellcheck disable=SC2046  # 容器名不含空白，按词拆开正是要的
+  [ $# -gt 0 ] || set -- $(docker ps -a --format '{{.Names}}' 2>/dev/null)
+  for c in "$@"; do
+    # 失败的赋值一律接 ||：调用方开着 set -e 时，一个不存在的容器不该让整个函数中止
+    img=$(docker inspect -f '{{.Config.Image}}' "$c" 2>/dev/null) || img=""
+    if [ -z "$img" ]; then
+      warn "容器 $c 不存在，镜像没有记下"
+      printf '%s\t-\t-\n' "$c" >> "$out"
+      continue
+    fi
+    id=$(docker inspect -f '{{.Image}}' "$c" 2>/dev/null) || id=""
+    dig=$(docker image inspect -f '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$id" 2>/dev/null) || dig=""
     [ -n "$dig" ] || warn "容器 $c 的镜像 $img 没有 RepoDigest（本地构建？），还原时无法按 digest 锁定"
     printf '%s\t%s\t%s\n' "$c" "${img:--}" "${dig:--}" >> "$out"
   done
@@ -746,6 +756,16 @@ bk_prune_remote() {
   done <<< "$del"
   [ "$bad" -eq 0 ] || warn "${rem} 有 ${bad} 个过期文件删除失败"
   log "  ✓ ${rem} 按分级保留清理 ${n} 个文件（每月一份保留至 $4 天）"
+}
+
+# ── 主机清单 ────────────────────────────────────────────────
+# vps_host_port <主机> —— ~/.vps-hosts.txt（每行 user@host:端口，# 起注释）里这台主机的端口。
+# 主机整段比较，不像正则那样让 1.2.3.4 也命中 11.2.3.45。找不到时输出为空
+vps_host_port() {
+  awk -v h="$1" '{ sub(/#.*/, "")
+    for (i = 1; i <= NF; i++) { s = $i; sub(/^[^@]*@/, "", s)
+      if (split(s, a, ":") == 2 && a[1] == h && a[2] ~ /^[0-9]+$/) { print a[2]; exit } } }' \
+    "${HOME}/.vps-hosts.txt" 2>/dev/null
 }
 
 # ── 其它 ────────────────────────────────────────────────────

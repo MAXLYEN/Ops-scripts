@@ -213,6 +213,23 @@ exit 0
   [ -z "$(calls)" ]
 }
 
+@test "立即备份：crontab 里没有定时任务时用 -cron 锁，不撞备份脚本自己的锁" {
+  mkdir -p /run/lock
+  [ "$(readlink -f /var/lock)" = /run/lock ]      # 前提：/var/lock 就是 /run/lock
+  # 桩像真的备份脚本一样先拿 /run/lock/<名>.lock，拿不到就「跳过」
+  cat > /usr/local/bin/litellm-fullbackup.sh <<EOF
+#!/usr/bin/env bash
+# VERSION: 0.0.0-stub
+exec 9>/run/lock/litellm-fullbackup.lock
+flock -n 9 || { echo "local/litellm-fullbackup 被自己的锁挡住" >> $CALLS; exit 0; }
+echo "local/litellm-fullbackup" >> $CALLS
+EOF
+  chmod 755 /usr/local/bin/litellm-fullbackup.sh
+  drive opsbox 2 2 "" y "" 0 q
+  has "flock -n /var/lock/litellm-fullbackup-cron.lock /usr/local/bin/litellm-fullbackup.sh"
+  calls_are "local/litellm-fullbackup"
+}
+
 # ── 向导 ────────────────────────────────────────────────────
 @test "初始化向导：回车执行下一步并记住进度，头部提示下一步" {
   stub init/00-precheck 0
@@ -733,6 +750,15 @@ no_toolbox_left() {
   stub ops/install-backup-cron 0
   drive opsbox 9 5 "" y "" 0 q
   has "本机装了备份脚本: vw-fullbackup"
+  calls_are "ops/install-backup-cron" "ops/install-backup-cron --apply"
+}
+
+@test "定时任务：只装了 litellm-fullbackup 也按统一时间表排" {
+  local_stub litellm-fullbackup
+  stub ops/install-backup-cron 0
+  drive opsbox 9 5 "" y "" 0 q
+  has "本机装了备份脚本: litellm-fullbackup"
+  has "litellm 每 6 小时"
   calls_are "ops/install-backup-cron" "ops/install-backup-cron --apply"
 }
 

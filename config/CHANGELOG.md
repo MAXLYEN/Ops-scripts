@@ -2,6 +2,12 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-09-28：LiteLLM 备份
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `env.example.conf` | 1.9.0 → 1.10.0 | 新增 `LITELLM_SSH_PORT`、`LITELLM_BACKUP_DIR`、`LITELLM_CLOUD_DIR`（默认 `Backup-LiteLLM`）、`LITELLM_HEARTBEAT_URL`；LiteLLM 区块注明三个脚本共用；`BACKUP_KEEP_*` 注明 litellm 与 vw / xboard 共用；`RCLONE_PATHS` 注明漏列的备份目录会被自动并入校验 |
+
 ## 2026-09-28：备份分级保留与完整性
 
 | 文件 | 原版本 → 当前版本 | 变更 |

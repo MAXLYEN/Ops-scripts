@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # bin/opsbox — ops-scripts 中文菜单：按场景挑功能，常用组合自动串联
-# VERSION: 1.3.0
+# VERSION: 1.4.0
+# 1.4.0: 立即备份与定时任务认 litellm-fullbackup；立即备份在 crontab 里没有定时任务时改用 /var/lock/<名>-cron.lock（原先的 /var/lock/<名>.lock 就是备份脚本自己的锁，脚本一启动就撞上父进程、跳过不备份）。
 # 1.3.0: 备份与恢复新增「从备份包恢复整机」（先校验预演；正式恢复输主机名、不自动加 --force；演练与清理）；定时任务里可按统一时间表安装备份任务（先预演再确认）。
 # 用法: opsbox（或在终端里不带参数运行 opsget）。随 opsget -u 一起更新。
 
 set -o pipefail
 
-OPSBOX_VERSION=1.3.0
+OPSBOX_VERSION=1.4.0
 BIN_DIR=/usr/local/bin
 ENV_FILE=/etc/ops-scripts/env.conf
 REF_FILE=/etc/ops-scripts/ref
@@ -55,7 +56,7 @@ check|panelcron|ops/panel-cron-inspect|只读|面板计划任务|面板里的计
 check|inventory|ops/script-inventory|只读|本机脚本盘点|想知道本机哪些脚本来自仓库、哪些是手工放的|列出本机脚本的来源与版本号（不比新旧；要看落后的用「工具箱设置 → 更新已装脚本」）
 check|locate|ops/panel-data-locate|只读|定位面板数据|想找某个站点或配置的数据到底存在哪个目录、哪张表|按你给的特征串（如域名）在面板目录和数据库里搜索
 backup|health|-|联动|备份体检|每周一次，或担心备份没在跑、云端的包坏了|先跑备份前置检查，再下载云端最新包验证能否解开；校验没通过时自动接着诊断告警邮件
-backup|now|backup/vw-fullbackup backup/xboard-fullbackup backup/newapi-fullbackup|需确认|立即备份|升级、迁移或大改之前，先手动备份一次|运行本机已装的备份脚本，和定时任务用同一把锁，不会撞车；不经网络拉取
+backup|now|backup/vw-fullbackup backup/xboard-fullbackup backup/newapi-fullbackup backup/litellm-fullbackup|需确认|立即备份|升级、迁移或大改之前，先手动备份一次|运行本机已装的备份脚本，和定时任务用同一把锁，不会撞车；不经网络拉取
 backup|verify|ops/verify-backup-pass|只读|云端备份包校验|想确认云端的包能用本地密码解开，且最新的包没有过期|每个网盘取最新包下载并解开验证；手动运行不发告警
 backup|compare|ops/compare-backup-content|只读|比对最近两个备份包|改了备份脚本后，确认新包内容和旧包一致|解开同一目录下最新的两个包，比较文件清单
 backup|panelup|ops/panel-backup-upload|需确认|上传面板整机备份|在面板里手动生成整机备份后，想把它加密传到网盘|先列出本地和云端已有的包，确认后加密上传；可选只保留本机最近上传的几份
@@ -80,7 +81,7 @@ settings|update|-|需确认|更新工具箱|隔段时间更新一次，或刚发
 settings|upgrade|-|需确认|更新已装脚本|更新过工具箱、切了固定版本之后，看本机脚本有没有落后|逐个对比本机已装脚本和固定版本，列出落后的；可全部或挑几个更新，旧版自动备份，定时任务在用的会提醒手动跑一次
 settings|pin|-|需确认|版本固定|发了新 tag 并验证过，要把本机切过去时|查看本机从哪个版本拉取；可固定到新 tag 或取消固定
 settings|config|-|需确认|配置管理|新机器上想先把配置填好，或想看、想改当前配置时|逐项填写本机还没填的配置（每项有中文说明）、查看当前配置（凭据打码）、查看某个脚本需要哪些配置
-settings|crontab|ops/install-backup-cron|需确认|定时任务|想看本机有哪些运维定时任务，给备份排上定时，或给云端备份校验加上每周任务|列出 crontab 里调用运维脚本的行；可按文档添加每周云端备份校验；装了备份脚本的，可按统一时间表（vw / xboard 每 6 小时、newapi 每小时）重排备份任务，先预演再确认
+settings|crontab|ops/install-backup-cron|需确认|定时任务|想看本机有哪些运维定时任务，给备份排上定时，或给云端备份校验加上每周任务|列出 crontab 里调用运维脚本的行；可按文档添加每周云端备份校验；装了备份脚本的，可按统一时间表（vw / xboard / litellm 每 6 小时、newapi 每小时）重排备份任务，先预演再确认
 settings|purge|ops/cleanup-purge|高危|卸载 ops-scripts|机器不再用这套脚本（交还、转手）时|先预演要删的内容；输主机名确认后删除全部已装脚本和产物，包括这个菜单
 EOF
 )
@@ -93,6 +94,7 @@ EOF
 # MENU-EXCLUDE: ops/deploy-litellm            一次性部署
 # MENU-EXCLUDE: ops/containerize-and-pin      一次性改造
 # MENU-EXCLUDE: ops/newapi-drill              在备用机上分步演练，菜单里容易误触 teardown
+# MENU-EXCLUDE: ops/litellm-drill             同上
 # MENU-EXCLUDE: db/sqlite-dsn                 直接改应用库里的连接串，用得少、误操作代价大
 # MENU-EXCLUDE: openclash/dns-anti-poison     在路由器上用 sh 运行，不是服务器脚本
 
@@ -431,7 +433,9 @@ backup_run() {  # backup_run <脚本名>：跑本地已装的备份，和 cron �
   [ -x "$f" ] || { note "本机没装 $n（opsget -i backup/$n）"; return 1; }
   lock=$(cron_lock "$n.sh")
   if [ -z "$lock" ]; then
-    lock="/var/lock/$n.lock"
+    # 不能用 /var/lock/$n.lock：/var/lock 就是 /run/lock，那是备份脚本自己拿的锁，
+    # 外面先拿了它，脚本一启动就以为上一轮还在跑、直接跳过。与 ops/install-backup-cron 同一把
+    lock="/var/lock/$n-cron.lock"
     note "crontab 里没找到 $n 的定时任务，改用 $lock（这台机器可能没有定时备份）"
   fi
   printf '\n%s▶ flock -n %s %s%s  %s(%s)%s\n' "$B" "$lock" "$f" "$N" "$D" \
@@ -543,7 +547,7 @@ do_health() {
 
 do_now() {
   local opts=() n i
-  for n in vw-fullbackup xboard-fullbackup newapi-fullbackup; do
+  for n in vw-fullbackup xboard-fullbackup newapi-fullbackup litellm-fullbackup; do
     [ -x "$BIN_DIR/$n.sh" ] && opts+=("$n")
   done
   [ ${#opts[@]} -gt 0 ] || { note "本机没装任何备份脚本（opsget -i backup/<名字>）"; return 1; }
@@ -1140,9 +1144,9 @@ do_crontab() {
   fi
   # 统一时间表：本机装了哪个备份脚本就排哪个；已有的行会被替换，不会重复
   local n has=""
-  for n in vw-fullbackup xboard-fullbackup newapi-fullbackup; do [ -x "$BIN_DIR/$n.sh" ] && has="$has $n"; done
+  for n in vw-fullbackup xboard-fullbackup newapi-fullbackup litellm-fullbackup; do [ -x "$BIN_DIR/$n.sh" ] && has="$has $n"; done
   [ -n "$has" ] || return 0
-  printf '\n  本机装了备份脚本:%s\n  统一时间表：vw / xboard 每 6 小时（:00 / :20），newapi 每小时（:05）\n' "$has"
+  printf '\n  本机装了备份脚本:%s\n  统一时间表：vw / xboard / litellm 每 6 小时（:00 / :20 / :40），newapi 每小时（:05）\n' "$has"
   run_ops ops/install-backup-cron || return
   confirm "按上面的预演改写 crontab？" && run_ops ops/install-backup-cron --apply
 }

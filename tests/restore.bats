@@ -504,6 +504,14 @@ v2_local() {  # 新机的样子：引导用的公钥、配好的 .my.cnf、init/
   has "ops/newapi-drill"
 }
 
+@test "LiteLLM 包明确拒绝，指向 litellm-drill 与包里的 RESTORE.md" {
+  printf x > /tmp/pkgs/litellm_20260928_000000.7z
+  restore check /tmp/pkgs/litellm_20260928_000000.7z
+  [ "$status" -ne 0 ]
+  has "ops/litellm-drill"
+  has "RESTORE.md"
+}
+
 # ── 定时任务安装器 ──────────────────────────────────────────
 cron_install() { run bash "$SRC/ops/install-backup-cron.sh" "$@"; }
 
@@ -547,6 +555,20 @@ cron_install() { run bash "$SRC/ops/install-backup-cron.sh" "$@"; }
   crontab -l | grep -q 'flock -n /var/lock/vw-fullbackup-cron.lock /usr/local/bin/vw-fullbackup.sh'
   crontab -l | grep -q 'flock -n /var/lock/xboard-fullbackup-cron.lock /usr/local/bin/xboard-fullbackup.sh'
   has "心跳监控的周期"
+}
+
+@test "安装器：litellm-fullbackup 每 6 小时 :40，旧行换掉，再跑不重复" {
+  local_stub litellm-fullbackup
+  echo '0 2 * * * /usr/local/bin/litellm-fullbackup.sh >> /tmp/x.log 2>&1' | crontab -
+  cron_install --apply
+  crontab -l | grep -qx '40 \*/6 \* \* \* /usr/bin/flock -n /var/lock/litellm-fullbackup-cron.lock /usr/local/bin/litellm-fullbackup.sh >> /var/log/litellm-fullbackup-cron.log 2>&1'
+  [ "$(crontab -l | grep -c 'litellm-fullbackup.sh')" = 1 ]
+  none '^0 2 ' "$(crontab -l)"
+  has "vw / xboard / litellm 6 小时"
+  crontab -l > /tmp/c1
+  cron_install --apply
+  has "无需改动"
+  crontab -l | diff /tmp/c1 -
 }
 
 @test "安装器：一个备份脚本都没装时说清楚，不动 crontab" {

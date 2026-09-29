@@ -13,6 +13,7 @@
 | `opsbox.bats` | — | 菜单：界面、说明卡片、两段式与主机名确认、缺配置引导、各联动流程、向导进度 |
 | `backup.bats` | — | 备份包公共函数（`lib/common.sh` 的 `bk_*`）：GFS 分级保留逐档校验与 60 天滚动、rootfs 权限属主、解密密码排除、SQLite 在线备份、systemd 单元归类、MySQL 账号 SQL 格式、`set -u` 兼容 |
 | `restore.bats` | — | 真跑 `migrate/restore-from-backup` 与 `ops/install-backup-cron`：现场打加密包，MySQL 换成记录语句的假实现，恢复一律 `--no-start` |
+| `litellm.bats` | — | 真跑 `backup/litellm-fullbackup`、`ops/litellm-drill`、`ops/verify-backup-pass`：ssh 在本机执行远端命令，docker、rclone、curl 换成假实现，7z 与公共库是真的 |
 
 ## 端到端怎么测
 
@@ -23,6 +24,8 @@
 这证明的是菜单按正确的顺序、带正确的参数调用了脚本；运维脚本本身在真实服务上的行为不在这里测。
 
 `restore.bats` 例外：它真跑恢复脚本，证明解包校验、两种包布局、冲突拦截、重跑、账号 host、镜像锁版本、`env.conf` 合并、定时任务与演练清理的逻辑；真实 MySQL 导入、容器启动、nginx、宝塔、systemd 仍然测不到。
+
+`litellm.bats` 同样真跑脚本：证明远端导出与校验的调用、包的内容与加密、上传校验、GFS 清理、失败时不出包、锁与心跳，以及演练的拦截、恢复顺序与清理；真实的 `pg_dump` / `pg_restore`、LiteLLM、SSH、rclone、Docker 测不到。
 
 ## 新增用例
 
