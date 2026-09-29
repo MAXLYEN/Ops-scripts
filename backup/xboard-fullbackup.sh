@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # backup/xboard-fullbackup.sh — 生成 Xboard 加密备份包并上传云端
-# VERSION: 2.4.0
+# VERSION: 2.4.1
+# 2.4.1: 其余业务库跳过 METRICS_DB_NAME（与 vw 一致，指标库只留本地），否则每 6 小时把整个指标库打进包上云。
 # 2.4.0: 新增 rootfs/ 与 restore-manifest.tsv（整个 Xboard 目录、系统配置、crontab、全部 MySQL 账号与业务库、镜像 digest），包内先打 tar 保留属主，改为 GFS 分级保留，防重入锁。
 # ENV-REQUIRED: SVC_XBOARD_DIR XBOARD_DB_NAME XBOARD_DB_USER XBOARD_DB_PASS_FILE XBOARD_BACKUP_DIR XBOARD_REMOTE_PATH RCLONE_REMOTES BACKUP_PASS_FILE|VW_PASS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR WWWROOT DB_CLIENT_HOST DOCKER_CIDR
 # 定时任务调用已安装的本地脚本，密码从配置文件指定的文件读取。
@@ -297,7 +298,8 @@ bk_opt /etc/xboard-toolkit.conf
 bk_system
 if bk_mysql_ready; then
     bk_mysql_users db/mysql-users.sql
-    bk_mysql_dbs "$DB_NAME"
+    # 指标库体积大、按方案只留本地（与 vw-fullbackup 一致）
+    bk_mysql_dbs "$DB_NAME" "${METRICS_DB_NAME:-metrics}"
 fi
 bk_compose_projects
 bk_images "$WORK/images.tsv"

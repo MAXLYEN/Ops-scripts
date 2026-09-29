@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | `newapi-fullbackup.sh` | 1.1.0 | 从汇总机拉取 new-api 数据，生成一致性快照并加密上传 |
 | `vw-fullbackup.sh` | 2.5.0 | 备份 Vaultwarden、Komari、SubConverter 与系统配置 |
-| `xboard-fullbackup.sh` | 2.4.0 | 生成 Xboard 加密备份包并上传云端 |
+| `xboard-fullbackup.sh` | 2.4.1 | 生成 Xboard 加密备份包并上传云端 |
 
 ## 运行与更新
 
