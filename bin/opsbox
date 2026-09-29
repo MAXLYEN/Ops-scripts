@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # bin/opsbox — ops-scripts 中文菜单：按场景挑功能，常用组合自动串联
-# VERSION: 1.2.0
-# 1.2.0: 工具箱设置新增「更新已装脚本」：对比已装脚本和固定版本，挑着更新，定时任务在用的提醒手动跑一次；更新工具箱后顺便检查。本机脚本盘点的说明不再承诺比较版本。
+# VERSION: 1.3.0
+# 1.3.0: 备份与恢复新增「从备份包恢复整机」（先校验预演；正式恢复输主机名、不自动加 --force；演练与清理）；定时任务里可按统一时间表安装备份任务（先预演再确认）。
 # 用法: opsbox（或在终端里不带参数运行 opsget）。随 opsget -u 一起更新。
 
 set -o pipefail
 
-OPSBOX_VERSION=1.2.0
+OPSBOX_VERSION=1.3.0
 BIN_DIR=/usr/local/bin
 ENV_FILE=/etc/ops-scripts/env.conf
 REF_FILE=/etc/ops-scripts/ref
@@ -59,6 +59,7 @@ backup|now|backup/vw-fullbackup backup/xboard-fullbackup backup/newapi-fullbacku
 backup|verify|ops/verify-backup-pass|只读|云端备份包校验|想确认云端的包能用本地密码解开，且最新的包没有过期|每个网盘取最新包下载并解开验证；手动运行不发告警
 backup|compare|ops/compare-backup-content|只读|比对最近两个备份包|改了备份脚本后，确认新包内容和旧包一致|解开同一目录下最新的两个包，比较文件清单
 backup|panelup|ops/panel-backup-upload|需确认|上传面板整机备份|在面板里手动生成整机备份后，想把它加密传到网盘|先列出本地和云端已有的包，确认后加密上传；可选只保留本机最近上传的几份
+backup|dr|migrate/restore-from-backup|高危|从备份包恢复整机|原机已经没了、只剩云端的每日备份包；或每季度在临时机上做恢复演练|可先只校验并列出恢复计划；恢复时自动建库导入、放回数据与站点配置、按锁定的镜像版本起容器、装定时任务，最后列出剩下的手动步骤；演练结束可一键清理
 security|savefw|ops/save-fw|只读|防火墙快照|手动改 ufw 或 iptables 之前|把当前防火墙规则存到 /root/fwstate_<时间>，并附恢复命令；不改动防火墙
 security|llm|ops/check-llm-security ops/sync-llm-allowlist|联动|LLM 访问控制|LLM 站被扫、要加白名单 IP，或改了 ALLOW_EXTRA_IPS 之后|先只读盘点；确认后自动存防火墙快照，同步白名单与 fail2ban，再盘点一次对比
 security|bind|ops/bind-localhost|联动|容器端口收回本机|docker ps 看到容器端口是 0.0.0.0:端口、直接暴露在公网时|先生成重建命令给你看；确认后存防火墙快照、重建容器，可选跑端到端验收
@@ -79,7 +80,7 @@ settings|update|-|需确认|更新工具箱|隔段时间更新一次，或刚发
 settings|upgrade|-|需确认|更新已装脚本|更新过工具箱、切了固定版本之后，看本机脚本有没有落后|逐个对比本机已装脚本和固定版本，列出落后的；可全部或挑几个更新，旧版自动备份，定时任务在用的会提醒手动跑一次
 settings|pin|-|需确认|版本固定|发了新 tag 并验证过，要把本机切过去时|查看本机从哪个版本拉取；可固定到新 tag 或取消固定
 settings|config|-|需确认|配置管理|新机器上想先把配置填好，或想看、想改当前配置时|逐项填写本机还没填的配置（每项有中文说明）、查看当前配置（凭据打码）、查看某个脚本需要哪些配置
-settings|crontab|-|需确认|定时任务|想看本机有哪些运维定时任务，或给云端备份校验加上每周任务|列出 crontab 里调用运维脚本的行；可按文档添加每周云端备份校验
+settings|crontab|ops/install-backup-cron|需确认|定时任务|想看本机有哪些运维定时任务，给备份排上定时，或给云端备份校验加上每周任务|列出 crontab 里调用运维脚本的行；可按文档添加每周云端备份校验；装了备份脚本的，可按统一时间表（vw / xboard 每 6 小时、newapi 每小时）重排备份任务，先预演再确认
 settings|purge|ops/cleanup-purge|高危|卸载 ops-scripts|机器不再用这套脚本（交还、转手）时|先预演要删的内容；输主机名确认后删除全部已装脚本和产物，包括这个菜单
 EOF
 )
@@ -114,6 +115,9 @@ new-api 打不开|linkcheck
 应用连不上数据库|dbcheck
 脚本提示缺配置|config
 要把服务搬到另一台机器|migrate
+原机挂了，只剩云端的备份包|dr
+每季度做一次恢复演练|dr
+备份没排上定时，或想统一备份频率|crontab
 本机脚本落后于固定版本|upgrade"
 
 # ── 显示 ────────────────────────────────────────────────────
@@ -577,6 +581,34 @@ do_panelup() {
   else
     note "需要一个数字：$ANS"; return 1
   fi
+}
+
+do_dr() {
+  local p=migrate/restore-from-backup c tgt=()
+  printf '  [1] 只校验并预演   下载、解开、核对，列出恢复会做什么；不动本机\n'
+  printf '  [2] 正式恢复       原机已经不在；本机有数据时脚本会拒绝，要覆盖得在命令行加 --force\n'
+  printf '  [3] 演练恢复       临时机上；本机有任何数据就拒绝，不装定时任务，之后可清理\n'
+  printf '  [4] 查看恢复状态\n'
+  printf '  [5] 清理演练       删掉演练恢复出来的容器、库、账号和文件\n'
+  ask_choice "选择（回车返回）"
+  c=$ANS
+  case "$c" in
+    1|2|3)
+      ask "包路径（多个用空格；回车＝从网盘取 vw 和 xboard 的最新包）"
+      read -r -a tgt <<<"$ANS"
+      [ ${#tgt[@]} -gt 0 ] || tgt=(all) ;;
+  esac
+  case "$c" in
+    1) run_ops "$p" check "${tgt[@]}" ;;
+    # 正式恢复不替人加 --force：本机已有数据时让脚本拒绝，覆盖要在命令行里明确写出来
+    2) gate_host "用备份包恢复本机：建库导入、放回数据与站点配置、起容器、装定时任务" \
+         && run_ops "$p" restore "${tgt[@]}" ;;
+    3) confirm "在这台临时机上做恢复演练？（会起容器、占用端口，结束后用「清理演练」删掉）" \
+         && run_ops "$p" restore "${tgt[@]}" --drill ;;
+    4) run_ops "$p" status ;;
+    # 脚本里还有一道 yes 确认；这里已经手输过主机名，不再重复问
+    5) gate_host "删除演练恢复出来的全部内容（容器、库、账号、文件）" && OPS_YES=1 run_ops "$p" teardown ;;
+  esac
 }
 
 # ── 功能：安全与防火墙 ──────────────────────────────────────
@@ -1106,6 +1138,13 @@ do_crontab() {
       { crontab -l 2>/dev/null; printf '%s\n' "$line"; } | crontab - && echo "  已添加"
     fi
   fi
+  # 统一时间表：本机装了哪个备份脚本就排哪个；已有的行会被替换，不会重复
+  local n has=""
+  for n in vw-fullbackup xboard-fullbackup newapi-fullbackup; do [ -x "$BIN_DIR/$n.sh" ] && has="$has $n"; done
+  [ -n "$has" ] || return 0
+  printf '\n  本机装了备份脚本:%s\n  统一时间表：vw / xboard 每 6 小时（:00 / :20），newapi 每小时（:05）\n' "$has"
+  run_ops ops/install-backup-cron || return
+  confirm "按上面的预演改写 crontab？" && run_ops ops/install-backup-cron --apply
 }
 
 do_purge() {

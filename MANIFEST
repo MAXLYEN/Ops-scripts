@@ -19,6 +19,7 @@ migrate/06-export-images        迁出机：导出容器镜像（不要重新 pu
 migrate/07-restore-containers   迁入机：恢复数据目录，生成启动命令
 migrate/08-post-start-check     迁入机：端到端验收（含切换前预演）
 migrate/09-restore-backup-stack 迁入机：重建备份体系
+migrate/restore-from-backup     原机已不在：用每日备份包恢复整机（check / restore / --drill / teardown）
 
 # ── backup/ 生产备份（cron 调用本地路径，不要写 opsget）─────
 backup/vw-fullbackup            全服务备份：密码库+监控+订阅转换+系统配置
@@ -28,6 +29,7 @@ backup/newapi-fullbackup        new-api 中转平台备份（从汇总机拉取�
 # ── ops/ 日常运维 ──────────────────────────────────────────
 ops/save-fw                     改防火墙前保存现状
 ops/restore-cron                从快照恢复自有 cron
+ops/install-backup-cron         按统一时间表安装备份定时任务（--apply 执行，可反复运行）
 ops/preflight-backup            备份脚本的依赖与前置检查
 ops/verify-backup-pass          验证云端包能否用本地密码打开
 ops/ssl-audit                   证书文件/站点引用/续期记录三方对账

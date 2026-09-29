@@ -675,3 +675,77 @@ no_toolbox_left() {
   drive opsbox 9 6 "" "" ops-test yes
   [ -f /etc/ops-scripts/env.conf ]
 }
+
+# ── 从备份包恢复整机（原机已不在时的灾难恢复） ──────────────────
+@test "整机恢复：只校验预演不用确认，回车＝从网盘取最新包" {
+  stub migrate/restore-from-backup 0
+  drive opsbox 2 6 "" 1 "" "" 0 q
+  calls_are "migrate/restore-from-backup check all"
+}
+
+@test "整机恢复：正式恢复输对主机名才执行，包路径原样传入，不替人加 --force" {
+  stub migrate/restore-from-backup 0
+  drive opsbox 2 6 "" 2 "/root/a.7z /root/b.7z" ops-test "" 0 q
+  calls_are "migrate/restore-from-backup restore /root/a.7z /root/b.7z"
+}
+
+@test "整机恢复：主机名不符就不执行" {
+  stub migrate/restore-from-backup 0
+  drive opsbox 2 6 "" 2 "" wrong-host "" 0 q
+  has "主机名不符"
+  [ -z "$(calls)" ]
+}
+
+@test "整机恢复：演练确认后带 --drill 执行" {
+  stub migrate/restore-from-backup 0
+  drive opsbox 2 6 "" 3 "" y "" 0 q
+  calls_are "migrate/restore-from-backup restore all --drill"
+}
+
+@test "回车不执行：演练恢复要先确认" {
+  stub migrate/restore-from-backup 0
+  drive opsbox 2 6 "" 3 "" "" "" 0 q
+  [ -z "$(calls)" ]
+}
+
+@test "回车不执行：整机恢复的选择没有默认项" {
+  stub migrate/restore-from-backup 0
+  drive opsbox 2 6 "" "" "" 0 q
+  [ -z "$(calls)" ]
+}
+
+@test "整机恢复：清理演练要输主机名" {
+  stub migrate/restore-from-backup 0
+  drive opsbox 2 6 "" 5 wrong-host "" 0 q
+  [ -z "$(calls)" ]
+  drive opsbox 2 6 "" 5 ops-test "" 0 q
+  calls_are "migrate/restore-from-backup teardown"
+}
+
+@test "按场景找：原机挂了能找到整机恢复" {
+  drive opsbox "?" 0 q
+  has "原机挂了，只剩云端的备份包"
+}
+
+# ── 定时任务：按统一时间表排备份 ────────────────────────────────
+@test "定时任务：装了备份脚本时先预演，确认后才 --apply" {
+  local_stub vw-fullbackup
+  stub ops/install-backup-cron 0
+  drive opsbox 9 5 "" y "" 0 q
+  has "本机装了备份脚本: vw-fullbackup"
+  calls_are "ops/install-backup-cron" "ops/install-backup-cron --apply"
+}
+
+@test "定时任务：不确认就只预演" {
+  local_stub vw-fullbackup
+  stub ops/install-backup-cron 0
+  drive opsbox 9 5 "" n "" 0 q
+  calls_are "ops/install-backup-cron"
+}
+
+@test "定时任务：没装备份脚本就不提统一时间表" {
+  stub ops/install-backup-cron 0
+  drive opsbox 9 5 "" "" 0 q
+  lacks "本机装了备份脚本"
+  [ -z "$(calls)" ]
+}

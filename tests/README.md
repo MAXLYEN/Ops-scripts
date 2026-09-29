@@ -12,6 +12,7 @@
 | `opsget.bats` | — | 引导器：安装、`-u`、固定旧版本、配置预检、菜单入口 |
 | `opsbox.bats` | — | 菜单：界面、说明卡片、两段式与主机名确认、缺配置引导、各联动流程、向导进度 |
 | `backup.bats` | — | 备份包公共函数（`lib/common.sh` 的 `bk_*`）：GFS 分级保留逐档校验与 60 天滚动、rootfs 权限属主、解密密码排除、SQLite 在线备份、systemd 单元归类、MySQL 账号 SQL 格式、`set -u` 兼容 |
+| `restore.bats` | — | 真跑 `migrate/restore-from-backup` 与 `ops/install-backup-cron`：现场打加密包，MySQL 换成记录语句的假实现，恢复一律 `--no-start` |
 
 ## 端到端怎么测
 
@@ -20,6 +21,8 @@
 菜单调用的运维脚本换成**桩**：它只把自己被调用的方式记进 `/tmp/calls`，然后按指定的退出码退出。用例断言调用记录，例如「备份体检里云端校验失败时，接着调用了 mail-doctor」「没确认就没有 `--apply`」。
 
 这证明的是菜单按正确的顺序、带正确的参数调用了脚本；运维脚本本身在真实服务上的行为不在这里测。
+
+`restore.bats` 例外：它真跑恢复脚本，证明解包校验、两种包布局、冲突拦截、重跑、账号 host、镜像锁版本、`env.conf` 合并、定时任务与演练清理的逻辑；真实 MySQL 导入、容器启动、nginx、宝塔、systemd 仍然测不到。
 
 ## 新增用例
 

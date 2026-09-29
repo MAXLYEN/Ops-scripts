@@ -31,6 +31,15 @@ opsget -i ops/verify-backup-pass
 
 每周一 06:00（UTC）运行，排在凌晨备份之后。`RCLONE_PATHS` 要列全所有备份目录，漏掉的目录不会被校验。不带 `--cron` 手动运行时只输出结果，不发告警。
 
+### 备份定时任务
+
+```bash
+opsget ops/install-backup-cron            # 预演：显示改后的 crontab 与差异
+opsget ops/install-backup-cron --apply    # 写入
+```
+
+`vw-fullbackup` 与 `xboard-fullbackup` 每 6 小时（分别在 :00 与 :20，不同时上云），`newapi-fullbackup` 每小时 :05。只给 `/usr/local/bin` 里已装的备份脚本排任务；每个脚本一把 `flock -n` 锁 `/var/lock/<脚本>-cron.lock`（原有行带锁就沿用，换表那一刻正在跑的备份仍互斥，菜单的「立即备份」也读这把锁；但不用 `/run/lock/<脚本>.lock` —— 那是备份脚本自己的锁，外层拿了它，脚本一启动就会撞上退出），输出进 `/var/log/<脚本>-cron.log`，没有 `PATH=` 时补上。原有调用这几个脚本的行（包括不该有的 `opsget backup/…`）一律替换，其他行不动；可以反复运行，改之前的 crontab 存在 `/root/ops-backups/`。`migrate/restore-from-backup` 恢复时会自动调用它。上一次还没跑完时本次直接跳过、不报心跳，外部心跳监控的周期要跟着改成 6 小时 / 1 小时（加宽限）。
+
 ## 部署与日常维护
 
 | 文件 | 版本 | 作用 |
@@ -41,6 +50,7 @@ opsget -i ops/verify-backup-pass
 | `deploy-litellm.sh` | 1.2.4 | 部署 LiteLLM、Postgres 与 Redis 容器 |
 | `panel-backup-upload.sh` | 1.0.5 | 加密并上传面板生成的整机备份包 |
 | `push-keys.sh` | 1.0.4 | 按主机清单批量下发 SSH 公钥 |
+| `install-backup-cron.sh` | 1.0.0 | 按统一时间表安装备份定时任务（幂等） |
 | `restore-cron.sh` | 2.0.2 | 从快照恢复仓库管理的 cron 任务 |
 | `setup-key-login.sh` | 1.0.2 | 配置新机器的 SSH 密钥登录并验证 |
 | `sync-llm-allowlist.sh` | 2.0.4 | 同步 LLM 站点白名单与 fail2ban 规则 |
