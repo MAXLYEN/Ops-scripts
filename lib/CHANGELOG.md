@@ -12,7 +12,7 @@
 
 | 文件 | 原版本 → 当前版本 | 变更 |
 | --- | --- | --- |
-| `common.sh` | 1.2.1 → 1.2.2 | `bk_system` 新收 `/etc/pam.d/sshd` 与 `/root/.google_authenticator`（TOTP 密钥与应急码）。原机 SSH 开了 Google 两步验证时，`sshd_config` 要求 keyboard-interactive，缺这两样在新机上重启 SSH 后就登不进去；密钥原样放回，手机上原来的验证器条目继续可用 |
+| `common.sh` | 1.2.1 → 1.2.2 | `bk_system` 新收 `/etc/pam.d/sshd` 与 `/root/.google_authenticator`（TOTP 密钥与应急码）。原机 SSH 的密码登录开了 Google 两步验证（密钥登录不需要验证码），缺这两样在新机上重启 SSH 后密码登录就过不去；密钥原样放回，手机上原来的验证器条目继续可用 |
 
 ## 2026-09-28：/usr/local/bin 同名文件不进包
 

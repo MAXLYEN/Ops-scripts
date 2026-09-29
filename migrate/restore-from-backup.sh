@@ -1094,8 +1094,8 @@ restore_cron() {
   [ -f /etc/msmtprc ] || manual "告警邮件：/etc/msmtprc 不在本机" "旧版备份包不收它；照原机配置补上后用 opsget ops/mail-doctor --send 验证"
 }
 
-# 原机 SSH 开了 Google 两步验证：PAM 配置和 TOTP 密钥随包放回，但模块是个软件包，新机上没有。
-# 不装的话，重启 SSH（或重启机器）后 PAM 找不到模块，所有登录都会失败。
+# 原机 SSH 的密码登录开了 Google 两步验证（密钥登录不需要验证码）：PAM 配置和 TOTP 密钥随包放回，
+# 但模块是个软件包，新机上没有。不装的话，重启 SSH 后密码登录会失败；密钥登录不受影响。
 ssh_2fa_check() {
   local pam=/etc/pam.d/sshd
   if [ -f "$pam" ] && grep -qE '^[[:space:]]*[^#].*pam_google_authenticator\.so' "$pam"; then
@@ -1107,14 +1107,14 @@ ssh_2fa_check() {
         ok "SSH 两步验证：PAM 模块已安装"
       else
         warn "libpam-google-authenticator 没装上"
-        manual "装好 libpam-google-authenticator 之前，不要重启 SSH 或重启机器" \
-               "原机的 SSH 要求 Google 两步验证，模块不在时重启 SSH 后所有登录都会失败"
+        manual "装好 libpam-google-authenticator 再重启 SSH，否则密码登录会失败" \
+               "原机的 SSH 密码登录要求 Google 两步验证，模块不在时密码登录会失败；密钥登录不受影响"
       fi
     fi
     [ -f /root/.google_authenticator ] \
-      || manual "root 的 /root/.google_authenticator 不在本机：两步验证会拒绝 root 登录" "旧版备份包不收这个文件；在原机上用 google-authenticator 重新生成，或暂时从 /etc/pam.d/sshd 去掉这一行"
-    manual "重启 SSH 前保持当前会话不断开，另开一个窗口用原来的密钥加手机上的验证码测试登录" \
-           "两步验证的密钥已换成原机的，手机上原来的验证器条目继续可用；新窗口能登录再关掉旧会话"
+      || manual "root 的 /root/.google_authenticator 不在本机：root 用密码登录时过不了两步验证（密钥登录不受影响）" "旧版备份包不收这个文件；在原机上用 google-authenticator 重新生成，或暂时从 /etc/pam.d/sshd 去掉这一行"
+    manual "重启 SSH 前保持当前会话不断开，另开一个窗口用原来的密钥测试登录" \
+           "新窗口能登录再关掉旧会话；两步验证的密钥已换成原机的，要用密码登录时，手机上原来的验证器条目继续可用"
   fi
   if command -v sshd >/dev/null 2>&1 && { touched_under /etc/ssh || touched_under /etc/pam.d; }; then
     if sshd -t 2>/dev/null; then ok "sshd 配置检查通过"

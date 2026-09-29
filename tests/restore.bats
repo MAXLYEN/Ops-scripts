@@ -603,7 +603,7 @@ fake_apt() {  # apt-get 只记录调用，不联网
   grep -q pam_google_authenticator /etc/pam.d/sshd
   [ "$(stat -c '%a %U' /root/.google_authenticator)" = "400 root" ]
   grep -q 'install .*libpam-google-authenticator' /tmp/apt.log
-  has "另开一个窗口用原来的密钥加手机上的验证码测试登录"
+  has "另开一个窗口用原来的密钥测试登录"
   lacks "/root/.google_authenticator 不在本机"
   rm -f /etc/pam.d/sshd /root/.google_authenticator
 }
