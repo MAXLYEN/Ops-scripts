@@ -670,3 +670,27 @@ ufw_cleanup() { rm -rf /etc/ufw /etc/ufw.bak.* /etc/ssh/sshd_config.bak.*; }
   lacks "ufw allow from 203.0.113.9"
   ufw_cleanup
 }
+
+@test "安装器：旧行命令前的环境变量（MAIL_TO=...）照留到新行" {
+  local_stub xboard-fullbackup
+  printf '%s\n' '50 3 * * * MAIL_TO=ops-xboard@example.com flock -w 3600 /var/lock/xb.lock /usr/local/bin/xboard-fullbackup.sh >> /var/log/xboard-fullbackup-cron.log 2>&1' | crontab -
+  cron_install --apply
+  crontab -l | grep -qx '20 \*/6 \* \* \* MAIL_TO=ops-xboard@example.com /usr/bin/flock -n /var/lock/xb.lock /usr/local/bin/xboard-fullbackup.sh >> /var/log/xboard-fullbackup-cron.log 2>&1'
+  has "沿用旧行的环境变量 MAIL_TO=ops-xboard@example.com"
+  crontab -l > /tmp/c1; cron_install --apply; has "无需改动"; crontab -l | diff /tmp/c1 -
+}
+
+@test "安装器：几个备份脚本共用的外层锁不沿用，各用各的（-n 下共用会互相挤掉）" {
+  local_stub vw-fullbackup; local_stub xboard-fullbackup; local_stub newapi-fullbackup
+  printf '%s\n' \
+    '30 3 * * * flock -w 3600 /var/lock/fullbackup.lock /usr/local/bin/vw-fullbackup.sh >> /var/log/vw-fullbackup-cron.log 2>&1' \
+    '50 3 * * * flock -w 3600 /var/lock/fullbackup.lock /usr/local/bin/xboard-fullbackup.sh >> /var/log/xboard-fullbackup-cron.log 2>&1' \
+    '10 4 * * * flock -w 3600 /var/lock/fullbackup.lock /usr/local/bin/newapi-fullbackup.sh >> /var/log/newapi-fullbackup-cron.log 2>&1' | crontab -
+  cron_install --apply
+  none 'fullbackup\.lock' "$(crontab -l)"
+  crontab -l | grep -q -- '-n /var/lock/vw-fullbackup-cron.lock /usr/local/bin/vw-fullbackup.sh'
+  crontab -l | grep -q -- '-n /var/lock/xboard-fullbackup-cron.lock /usr/local/bin/xboard-fullbackup.sh'
+  crontab -l | grep -q -- '-n /var/lock/newapi-fullbackup-cron.lock /usr/local/bin/newapi-fullbackup.sh'
+  has "原来和其他备份脚本共用外层锁 /var/lock/fullbackup.lock"
+  crontab -l > /tmp/c1; cron_install --apply; has "无需改动"; crontab -l | diff /tmp/c1 -
+}

@@ -50,7 +50,7 @@ opsget ops/install-backup-cron --apply    # 写入
 | `deploy-litellm.sh` | 1.2.4 | 部署 LiteLLM、Postgres 与 Redis 容器 |
 | `panel-backup-upload.sh` | 1.0.5 | 加密并上传面板生成的整机备份包 |
 | `push-keys.sh` | 1.0.4 | 按主机清单批量下发 SSH 公钥 |
-| `install-backup-cron.sh` | 1.1.0 | 按统一时间表安装备份定时任务（幂等） |
+| `install-backup-cron.sh` | 1.2.0 | 按统一时间表安装备份定时任务（幂等） |
 | `restore-cron.sh` | 2.0.2 | 从快照恢复仓库管理的 cron 任务 |
 | `setup-key-login.sh` | 1.0.2 | 配置新机器的 SSH 密钥登录并验证 |
 | `sync-llm-allowlist.sh` | 2.0.4 | 同步 LLM 站点白名单与 fail2ban 规则 |

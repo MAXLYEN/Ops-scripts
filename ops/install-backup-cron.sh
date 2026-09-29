@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/install-backup-cron.sh — 按统一时间表安装备份定时任务（幂等，可反复运行）
-# VERSION: 1.1.0
+# VERSION: 1.2.0
+# 1.2.0: 旧行命令前的环境变量（如 MAIL_TO=... 把某个脚本的告警发到别的邮箱）照留到新行；几个备份脚本原来共用一把外层锁时不再沿用、各用各的（旧行是 flock -w 排队，新行是 -n 撞上就跳过，共用会让每小时的 newapi 撞上正在跑的 vw 时整轮跳过）。
 # 1.1.0: 新增 litellm-fullbackup，每 6 小时（:40）。
 # 1.0.0: 首版。vw / xboard 每 6 小时（:00 / :20），newapi 每小时（:05）；外层 flock 锁用 /var/lock/<名>-cron.lock（不与脚本自己的 /run/lock/<名>.lock 同一把），输出进各自的 -cron.log，补 PATH。
 # 用法：install-backup-cron.sh [--apply]    不带参数只预演：显示改后的 crontab 与差异，不写入
@@ -37,6 +38,31 @@ lock_of() {  # lock_of <行>
              print $j; exit } } }' <<<"$1"
 }
 
+# 旧行在命令前写的环境变量（如 MAIL_TO=... 让这个脚本的告警发到别的邮箱），新行照留。
+# 只认不带空格的 名字=值；值里有空格的写法请改进 env.conf
+env_prefix_of() {  # env_prefix_of <行>
+  awk '{ s = ($1 ~ /^@/) ? 2 : 6; p = ""
+         for (i = s; i <= NF; i++) { if ($i ~ /^[A-Za-z_][A-Za-z0-9_]*=/) p = p $i " "; else break }
+         printf "%s", p }' <<<"$1"
+}
+
+# 几个备份脚本原来共用一把外层锁时不沿用：旧行是 flock -w 排队等，新行是 -n 撞上就跳过，
+# 共用一把会让每小时的 newapi 撞上还在上传的 vw 时整轮跳过、心跳缺一次。
+# 每个备份脚本自己都有防重入锁（/run/lock/<名>.lock），外层各用各的就够了
+declare -A LOCK_USERS=()
+while IFS='|' read -r n _; do
+  while IFS= read -r l || [ -n "$l" ]; do
+    case "$l" in [[:space:]]*'#'*|'#'*) continue ;; esac
+    calls_script "$n" "$l" || continue
+    k=$(lock_of "$l")
+    [ -n "$k" ] && case " ${LOCK_USERS[$k]:-} " in *" $n "*) ;; *) LOCK_USERS[$k]="${LOCK_USERS[$k]:-} $n" ;; esac
+  done < "$CUR"
+done <<<"$SCHEDULE"
+shared_lock() {  # shared_lock <锁文件>：有两个以上的备份脚本在用它
+  local u=${LOCK_USERS[$1]:-}
+  [ "$(wc -w <<<"$u")" -gt 1 ]
+}
+
 cp "$CUR" "$NEW"
 ADDED=""
 while IFS='|' read -r name when; do
@@ -44,7 +70,7 @@ while IFS='|' read -r name when; do
     log "$name：本机没装（$BIN/$name.sh），跳过"
     continue
   fi
-  lock=""
+  lock="" prefix=""
   : > "$NEW.t"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -52,6 +78,7 @@ while IFS='|' read -r name when; do
     esac
     if calls_script "$name" "$line"; then
       [ -n "$lock" ] || lock=$(lock_of "$line")
+      [ -n "$prefix" ] || prefix=$(env_prefix_of "$line")
       continue                                   # 旧行一律拿掉，下面按时间表写一行新的
     fi
     printf '%s\n' "$line" >> "$NEW.t"
@@ -60,9 +87,14 @@ while IFS='|' read -r name when; do
   # 备份脚本自己会锁 /run/lock/<名>.lock（/var/lock 就是 /run/lock）。cron 外层要是也拿这把，
   # 脚本一启动就撞上自己的父进程，直接退出 —— 备份永远不跑。外层一律用另一把
   case "$lock" in "/run/lock/$name.lock"|"/var/lock/$name.lock"|"/run/$name.lock") lock="" ;; esac
+  if [ -n "$lock" ] && shared_lock "$lock"; then
+    log "$name：原来和其他备份脚本共用外层锁 $lock，改用自己的一把"
+    lock=""
+  fi
   lock=${lock:-/var/lock/$name-cron.lock}
-  printf '%s /usr/bin/flock -n %s %s/%s.sh >> /var/log/%s-cron.log 2>&1\n' \
-    "$when" "$lock" "$BIN" "$name" "$name" >> "$NEW"
+  [ -n "$prefix" ] && log "$name：沿用旧行的环境变量 ${prefix% }"
+  printf '%s %s/usr/bin/flock -n %s %s/%s.sh >> /var/log/%s-cron.log 2>&1\n' \
+    "$when" "$prefix" "$lock" "$BIN" "$name" "$name" >> "$NEW"
   ADDED="$ADDED $name"
 done <<<"$SCHEDULE"
 
