@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/ssh-allowlist.sh — 本机 SSH 只放行名单里的 IP（ufw）；改动当场验证，不确认就回滚
-# VERSION: 1.1.1
+# VERSION: 1.1.2
+# 1.1.2: 「新窗口能登录吗」改用公共库的 is_yes：前后空格、大小写、全角字符不再让 yes 被当成回滚。
 # 1.1.1: 这次顺带改过的配置（env.conf、机群清单）记进待确认记录：定时回滚与 --rollback 连配置一起改回（生产机上试用时，运行菜单的窗口被客户端顶掉，定时回滚只回滚了防火墙，配置里留着新加的 IP）。提示里说明另开独立会话测试、窗口断了在新窗口里 --confirm。
 # 1.1.0: 在终端里直接运行进菜单：列出带编号的名单，选新增（写进 ADMIN_IPS）或删除（从 ADMIN_IPS、ALLOW_EXTRA_IPS、~/.vps-hosts.txt 里一并去掉）；先看改完的防火墙变化，确认后才写配置并执行；执行后当场提示另开窗口测试，输 yes 保留，输别的或超时就立即回滚、这次改的配置一并改回（5 分钟的定时回滚照旧兜底，它只回滚防火墙）。新增 --add / --remove / --preview；不能删掉当前会话的来源。
 # 1.0.0: 首版。名单 = ~/.vps-hosts.txt 里的机器 + ADMIN_IPS + ALLOW_EXTRA_IPS；按 SSH 端口加 ufw allow（注释 ssh-allowlist），加完再删「对所有来源开放」的 allow / limit 规则；只增删自己打过注释的规则；当前会话的来源 IP 不在名单里就拒绝执行；执行前备份 ufw 规则并布置 5 分钟后自动回滚，新窗口登录成功后 --confirm 取消。
@@ -201,7 +202,7 @@ keep_or_rollback() {  # 执行完：终端里当场确认，否则说明怎么�
   local a=""
   printf '  新窗口能登录吗？输 yes 保留新规则；输别的立即回滚（%s 秒内不输也回滚）：' "$KEEP_WAIT"
   read -r -t "$KEEP_WAIT" a || echo
-  if [ "$a" = yes ]; then do_confirm; else do_rollback; fi
+  if is_yes "$a"; then do_confirm; else do_rollback; fi
 }
 
 # ── 编辑：算出新配置 → 看改动 → 确认 → 写配置 → 执行 ─────────

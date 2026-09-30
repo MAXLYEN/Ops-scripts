@@ -338,6 +338,24 @@ EOF
   rm -f /root/.google_authenticator /etc/pam.d/sshd
 }
 
+@test "is_yes：去首尾空白（含回车、全角空格）、处理退格、全角转半角、不分大小写；空、y、yess 都不算" {
+  local a
+  for a in yes " yes " YES "Yes"$'\r' "　yes　" "ｙｅｓ" "ＹＥＳ" "yesx"$'\x7f' $'\t'yes; do
+    is_yes "$a" || { echo "应当算 yes: [$a]"; return 1; }
+  done
+  for a in "" y n no yess "y es" "yes please"; do
+    if is_yes "$a"; then echo "不该算 yes: [$a]"; return 1; fi
+  done
+}
+
+@test "init/ 各脚本自带的 is_yes 与 lib/common.sh 的一模一样（它们不依赖公共库，只能各放一份）" {
+  fn() { sed -n '/^is_yes() {/,/^}/p' "$1"; }
+  [ -n "$(fn /src/lib/common.sh)" ]
+  for f in init/00-precheck.sh init/run.sh init/03-ssh-firewall.sh; do
+    diff <(fn /src/lib/common.sh) <(fn "/src/$f") || { echo "$f 的 is_yes 与公共库不一致"; return 1; }
+  done
+}
+
 @test "面板项目类站点：<上级>/*_project 小的整目录进包（反向代理项目的记录），超过 5MB 的记进 rootfs-skipped" {
   S="$T/server"; mkdir -p "$S/proxy_project/sites/a.example.com" "$S/python_project/venv" "$S/panel"
   echo '{"proxy_pass":"http://127.0.0.1:10086"}' > "$S/proxy_project/sites/a.example.com/a.example.com.json"

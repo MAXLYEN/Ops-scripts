@@ -1,9 +1,24 @@
 #!/bin/bash
 # init/03-ssh-firewall.sh — 加固 SSH、启用 ufw 并配置 fail2ban
-# VERSION: 1.4.0
+# VERSION: 1.4.1
+# 1.4.1: 确认提示改用 is_yes：前后空格、大小写、全角字符不再让 yes 被当成取消。
 # 1.4.0: fail2ban 写入 ignoreip：本机、当前 SSH 客户端 IP 与 env.conf 的 ADMIN_IPS，避免把管理员自己封掉。
 # 用法: 以 root 执行；先打开第二个 SSH 窗口并确认带外控制台可用。
 # 脚本会设置 5 分钟自动回滚，验证新连接后需明确取消回滚。
+
+# is_yes <输入>：明确输入了 yes（与 lib/common.sh 同一套规则：处理退格、去首尾空白含全角空格、
+# 全角转半角、不分大小写）。本目录的脚本不依赖公共库，所以各放一份
+is_yes() {
+  local s=$1 out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    if [ "$c" = $'\b' ] || [ "$c" = $'\x7f' ]; then out=${out%?}; else out+=$c; fi
+  done
+  s=${out//$'\r'/}; s=${s//　/}
+  s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"
+  s=${s//ｙ/y}; s=${s//ｅ/e}; s=${s//ｓ/s}; s=${s//Ｙ/Y}; s=${s//Ｅ/E}; s=${s//Ｓ/S}
+  [ "${s,,}" = yes ]
+}
 
 set -e
 [ "$(id -u)" -eq 0 ] || { echo "❌ 需要 root"; exit 1; }
@@ -94,7 +109,7 @@ echo "─ 2. 人工确认 ─"
 echo "  将修改 SSH 配置并启用防火墙（保留密码登录），并布置 5 分钟自动回滚。"
 printf "  确认继续？(yes/no) "
 read -r A </dev/tty
-[ "$A" = yes ] || { echo "  已取消，未做任何修改"; exit 0; }
+is_yes "$A" || { echo "  已取消，未做任何修改"; exit 0; }
 
 echo
 echo "─ 3. 布置自动回滚 ─"
@@ -318,7 +333,7 @@ echo
 if [ "$R" = auto ] || [ "$R" = ok ]; then
   printf "  是否取消回滚定时器、保留本次配置？(yes/no) "
   read -r C </dev/tty
-  if [ "$C" = yes ]; then
+  if is_yes "$C"; then
     systemctl stop server-rollback.timer 2>/dev/null || true
     systemctl reset-failed server-rollback.service 2>/dev/null || true
     sleep 1
@@ -334,7 +349,7 @@ if [ "$R" = auto ] || [ "$R" = ok ]; then
       echo "  建议 yes —— 初始化阶段是验证成本最低的时刻，业务上线后不再有这个机会。"
       printf "  是否现在重启？(yes/no) "
       read -r RB </dev/tty
-      if [ "$RB" = yes ]; then
+      if is_yes "$RB"; then
         echo; echo "  正在重启，重连后执行阶段 04…"; sleep 2; systemctl reboot
       else
         echo; echo "  已跳过重启。稍后手动 reboot，再执行阶段 04。"

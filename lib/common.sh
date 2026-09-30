@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.2.5
+# VERSION: 1.2.6
+# 1.2.6: 新增 is_yes，confirm 改用它：处理退格、去掉首尾空白（含回车、全角空格）、全角转半角、不分大小写后等于 yes 才算同意（生产机上输了 yes 却被当成取消）；空输入、y 仍然不算。
 # 1.2.5: 收面板的项目类站点目录 /www/server/*_project（反向代理项目等的记录，每个 ≤5MB；超过的记进 rootfs-skipped）。真机演练发现：不收的话 nginx 照常转发，面板里却看不到、改不了这些站点。
 # 1.2.4: 面板 data/ 不收监控历史（system.db 只留表结构）、漏洞扫描库 warning/、GeoLite2 国家库：生产机上它们占 rootfs 的 250MB 里的 245MB，vw 与 xboard 包各带一份，每 6 小时上云会塞满网盘；都能由面板重新生成或下载。
 # 1.2.3: bk_images 可只列指定容器（可整段送到远端执行）；新增 vps_host_port；LITELLM_BACKUP_DIR 算备份落盘目录。
@@ -64,12 +65,26 @@ require_cmd() {
 require_root() { [ "$(id -u)" -eq 0 ] || die "需要 root"; }
 
 # ── 交互确认 ────────────────────────────────────────────────
+# is_yes <输入>：明确输入了 yes。先处理退格、去掉首尾空白（含回车、全角空格）、全角转半角、不分大小写，
+# 输入法、粘贴带进来的字符不至于让 yes 被当成「取消」；空输入、y、yess 仍然不算
+is_yes() {
+  local s=$1 out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    if [ "$c" = $'\b' ] || [ "$c" = $'\x7f' ]; then out=${out%?}; else out+=$c; fi
+  done
+  s=${out//$'\r'/}; s=${s//　/}
+  s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"
+  s=${s//ｙ/y}; s=${s//ｅ/e}; s=${s//ｓ/s}; s=${s//Ｙ/Y}; s=${s//Ｅ/E}; s=${s//Ｓ/S}
+  [ "${s,,}" = yes ]
+}
+
 # 危险操作用它。设 OPS_YES=1 可跳过（供自动化调用）。
 confirm() {
   [ "${OPS_YES:-0}" = 1 ] && return 0
   printf '  %s (yes/no) ' "${1:-确认继续？}"
   local a; read -r a </dev/tty
-  [ "$a" = yes ] || { log "已取消"; exit 0; }
+  is_yes "$a" || { log "已取消"; exit 0; }
 }
 
 # ── 幂等文件安装 ────────────────────────────────────────────

@@ -1,9 +1,24 @@
 #!/bin/bash
 # init/run.sh — 列出初始化阶段，并通过 opsget 执行指定阶段
-# VERSION: 2.0.2
+# VERSION: 2.0.3
+# 2.0.3: 确认提示改用 is_yes：前后空格、大小写、全角字符不再让 yes 被当成取消。
 # 2.0.2: 删除未使用的变量 N，执行逻辑未变。
 # 用法: opsget init/run [00|01|02|03|04]
 # 执行阶段 03 前先准备第二个 SSH 窗口和带外控制台。
+
+# is_yes <输入>：明确输入了 yes（与 lib/common.sh 同一套规则：处理退格、去首尾空白含全角空格、
+# 全角转半角、不分大小写）。本目录的脚本不依赖公共库，所以各放一份
+is_yes() {
+  local s=$1 out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    if [ "$c" = $'\b' ] || [ "$c" = $'\x7f' ]; then out=${out%?}; else out+=$c; fi
+  done
+  s=${out//$'\r'/}; s=${s//　/}
+  s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"
+  s=${s//ｙ/y}; s=${s//ｅ/e}; s=${s//ｓ/s}; s=${s//Ｙ/Y}; s=${s//Ｅ/E}; s=${s//Ｓ/S}
+  [ "${s,,}" = yes ]
+}
 
 STAGES="00:precheck:环境探测与更新:检查系统/硬件/网络形态/能力/软件源，打补丁，判断是否需重启
 01:swap-memory:Swap 与内存参数:按内存分档创建 swapfile，配置 swappiness / 脏页写回
@@ -69,7 +84,7 @@ if [ "$STAGE" = 03 ]; then
   echo
   printf "   已准备好？(yes/no) "
   read -r A </dev/tty
-  [ "$A" = yes ] || { echo "   已取消"; exit 0; }
+  is_yes "$A" || { echo "   已取消"; exit 0; }
   echo
 fi
 

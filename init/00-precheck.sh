@@ -1,8 +1,23 @@
 #!/bin/bash
 # init/00-precheck.sh — 探测新机环境、更新系统并判断是否需要重启
-# VERSION: 1.0.2
+# VERSION: 1.0.3
+# 1.0.3: 确认提示改用 is_yes：前后空格、大小写、全角字符不再让 yes 被当成取消。
 # 1.0.2: 统一注释与目录文档，执行逻辑未变。
 # 用法: 以 root 执行；软件源异常时可交互确认修复。
+
+# is_yes <输入>：明确输入了 yes（与 lib/common.sh 同一套规则：处理退格、去首尾空白含全角空格、
+# 全角转半角、不分大小写）。本目录的脚本不依赖公共库，所以各放一份
+is_yes() {
+  local s=$1 out="" c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    if [ "$c" = $'\b' ] || [ "$c" = $'\x7f' ]; then out=${out%?}; else out+=$c; fi
+  done
+  s=${out//$'\r'/}; s=${s//　/}
+  s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"
+  s=${s//ｙ/y}; s=${s//ｅ/e}; s=${s//ｓ/s}; s=${s//Ｙ/Y}; s=${s//Ｅ/E}; s=${s//Ｓ/S}
+  [ "${s,,}" = yes ]
+}
 
 export DEBIAN_FRONTEND=noninteractive
 [ "$(id -u)" -eq 0 ] || { echo "❌ 需要 root，请先执行 sudo -i"; exit 1; }
@@ -160,7 +175,7 @@ if [ -n "$ERR" ]; then
     echo "  建议: cp -a /etc/apt/sources.list /etc/apt/sources.list.bak.\$(date +%s); $FIX apt-get update"
     printf "  现在执行？(yes/no) "
     read -r A </dev/tty
-    if [ "$A" = yes ]; then
+    if is_yes "$A"; then
       cp -a /etc/apt/sources.list "/etc/apt/sources.list.bak.$(date +%s)"
       eval "$FIX"
       E2=$(apt-get update -qq 2>&1 >/dev/null)
@@ -207,7 +222,7 @@ if [ "$NEED" -eq 1 ]; then
   echo "  ⚠️  重启后 SSH 会断开，约 30-60 秒后可重连"
   printf "  是否现在重启？(yes/no) "
   read -r R </dev/tty
-  if [ "$R" = yes ]; then
+  if is_yes "$R"; then
     echo; echo "  正在重启，重连后执行阶段 01…"; sleep 2; systemctl reboot
   else
     echo; echo "  已跳过重启。未重启状态下跑 01/02，配置可能与运行中的旧组件不一致。"

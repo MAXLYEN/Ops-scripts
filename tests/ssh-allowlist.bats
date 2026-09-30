@@ -192,7 +192,7 @@ tagged() { grep -c "comment 'ssh-allowlist'" "$S/rules"; }
 }
 
 @test "菜单：新增 → 确认执行 → 新窗口能登录输 yes，保留并取消定时回滚" {
-  drive "bash $SRC/ops/ssh-allowlist.sh" 1 198.51.100.99 yes yes
+  drive "bash $SRC/ops/ssh-allowlist.sh" 1 198.51.100.99 " Yes " "YES"   # 前后空格、大小写都认
   has "[1] 新增  [2] 删除"
   grep -q '198.51.100.99' /etc/ops-scripts/env.conf
   grep -qF 'from 198.51.100.99 ' "$S/rules"

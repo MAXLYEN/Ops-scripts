@@ -50,7 +50,7 @@ opsget ops/install-backup-cron --apply    # 写入
 | `deploy-litellm.sh` | 1.2.4 | 部署 LiteLLM、Postgres 与 Redis 容器 |
 | `panel-backup-upload.sh` | 1.0.5 | 加密并上传面板生成的整机备份包 |
 | `panel-backup-create.sh` | 1.0.0 | 照面板上次的设置生成整机备份，加密上传，本机与云端各留最近几份 |
-| `ssh-allowlist.sh` | 1.1.1 | 本机 SSH 只放行名单里的 IP（ufw）；菜单里新增、删除，改完当场验证，不确认就回滚 |
+| `ssh-allowlist.sh` | 1.1.2 | 本机 SSH 只放行名单里的 IP（ufw）；菜单里新增、删除，改完当场验证，不确认就回滚 |
 | `push-keys.sh` | 1.0.4 | 按主机清单批量下发 SSH 公钥 |
 | `install-backup-cron.sh` | 1.3.0 | 按统一时间表安装备份定时任务（幂等） |
 | `restore-cron.sh` | 2.0.2 | 从快照恢复仓库管理的 cron 任务 |
