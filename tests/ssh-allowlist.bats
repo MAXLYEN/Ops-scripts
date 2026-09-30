@@ -178,6 +178,19 @@ tagged() { grep -c "comment 'ssh-allowlist'" "$S/rules"; }
   cmp /etc/ops-scripts/env.conf "$S/env.before"
 }
 
+@test "改了配置又回滚（运行的窗口断了、定时回滚或 --rollback）：配置连同防火墙一起改回" {
+  cp /etc/ops-scripts/env.conf "$S/env.before"
+  sa --add 198.51.100.99
+  grep -q '198.51.100.99' /etc/ops-scripts/env.conf
+  # 定时回滚的命令里带着改回配置
+  grep 'systemd-run' "$S/calls" | grep -qF "cp -a '/etc/ops-scripts/env.conf.bak."
+  sa --rollback
+  [ "$status" -eq 0 ]
+  has "也改回去了"
+  cmp /etc/ops-scripts/env.conf "$S/env.before"
+  [ ! -e "$PENDING" ]
+}
+
 @test "菜单：新增 → 确认执行 → 新窗口能登录输 yes，保留并取消定时回滚" {
   drive "bash $SRC/ops/ssh-allowlist.sh" 1 198.51.100.99 yes yes
   has "[1] 新增  [2] 删除"

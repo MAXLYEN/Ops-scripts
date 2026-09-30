@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/ssh-allowlist.sh — 本机 SSH 只放行名单里的 IP（ufw）；改动当场验证，不确认就回滚
-# VERSION: 1.1.0
+# VERSION: 1.1.1
+# 1.1.1: 这次顺带改过的配置（env.conf、机群清单）记进待确认记录：定时回滚与 --rollback 连配置一起改回（生产机上试用时，运行菜单的窗口被客户端顶掉，定时回滚只回滚了防火墙，配置里留着新加的 IP）。提示里说明另开独立会话测试、窗口断了在新窗口里 --confirm。
 # 1.1.0: 在终端里直接运行进菜单：列出带编号的名单，选新增（写进 ADMIN_IPS）或删除（从 ADMIN_IPS、ALLOW_EXTRA_IPS、~/.vps-hosts.txt 里一并去掉）；先看改完的防火墙变化，确认后才写配置并执行；执行后当场提示另开窗口测试，输 yes 保留，输别的或超时就立即回滚、这次改的配置一并改回（5 分钟的定时回滚照旧兜底，它只回滚防火墙）。新增 --add / --remove / --preview；不能删掉当前会话的来源。
 # 1.0.0: 首版。名单 = ~/.vps-hosts.txt 里的机器 + ADMIN_IPS + ALLOW_EXTRA_IPS；按 SSH 端口加 ufw allow（注释 ssh-allowlist），加完再删「对所有来源开放」的 allow / limit 规则；只增删自己打过注释的规则；当前会话的来源 IP 不在名单里就拒绝执行；执行前备份 ufw 规则并布置 5 分钟后自动回滚，新窗口登录成功后 --confirm 取消。
 # ENV-REQUIRED: ADMIN_IPS
@@ -98,18 +99,23 @@ show_list() {  # show_list：带编号列出 $LIST
 restore_rules() {  # restore_rules <备份目录>：放回执行前的 ufw 规则并重载
   cp -a "$1"/user.rules "$1"/user6.rules /etc/ufw/ && ufw reload >/dev/null
 }
+# PENDING 第一行是执行前 ufw 规则的备份目录，之后每行「配置备份<TAB>原位置」：这次顺带改过的配置
 do_confirm() {
-  local b; b=$(cat "$PENDING")
+  local b; b=$(head -1 "$PENDING")
   systemctl stop "$UNIT.timer" "$UNIT.service" >/dev/null 2>&1
   rm -f "$PENDING"
   ok "已取消自动回滚，新规则保留（执行前的规则备份在 $b）"
 }
 do_rollback() {
-  local b; b=$(cat "$PENDING")
+  local b bak dst; b=$(head -1 "$PENDING")
   systemctl stop "$UNIT.timer" "$UNIT.service" >/dev/null 2>&1
   restore_rules "$b" || die "放回 $b 失败"
-  rm -f "$PENDING"
   ok "已回滚到执行前的规则（$b）"
+  # 配置也改回去，免得配置和防火墙对不上
+  while IFS=$'\t' read -r bak dst; do
+    [ -n "$bak" ] && cp -a "$bak" "$dst" && ok "$dst 也改回去了"
+  done < <(tail -n +2 "$PENDING")
+  rm -f "$PENDING"
 }
 
 # ── 规则：算出要改什么（ADD / DEL / OPEN），列出来 ────────────
@@ -153,11 +159,16 @@ apply_changes() {  # apply_changes：备份 → 布置自动回滚 → 先加名
   b=/root/ops-backups/ufw.$(date -u +%Y%m%d%H%M%S)
   mkdir -p "$b" && cp -a /etc/ufw/user.rules /etc/ufw/user6.rules "$b"/ || die "备份 ufw 规则失败"
   chmod 700 "$b"
+  # 这次顺带改过的配置（env.conf、机群清单）一起记下：定时回滚、--rollback 连它们一起改回，
+  # 运行菜单的窗口断了也不会留下「防火墙回滚了、配置没回滚」
+  local cfg="" undo=""
+  [ -n "$ENV_BAK" ] && cfg="$cfg$ENV_BAK"$'\t'"$OPS_ENV_FILE"$'\n' && undo="$undo && cp -a '$ENV_BAK' '$OPS_ENV_FILE'"
+  [ -n "$HOSTS_BAK" ] && cfg="$cfg$HOSTS_BAK"$'\t'"$HOSTS_FILE"$'\n' && undo="$undo && cp -a '$HOSTS_BAK' '$HOSTS_FILE'"
   systemctl stop "$UNIT.timer" "$UNIT.service" >/dev/null 2>&1
   systemd-run --on-active=300 --unit="$UNIT" --description='ops-scripts: roll back ssh-allowlist' \
-    /bin/sh -c "cp -a $b/user.rules $b/user6.rules /etc/ufw/ && ufw reload && rm -f $PENDING" >/dev/null 2>&1 \
+    /bin/sh -c "cp -a $b/user.rules $b/user6.rules /etc/ufw/ && ufw reload$undo && rm -f $PENDING" >/dev/null 2>&1 \
     || die "布置自动回滚失败，没有动防火墙"
-  mkdir -p "$(dirname "$PENDING")"; echo "$b" > "$PENDING"
+  mkdir -p "$(dirname "$PENDING")"; printf '%s\n%s' "$b" "$cfg" > "$PENDING"
   ok "执行前的规则备份在 $b；5 分钟后自动回滚（除非确认保留）"
   while read -r a p; do
     [ -n "$a" ] || continue
@@ -185,15 +196,12 @@ keep_or_rollback() {  # 执行完：终端里当场确认，否则说明怎么�
     echo "  能登录：ssh-allowlist.sh --confirm；登不上：什么都不用做，5 分钟后自动回滚，或者马上 ssh-allowlist.sh --rollback"
     return 0
   fi
+  echo "  用客户端另开一个独立的会话测试，别在这个标签页里「重新连接」（有的客户端会把这个窗口顶掉）"
+  echo "  这个窗口要是断了：新窗口能登录就在新窗口里 ssh-allowlist.sh --confirm；什么都不做则 5 分钟后连配置一起回滚"
   local a=""
   printf '  新窗口能登录吗？输 yes 保留新规则；输别的立即回滚（%s 秒内不输也回滚）：' "$KEEP_WAIT"
   read -r -t "$KEEP_WAIT" a || echo
-  if [ "$a" = yes ]; then do_confirm; return 0; fi
-  do_rollback
-  # 这次顺带改过的配置也改回去，免得配置和防火墙对不上
-  [ -n "$ENV_BAK" ] && cp -a "$ENV_BAK" "$OPS_ENV_FILE" && ok "env.conf 也改回去了"
-  [ -n "$HOSTS_BAK" ] && cp -a "$HOSTS_BAK" "$HOSTS_FILE" && ok "$HOSTS_FILE 也改回去了"
-  return 0
+  if [ "$a" = yes ]; then do_confirm; else do_rollback; fi
 }
 
 # ── 编辑：算出新配置 → 看改动 → 确认 → 写配置 → 执行 ─────────
