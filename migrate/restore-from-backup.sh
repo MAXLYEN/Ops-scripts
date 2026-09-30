@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/restore-from-backup.sh — 原机已不在时，用每日加密备份包把新机恢复成原样
-# VERSION: 1.3.0
+# VERSION: 1.3.1
+# 1.3.1: vw 与 xboard 两个包带同一个 compose 项目、同一批账号时只按较新的包做一遍（原先锁版本、启动、Xboard 启动后步骤、建账号都做两遍，镜像清单与手动步骤重复，还有 8 行「cp: are the same file」）；被覆盖的库不再报「已恢复过，跳过」；演练时本机本来就有的单元（面板自己的服务）不再说成「隧道等单元」。
 # 1.3.0: 真机演练发现的三处：新布局整棵放回面板 vhost/ 时也检查并重载 nginx（原先只认单个 *.conf，站点全打不开）；Komari 指标库不进包，恢复时建空库并恢复它的账号（原先账号被当成「对恢复的库没有授权」跳过，Komari 起不来）；teardown 认 compose.yaml 与 docker-compose.yml 任一（原先要两个都在，容器一个都没停），停不下就中止、外连限制与库文件都不动。
 # 1.2.0: --drill 起容器前在 DOCKER-USER 链拒绝容器主动外连（开机自启、先于 docker 生效），加不上就不起容器；teardown 撤掉。演练机上的容器用的是生产数据，否则会给真实用户发提醒邮件、往告警群发离线通知。
 # 1.1.0: 新增 --no-cron：正式恢复并启动，但不装定时任务（一键迁移的演练用：原机还在服务，新机不能往网盘传包、按保留期删云端的包）。
@@ -575,11 +576,16 @@ pin_file() {  # pin_file <compose 文件（暂存副本）> <项目目录>
 # 有单独的 compose 文件条目就只复制它；没有才把整个目录复制一份（Xboard 目录很大，能不复制就不复制）
 pin_projects() {
   local p j d dst src rel c done_
+  # 两个包都带同一个项目、同一个 compose 文件时只认较新的包（条目按包的时间从旧到新编号，与 plan 的 DUP 一致）；
+  # 否则每个项目要锁好几遍，镜像清单重复，第二遍还会把已锁好的文件复制到自己身上
+  local -A last=()
+  for p in "${!IT_KIND[@]}"; do last["${IT_KIND[p]}:${IT_DST[p]}"]=$p; done
   for p in "${!IT_KIND[@]}"; do
-    [ "${IT_KIND[p]}" = compose-project ] || continue
+    [ "${IT_KIND[p]}" = compose-project ] && [ "${last[compose-project:${IT_DST[p]}]}" = "$p" ] || continue
     d=${IT_DST[p]} done_=0
     for j in "${!IT_KIND[@]}"; do
       dst=${IT_DST[j]} src=${IT_SRC[j]}
+      [ "${last[${IT_KIND[j]}:$dst]}" = "$j" ] || continue
       [ "${IT_KIND[j]}" = file ] && [ "$(dirname "$dst")" = "$d" ] && [[ $(basename "$dst") =~ ^(docker-)?compose\.ya?ml$ ]] || continue
       mkdir -p "${P_DIR[IT_PKG[j]]}/pin/$j"; cp -a "$src" "${P_DIR[IT_PKG[j]]}/pin/$j/"
       IT_SRC[j]="${P_DIR[IT_PKG[j]]}/pin/$j/$(basename "$src")"
@@ -647,6 +653,7 @@ plan() {
     case "$k" in
       file|dir|sqlite|systemd-unit) t="path:$dst" ;;
       mysql-db) t="db:$dst" ;;
+      compose-project) t="proj:$dst" ;;
       *) t="" ;;
     esac
     if [ -n "$t" ]; then
@@ -718,6 +725,14 @@ plan() {
         fi
         t=$(proj_unpinned "$dst"); [ -n "$t" ] && PL_NOTE[n]="${PL_NOTE[n]:+${PL_NOTE[n]}；}镜像锁不住版本：$t" ;;
     esac
+  done
+  # 两个包导出了同一批账号（vw 与 xboard 包都收全部业务账号）：较新的包说了算，只建一遍
+  local -A accs=()
+  for n in "${!IT_KIND[@]}"; do
+    [ "${IT_KIND[n]}" = mysql-user ] && [ -n "${IT_ACC[n]:-}" ] || continue
+    t=$(cut -f1,2 <<<"${IT_ACC[n]}" | sort | tr '\n' ' ')
+    [ -n "${accs[$t]:-}" ] && PL_ACT[${accs[$t]}]=DUP PL_NOTE[${accs[$t]}]="${P_TIME[IT_PKG[n]]} 的包里也有这批账号，用它的"
+    accs[$t]=$n
   done
 }
 
@@ -1188,10 +1203,10 @@ apply_all() {
   section "数据库"
   for n in "${!IT_KIND[@]}"; do
     [ "${IT_KIND[n]}" = mysql-db ] || continue
-    case "${PL_ACT[n]}" in PLACE|REDO|CONFLICT) apply_db "$n" ;; *) log "库 ${IT_DST[n]}：已恢复过，跳过" ;; esac
+    case "${PL_ACT[n]}" in PLACE|REDO|CONFLICT) apply_db "$n" ;; DUP) ;; *) log "库 ${IT_DST[n]}：已恢复过，跳过" ;; esac
   done
   apply_metrics_db
-  for n in "${!IT_KIND[@]}"; do [ "${IT_KIND[n]}" = mysql-user ] && apply_users "$n"; done
+  for n in "${!IT_KIND[@]}"; do [ "${IT_KIND[n]}" = mysql-user ] && [ "${PL_ACT[n]}" != DUP ] && apply_users "$n"; done
   apply_root
   printf '%s\n' "${IT_KIND[@]}" | grep -qx mysql-db && ufw_db_rule
   section "文件与数据目录"
@@ -1213,7 +1228,7 @@ apply_all() {
   fi
   # compose 项目记为本批包恢复的：重跑时它的容器在跑不算「别人的服务」，teardown 也据此停容器
   for n in "${!IT_KIND[@]}"; do
-    [ "${IT_KIND[n]}" = compose-project ] && st_add PLACED "${IT_DST[n]}" "${P_SHA[IT_PKG[n]]}"
+    [ "${IT_KIND[n]}" = compose-project ] && [ "${PL_ACT[n]}" != DUP ] && st_add PLACED "${IT_DST[n]}" "${P_SHA[IT_PKG[n]]}"
   done
   touched_under /etc/systemd && { systemctl daemon-reload 2>/dev/null || warn "systemctl daemon-reload 失败"; }
   ssh_2fa_check
@@ -1402,7 +1417,7 @@ start_all() {
   fi
   [ "$DRILL" = 1 ] && drill_egress_guard
   for n in "${!IT_KIND[@]}"; do
-    [ "${IT_KIND[n]}" = compose-project ] || continue
+    [ "${IT_KIND[n]}" = compose-project ] && [ "${PL_ACT[n]}" != DUP ] || continue
     d=${IT_DST[n]}
     [ -d "$d" ] || { warn "$d 不存在，跳过"; continue; }
     if [ "$EGRESS_OK" = 0 ] && [ "$NOSTART" = 0 ]; then log "$d：外连限制没加上，不启动"; continue; fi
@@ -1420,8 +1435,13 @@ start_all() {
   done
   for n in "${!IT_KIND[@]}"; do
     [ "${IT_KIND[n]}" = systemd-unit ] || continue
+    case "${PL_ACT[n]}" in DUP|SKIP) continue ;; esac
     un=$(basename "${IT_DST[n]}")
-    if [ "$DRILL" = 1 ]; then log "演练：$un 只放文件，不启用（隧道等单元会连到生产机）"; continue; fi
+    if [ "$DRILL" = 1 ]; then
+      # 本机本来就有、内容也一样的（面板自己的服务之类）不用提
+      [ "${PL_ACT[n]}" = SAME ] || log "演练：$un 只放文件，不启用（原机启用的单元，隧道这类会连到生产机）"
+      continue
+    fi
     if [ "$NOSTART" = 1 ]; then printf '    systemctl enable --now %s\n' "$un"; continue; fi
     systemctl enable --now "$un" >/dev/null 2>&1 && st_add UNIT "$un" && ok "$un 已启用" || warn "$un 启用失败"
   done
@@ -1464,7 +1484,10 @@ summary() {
   fi
   grep -q 'cedar2025/xboard' "$PROJ" 2>/dev/null \
     && manual "Xboard 节点：面板域名不变会自己重连；域名变了要逐台 xt node --panel https://新域名 ..." "节点在各自机器上，本机够不着"
+  local -A said=()
   for m in "${MANUAL[@]}"; do
+    [ -n "${said[$m]:-}" ] && continue   # 两个包各报一遍的同一件事只列一次
+    said[$m]=1
     printf '  • %s\n      原因：%s\n' "${m%%|*}" "${m#*|}"
   done
   section "接着验证"

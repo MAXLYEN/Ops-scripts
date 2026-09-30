@@ -619,6 +619,21 @@ v2_local() {  # 新机的样子：引导用的公钥、配好的 .my.cnf、init/
   [ "$(grep -c '^IMPORT appdb' "$FDB/log")" = 1 ]
 }
 
+@test "两个包带同一个 compose 项目与同一批账号：锁版本、启动、建账号都只做一遍，手动步骤不重复" {
+  fake_docker; fake_nginx
+  make_v2 20260928_000000; local older=$V2
+  make_v2 20260928_060000
+  v2_local
+  restore restore "$older" "$V2"
+  [ "$(grep -c "^$R/opt/app|compose up -d$" /tmp/docker.calls)" = 1 ]
+  [ "$(sed -n '/===== 镜像版本/,/^===== 写入配置/p' <<<"$output" | grep -c "$R/opt/app 的 app")" = 1 ]
+  none 'are the same file' "$output"
+  none '已恢复过，跳过' "$output"
+  [ "$(grep -c "账号 app@'172.%'" <<<"$output")" = 1 ]
+  [ "$(grep -c '备份没收 /usr/local/bin/rclone' <<<"$output")" = 1 ]
+  has "20260928_060000 的包里也有这批账号，用它的"
+}
+
 @test "新布局：本机登录的管理账号（只有全局权限）也恢复；MariaDB 的 root 代理授权不当成跳过项" {
   make_v2; v2_local
   restore restore "$V2" --no-start

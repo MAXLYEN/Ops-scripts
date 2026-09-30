@@ -161,7 +161,7 @@ opsget init/run
 
 ### 4.5 装环境
 
-1. **宝塔面板**：用宝塔官网给的 Debian 安装命令。装好后在面板里安装 **MySQL（跟 `manifest.txt` 里的大版本一样，原机是 5.7）**和 **Nginx**。
+1. **宝塔面板**：用宝塔官网给的 Debian 安装命令，装最新版就行（比原机新没关系：恢复时放回的是面板的配置与数据，相当于一次面板升级；反过来比原机旧才有风险）。装好后在面板软件商店里用**极速安装**装 **MySQL（跟 `manifest.txt` 里的大版本一样，原机是 5.7）**和 **Nginx**（与原机相同或最接近的版本）。
 2. **Docker**：
 
    ```bash
@@ -227,6 +227,14 @@ restore-from-backup.sh restore /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7z
 - 在宝塔面板里"添加站点"，认领已经恢复的 Nginx 配置（面板的站点记录在它自己的数据库里）；
 - DNS 生效后，在面板里逐个站点重新申请证书（EC256）；
 - 确认没问题后，删掉恢复用的临时目录。里面是解开的明文数据库导出和密钥。
+
+**先确认告警邮件能发出去**（恢复后第一件事）：
+
+```bash
+opsget ops/mail-doctor --send
+```
+
+原机的 Vaultwarden 开了「新设备登录必须发邮件通知」（管理后台里的 `require_device_email`）：**邮件发不出去，就不能在任何新设备上登录网页版**，只有已经登录过的客户端还能用。发不出去时，先查新机器的商家是否封了 SMTP 端口（有的商家默认封 25，要开工单），再查 `/etc/msmtprc` 与 Vaultwarden 的 SMTP 设置。
 
 **切 DNS 之前**，先做一遍端到端检查：
 
@@ -374,7 +382,7 @@ litellm-fullbackup.sh
    ```
 
    报授权错误的话，在电脑上装 rclone，运行 `rclone authorize "onedrive"`（Google Drive 是 `drive`），按提示在浏览器里登录；再在服务器上运行 `rclone config reconnect onedrive:`，把得到的令牌粘贴进去。
-2. **告警邮件：**
+2. **告警邮件**（第 4.6 节恢复后已经确认过的话，这里再发一封确认即可）：
 
    ```bash
    opsget ops/mail-doctor --send
@@ -441,7 +449,46 @@ litellm-fullbackup.sh
 time restore-from-backup.sh restore /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7z --drill
 ```
 
-要检查的：Vaultwarden 能登录、密码条目都在；XBoard 后台能登录，用户和节点都在；Komari 能打开，服务器列表都在。另外再跑一次 `opsget migrate/08-post-start-check`。
+要检查的：Vaultwarden 能登录、密码条目都在；XBoard 后台能登录，用户和节点都在；宝塔面板能登录，站点和反向代理都在；Komari 能打开，服务器列表都在。另外再跑一次 `opsget migrate/08-post-start-check`。
+
+**用浏览器检查站点的办法**（比改电脑的 hosts 可靠）：电脑上开着代理客户端、浏览器开了安全 DNS 时，浏览器会绕过本机 hosts，看到的其实是生产机。改成让**演练机自己解析这些域名**，浏览器经 SSH 通道过去：
+
+1. 演练机上把要看的域名指到它自己（末尾的 `# drill` 方便清理）：
+
+   ```bash
+   printf '127.0.0.1\t%s\t# drill\n' 域名1 域名2 域名3 >> /etc/hosts
+   ```
+
+2. 电脑上开一个 SOCKS 通道（Git Bash 或 PowerShell 的 `ssh`；窗口保持打开）：
+
+   ```bash
+   ssh -N -D 1080 -p <SSH端口> root@演练机IP
+   ```
+
+3. 另开一个不带扩展、不带缓存的浏览器窗口走这个通道（cmd）：
+
+   ```bat
+   "C:\Program Files\Google\Chrome\Application\chrome.exe" --user-data-dir="%TEMP%\drill-chrome" --proxy-server="socks5://127.0.0.1:1080" --incognito https://Komari的域名/
+   ```
+
+4. **判断连的是演练机**：Komari 的服务器全部显示离线（各台机器的探针还在向生产机上报）。显示在线就说明连到了生产机，先别往下看。
+5. 看完：关浏览器、结束 SSH 通道，演练机上 `sed -i '/# drill$/d' /etc/hosts`，电脑上删掉临时浏览器目录。
+
+**注意事项**（2026-09-29 首次演练踩过的）：
+
+- **演练期间生产机上只跑只读命令。** 在两台机器之间切换窗口时，每条命令先看一眼提示符是哪台机器（那次演练里误停过几分钟生产机的 nginx）。
+- **国内直连海外的演练机，SSH 可能被干扰**（表现为 `connection closed by foreign host`）。换个网络，或经某台节点机中转。
+- **Vaultwarden 在演练机上登不进是预期的**：演练拦了容器外连，「新设备登录通知」邮件发不出去，登录就被拒绝。要验证登录，在演练机上临时关掉这一项（只改演练机，teardown 会删掉），等手机上的验证码换一个新的再登：
+
+  ```bash
+  sed -i 's/"require_device_email": *true/"require_device_email": false/' /opt/vaultwarden/data/config.json && docker restart vaultwarden
+  ```
+
+- **SSH 三道关**：重启 SSH 后端口是原机的；密钥登录不要验证码；密码登录先输验证码（手机上原机那个条目），再输**演练机自己的 root 密码**（系统密码不随包恢复，忘了就在演练机上 `passwd root` 重设）。输错几次 fail2ban 就会封 IP，被封了在已登录的窗口里 `fail2ban-client set sshd unbanip <IP>`。
+- **面板里不要改 MySQL 的 root 密码。** 面板里存的是原机的 root 密码，演练不改本机 root，所以面板的「数据库」页连不上是正常的；在面板里改 root 会顺手重启 MySQL，还会让 `teardown` 连不上库。
+- **宝塔面板自己的告警照常会发**（比如「面板登录提醒」发到微信）：面板是宿主机上的程序，不受容器外连限制，收到来自演练机的提醒是正常的。
+
+**首次演练（2026-09-29，Vultr 东京 2 核 4G）**：从开机器到服务在本机都能访问约 65 分钟，其中系统初始化约 20 分钟、装面板与软件约 30 分钟、恢复脚本本身 1 分 11 秒。发现的问题（nginx 没重载、Komari 指标库账号缺失、teardown 没停容器、面板反向代理项目不在包里、两个包重复处理）都已修复。
 
 **结束：**
 
