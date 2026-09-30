@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # ops/fix-newapi-reprice.sh — 按后台当前价格重算 new-api 指定模型的历史消费（logs + users + tokens）
-# VERSION: 1.0.0
+# VERSION: 1.1.0
+# 1.1.0: 渠道的已用额度（后台渠道列表的「已使用」，channels.used_quota）也跟着改：按「非测试日志」的差额调整（渠道测试写日志但不计入
+#        渠道，与 new-api 一致）；新增 --align-channels 对齐到非测试日志合计；模型写 - 表示不重算价格、只对齐渠道。
+#        对齐前自检：至少要有一个渠道本来就等于其非测试日志合计，否则规则与这版 new-api 不符，拒绝。
+#        起因：2026-09-24 修兜底倍率和 2026-09-30 按新价重算都没改渠道表，百炼渠道多显示约 79 美元（用户在后台发现）。
 # 1.0.0: 首版。价格从库里的 billing_setting（表达式计费）/ ModelPrice / ModelRatio 读，不写死；
 #        先用每条表达式计费日志自带的表达式重算并与实际扣费比对，对不上就拒绝执行；
 #        顺带重算仍按兜底倍率 37.5 计费的记录；可选把令牌已用额度对齐到日志。
 #
-# 用法: fix-newapi-reprice.sh <库文件> <模型1,模型2,...> [--apply] [--align-tokens] [--map 旧名=参考名,...]
-#   不带 --apply 只预演、不写库。
+# 用法: fix-newapi-reprice.sh <库文件> <模型1,模型2,...|-> [--apply] [--align-tokens] [--align-channels] [--map 旧名=参考名,...]
+#   不带 --apply 只预演、不写库。模型写 - 时不重算价格，只做 --align-channels。
 #   --align-tokens  令牌的 used_quota 改成它名下日志的合计，remain_quota 同步调整（日志清理过的库不要用）。
+#   --align-channels 渠道的 used_quota 改成它名下「非测试日志」的合计（渠道测试的日志 content 为「模型测试」，不计入渠道）。
+#                    不带时渠道只加重算差额（测试日志的差额不计）。已删除的渠道没有行可改，只列出差额。
 #   --map           兜底记录的模型在后台没有价格时，按哪个模型的价格算。
 # 用户额度：只调整「已用额度原本等于其日志合计」的用户；对不上的（如只有渠道测试记录的管理员）原样保留并列出。
 # quota_data 不在这里改，改完后跑 fix-newapi-quota-data.sh。
@@ -16,13 +22,14 @@ set -o pipefail
 
 DB="${1:-}"; MODELS="${2:-}"
 [ -n "$DB" ] && [ -f "$DB" ] && [ -n "$MODELS" ] || {
-  echo "用法: $0 <库文件> <模型1,模型2,...> [--apply] [--align-tokens] [--map 旧名=参考名,...]"; exit 1; }
+  echo "用法: $0 <库文件> <模型1,模型2,...|-> [--apply] [--align-tokens] [--align-channels] [--map 旧名=参考名,...]"; exit 1; }
 shift 2
-APPLY=0 ALIGN=0 MAPS=""
+APPLY=0 ALIGN=0 ALIGN_CH=0 MAPS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1 ;;
     --align-tokens) ALIGN=1 ;;
+    --align-channels) ALIGN_CH=1 ;;
     --map) MAPS="${2:-}"; shift ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
@@ -35,14 +42,19 @@ for p in python3 /www/server/panel/pyenv/bin/python3; do
 done
 [ -n "$PY" ] || { echo "缺少 python3（也没找到宝塔自带的 /www/server/panel/pyenv/bin/python3）"; exit 1; }
 
-exec "$PY" - "$DB" "$MODELS" "$APPLY" "$ALIGN" "$MAPS" <<'PY'
+[ "$MODELS" = - ] && [ "$ALIGN_CH" = 0 ] && { echo "模型写 - 表示不重算价格，这时要带 --align-channels（否则没有要做的事）"; exit 1; }
+
+exec "$PY" - "$DB" "$MODELS" "$APPLY" "$ALIGN" "$MAPS" "$ALIGN_CH" <<'PY'
 import base64, datetime, json, math, re, sqlite3, sys
 from collections import defaultdict
 
 DB, MODELS, APPLY, ALIGN, MAPS = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4] == "1", sys.argv[5]
-TARGETS = [m.strip() for m in MODELS.split(",") if m.strip()]
+ALIGN_CH = sys.argv[6] == "1"
+TARGETS = [m.strip() for m in MODELS.split(",") if m.strip() and m.strip() != "-"]
+ONLY_CH = not TARGETS          # 模型写 -：不重算价格，只对齐渠道
+TEST_CONTENT = "模型测试"       # 渠道测试的日志内容；这类日志 new-api 不计入渠道的已用额度
 MAP = dict(kv.split("=", 1) for kv in MAPS.split(",") if "=" in kv)
-VERSION = "fix-newapi-reprice 1.0.0"
+VERSION = "fix-newapi-reprice 1.1.0"
 FALLBACK_RATIO = 37.5
 SELF_CHECK_MAX_MISS = 0.02   # 目标模型自检不一致超过 2% 就拒绝
 
@@ -270,7 +282,7 @@ def usd(q):
 
 logs = []
 for r in con.execute("SELECT id, user_id, token_id, channel_id, model_name, prompt_tokens, completion_tokens, "
-                     "quota, other, created_at FROM logs WHERE type=2 ORDER BY id"):
+                     "quota, other, created_at, content FROM logs WHERE type=2 ORDER BY id"):
     try:
         o = json.loads(r["other"]) if r["other"] else {}
     except Exception:
@@ -279,163 +291,211 @@ for r in con.execute("SELECT id, user_id, token_id, channel_id, model_name, prom
         o = {}
     logs.append((r, o))
 
-print("库: %s    模型: %s    模式: %s%s" % (DB, ", ".join(TARGETS), "执行" if APPLY else "预演",
-                                        "，对齐令牌" if ALIGN else ""))
+print("库: %s    模型: %s    模式: %s%s%s" % (DB, ", ".join(TARGETS) or "（不重算，只对齐渠道）", "执行" if APPLY else "预演",
+                                          "，对齐令牌" if ALIGN else "", "，对齐渠道" if ALIGN_CH else ""))
+HAS_CH = con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='channels'").fetchone()[0] > 0
+is_test = lambda r: (r["content"] or "") == TEST_CONTENT
 print("消费日志 %d 条，QuotaPerUnit %.0f" % (len(logs), QPU))
 
-# ---------- 1. 公式自检：每条表达式计费日志用它自己的表达式重算 ----------
-print("\n===== 1. 公式自检（用日志自带的表达式/倍率重算，与实际扣费比对） =====")
-cache_expr = {}
-stat = defaultdict(lambda: [0, 0, 0])   # 模型 -> [比对条数, 一致, 跳过]
-miss = []
-for r, o in logs:
-    m = r["model_name"]
-    pr = None
-    if o.get("billing_mode") == "tiered_expr" and o.get("expr_b64"):
-        try:
-            s = base64.b64decode(o["expr_b64"]).decode("utf-8")
-            if s not in cache_expr:
-                try:
-                    cache_expr[s] = ExprPricer(s)
-                except Unsupported:
-                    cache_expr[s] = None
-            pr = cache_expr[s]
-        except Exception:
-            pr = None
-    elif m in TARGETS and isinstance(o.get("model_ratio"), (int, float)) and o.get("model_ratio") not in (0, FALLBACK_RATIO):
-        try:
-            pr = RatioPricer(float(o["model_ratio"]), float(o.get("completion_ratio", 1)),
-                             float(o.get("cache_ratio", 1)), o.get("cache_creation_ratio"))
-        except (TypeError, ValueError):
-            pr = None
-    else:
-        continue
-    st = stat[m]
-    if pr is None:
-        st[2] += 1; continue
-    try:
-        q, _ = pr.quota(r["prompt_tokens"], r["completion_tokens"], o, r["created_at"], QPU)
-    except Unsupported:
-        st[2] += 1; continue
-    st[0] += 1
-    if q == r["quota"]:
-        st[1] += 1
-    elif len(miss) < 15:
-        miss.append((r["id"], m, r["prompt_tokens"], r["completion_tokens"], o.get("cache_tokens"), r["quota"], q))
-tot = [sum(v[i] for v in stat.values()) for i in range(3)]
-print("  比对 %d 条，一致 %d 条，不一致 %d 条，跳过 %d 条（表达式用到日志里没有的维度）" %
-      (tot[0], tot[1], tot[0] - tot[1], tot[2]))
-for m in TARGETS:
-    v = stat.get(m, [0, 0, 0])
-    print("  %-28s 比对 %d  一致 %d  不一致 %d  跳过 %d" % (m, v[0], v[1], v[0] - v[1], v[2]))
-for x in miss:
-    print("  [不一致] id=%s %s 输入 %s 输出 %s 缓存 %s 实际 %s 重算 %s" % x)
-bad = [m for m in TARGETS if stat.get(m, [0])[0] and (stat[m][0] - stat[m][1]) / stat[m][0] > SELF_CHECK_MAX_MISS]
-if tot[0] == 0:
-    print("  [!!] 没有可比对的日志，无法确认公式，中止"); sys.exit(1)
-if bad or (tot[0] - tot[1]) / tot[0] > SELF_CHECK_MAX_MISS:
-    print("  [!!] 重算与实际扣费对不上（%s），公式与这版 new-api 不符，中止" % (", ".join(bad) or "整体"))
-    sys.exit(1)
+changes = []   # (id, 用户, 令牌, 原, 新, 新 other, 渠道, 是否测试日志)
+user_upd, token_upd = [], []
+if ONLY_CH:
+    print("\n（模型写了 -：不做公式自检、不重算、不动日志 / 用户 / 令牌）")
 
-# ---------- 2. 定价 ----------
-print("\n===== 2. 后台当前价格 =====")
-pricers = {}
-for m in TARGETS:
-    pr, why = current_pricer(m)
-    if pr is None:
-        print("  [!!] %s：%s，中止" % (m, why)); sys.exit(1)
-    pricers[m] = (pr, m)
-    print("  %-28s %s" % (m, pr.expr if pr.kind == "expr" else vars(pr)))
-
-fb = [(r, o) for r, o in logs if o.get("model_ratio") == FALLBACK_RATIO and r["model_name"] not in TARGETS]
-for r, o in fb:
-    m = r["model_name"]
-    if m in pricers:
-        continue
-    ref = MAP.get(m, m)
-    pr, why = current_pricer(ref)
-    if pr is None:
-        print("  [!!] 兜底记录的模型 %s%s：%s。用 --map %s=<参考模型> 指定按谁的价格算，中止" %
-              (m, "（参考 %s）" % ref if ref != m else "", why, m))
-        sys.exit(1)
-    pricers[m] = (pr, ref)
-    print("  %-28s 兜底记录，按 %s 的价格：%s" % (m, ref, pr.expr if pr.kind == "expr" else vars(pr)))
-
-# ---------- 3. 逐条重算 ----------
-now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-changes = []   # (id, user, token, old, new, new_other)
-seg = defaultdict(lambda: [0, 0, 0])   # (模型, 渠道, 档位) -> [条数, 原, 新]
-for r, o in logs:
-    m = r["model_name"]
-    if m in TARGETS or (o.get("model_ratio") == FALLBACK_RATIO and m in pricers):
-        pr, ref = pricers[m]
-        new, tier = pr.quota(r["prompt_tokens"], r["completion_tokens"], o, r["created_at"], QPU)
-        o2 = dict(o)
-        if pr.kind == "expr":
-            o2.update({"billing_mode": "tiered_expr", "billing_unit": "token",
-                       "expr_b64": base64.b64encode(pr.expr.encode("utf-8")).decode(),
-                       "matched_tier": tier, "model_ratio": 0, "completion_ratio": 0,
-                       "cache_ratio": 0, "model_price": 0})
+if not ONLY_CH:
+    # ---------- 1. 公式自检：每条表达式计费日志用它自己的表达式重算 ----------
+    print("\n===== 1. 公式自检（用日志自带的表达式/倍率重算，与实际扣费比对） =====")
+    cache_expr = {}
+    stat = defaultdict(lambda: [0, 0, 0])   # 模型 -> [比对条数, 一致, 跳过]
+    miss = []
+    for r, o in logs:
+        m = r["model_name"]
+        pr = None
+        if o.get("billing_mode") == "tiered_expr" and o.get("expr_b64"):
+            try:
+                s = base64.b64decode(o["expr_b64"]).decode("utf-8")
+                if s not in cache_expr:
+                    try:
+                        cache_expr[s] = ExprPricer(s)
+                    except Unsupported:
+                        cache_expr[s] = None
+                pr = cache_expr[s]
+            except Exception:
+                pr = None
+        elif m in TARGETS and isinstance(o.get("model_ratio"), (int, float)) and o.get("model_ratio") not in (0, FALLBACK_RATIO):
+            try:
+                pr = RatioPricer(float(o["model_ratio"]), float(o.get("completion_ratio", 1)),
+                                 float(o.get("cache_ratio", 1)), o.get("cache_creation_ratio"))
+            except (TypeError, ValueError):
+                pr = None
         else:
-            for k in ("billing_mode", "billing_unit", "expr_b64", "matched_tier"):
-                o2.pop(k, None)
-            if pr.kind == "ratio":
-                o2.update({"model_ratio": pr.mr, "completion_ratio": pr.comp, "cache_ratio": pr.cache, "model_price": -1})
+            continue
+        st = stat[m]
+        if pr is None:
+            st[2] += 1; continue
+        try:
+            q, _ = pr.quota(r["prompt_tokens"], r["completion_tokens"], o, r["created_at"], QPU)
+        except Unsupported:
+            st[2] += 1; continue
+        st[0] += 1
+        if q == r["quota"]:
+            st[1] += 1
+        elif len(miss) < 15:
+            miss.append((r["id"], m, r["prompt_tokens"], r["completion_tokens"], o.get("cache_tokens"), r["quota"], q))
+    tot = [sum(v[i] for v in stat.values()) for i in range(3)]
+    print("  比对 %d 条，一致 %d 条，不一致 %d 条，跳过 %d 条（表达式用到日志里没有的维度）" %
+          (tot[0], tot[1], tot[0] - tot[1], tot[2]))
+    for m in TARGETS:
+        v = stat.get(m, [0, 0, 0])
+        print("  %-28s 比对 %d  一致 %d  不一致 %d  跳过 %d" % (m, v[0], v[1], v[0] - v[1], v[2]))
+    for x in miss:
+        print("  [不一致] id=%s %s 输入 %s 输出 %s 缓存 %s 实际 %s 重算 %s" % x)
+    bad = [m for m in TARGETS if stat.get(m, [0])[0] and (stat[m][0] - stat[m][1]) / stat[m][0] > SELF_CHECK_MAX_MISS]
+    if tot[0] == 0:
+        print("  [!!] 没有可比对的日志，无法确认公式，中止"); sys.exit(1)
+    if bad or (tot[0] - tot[1]) / tot[0] > SELF_CHECK_MAX_MISS:
+        print("  [!!] 重算与实际扣费对不上（%s），公式与这版 new-api 不符，中止" % (", ".join(bad) or "整体"))
+        sys.exit(1)
+
+    # ---------- 2. 定价 ----------
+    print("\n===== 2. 后台当前价格 =====")
+    pricers = {}
+    for m in TARGETS:
+        pr, why = current_pricer(m)
+        if pr is None:
+            print("  [!!] %s：%s，中止" % (m, why)); sys.exit(1)
+        pricers[m] = (pr, m)
+        print("  %-28s %s" % (m, pr.expr if pr.kind == "expr" else vars(pr)))
+
+    fb = [(r, o) for r, o in logs if o.get("model_ratio") == FALLBACK_RATIO and r["model_name"] not in TARGETS]
+    for r, o in fb:
+        m = r["model_name"]
+        if m in pricers:
+            continue
+        ref = MAP.get(m, m)
+        pr, why = current_pricer(ref)
+        if pr is None:
+            print("  [!!] 兜底记录的模型 %s%s：%s。用 --map %s=<参考模型> 指定按谁的价格算，中止" %
+                  (m, "（参考 %s）" % ref if ref != m else "", why, m))
+            sys.exit(1)
+        pricers[m] = (pr, ref)
+        print("  %-28s 兜底记录，按 %s 的价格：%s" % (m, ref, pr.expr if pr.kind == "expr" else vars(pr)))
+
+    # ---------- 3. 逐条重算 ----------
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    seg = defaultdict(lambda: [0, 0, 0])   # (模型, 渠道, 档位) -> [条数, 原, 新]
+    for r, o in logs:
+        m = r["model_name"]
+        if m in TARGETS or (o.get("model_ratio") == FALLBACK_RATIO and m in pricers):
+            pr, ref = pricers[m]
+            new, tier = pr.quota(r["prompt_tokens"], r["completion_tokens"], o, r["created_at"], QPU)
+            o2 = dict(o)
+            if pr.kind == "expr":
+                o2.update({"billing_mode": "tiered_expr", "billing_unit": "token",
+                           "expr_b64": base64.b64encode(pr.expr.encode("utf-8")).decode(),
+                           "matched_tier": tier, "model_ratio": 0, "completion_ratio": 0,
+                           "cache_ratio": 0, "model_price": 0})
             else:
-                o2.update({"model_ratio": 0, "model_price": pr.price})
-        adm = dict(o2.get("admin_info") or {})
-        prev = adm.get("reprice") or {}
-        adm["reprice"] = {"by": VERSION, "at": now, "price_from": ref,
-                          "old_quota": prev.get("old_quota", r["quota"])}
-        o2["admin_info"] = adm
-        changes.append((r["id"], r["user_id"], r["token_id"], r["quota"], new,
-                        json.dumps(o2, ensure_ascii=False, separators=(",", ":"))))
-        s = seg[(m, r["channel_id"], tier)]
-        s[0] += 1; s[1] += r["quota"]; s[2] += new
+                for k in ("billing_mode", "billing_unit", "expr_b64", "matched_tier"):
+                    o2.pop(k, None)
+                if pr.kind == "ratio":
+                    o2.update({"model_ratio": pr.mr, "completion_ratio": pr.comp, "cache_ratio": pr.cache, "model_price": -1})
+                else:
+                    o2.update({"model_ratio": 0, "model_price": pr.price})
+            adm = dict(o2.get("admin_info") or {})
+            prev = adm.get("reprice") or {}
+            adm["reprice"] = {"by": VERSION, "at": now, "price_from": ref,
+                              "old_quota": prev.get("old_quota", r["quota"])}
+            o2["admin_info"] = adm
+            changes.append((r["id"], r["user_id"], r["token_id"], r["quota"], new,
+                            json.dumps(o2, ensure_ascii=False, separators=(",", ":")), r["channel_id"], is_test(r)))
+            s = seg[(m, r["channel_id"], tier)]
+            s[0] += 1; s[1] += r["quota"]; s[2] += new
 
-print("\n===== 3. 重算明细（按模型 / 渠道 / 档位） =====")
-print("  %-28s %4s %-8s %6s %12s %12s %12s" % ("模型", "渠道", "档位", "条数", "原配额", "新配额", "差额美元"))
-for k in sorted(seg, key=lambda k: (str(k[0]), k[1] or 0, k[2])):
-    s = seg[k]
-    print("  %-28s %4s %-8s %6d %12d %12d %+12.4f" % (k[0], k[1], k[2] or "-", s[0], s[1], s[2], usd(s[2] - s[1])))
-d_all = sum(c[4] - c[3] for c in changes)
-print("  合计 %d 条，差额 %+d（%+.4f 美元）" % (len(changes), d_all, usd(d_all)))
+    print("\n===== 3. 重算明细（按模型 / 渠道 / 档位） =====")
+    print("  %-28s %4s %-8s %6s %12s %12s %12s" % ("模型", "渠道", "档位", "条数", "原配额", "新配额", "差额美元"))
+    for k in sorted(seg, key=lambda k: (str(k[0]), k[1] or 0, k[2])):
+        s = seg[k]
+        print("  %-28s %4s %-8s %6d %12d %12d %+12.4f" % (k[0], k[1], k[2] or "-", s[0], s[1], s[2], usd(s[2] - s[1])))
+    d_all = sum(c[4] - c[3] for c in changes)
+    print("  合计 %d 条，差额 %+d（%+.4f 美元）" % (len(changes), d_all, usd(d_all)))
 
-# ---------- 4. 用户与令牌 ----------
-delta_u, delta_t = defaultdict(int), defaultdict(int)
-for _, u, t, old, new, _ in changes:
-    delta_u[u] += new - old
-    delta_t[t] += new - old
-logsum_u = dict(con.execute("SELECT user_id, COALESCE(SUM(quota),0) FROM logs WHERE type=2 GROUP BY user_id").fetchall())
-logsum_t = dict(con.execute("SELECT token_id, COALESCE(SUM(quota),0) FROM logs WHERE type=2 GROUP BY token_id").fetchall())
+    # ---------- 4. 用户与令牌 ----------
+    delta_u, delta_t = defaultdict(int), defaultdict(int)
+    for ch_ in changes:
+        delta_u[ch_[1]] += ch_[4] - ch_[3]
+        delta_t[ch_[2]] += ch_[4] - ch_[3]
+    logsum_u = dict(con.execute("SELECT user_id, COALESCE(SUM(quota),0) FROM logs WHERE type=2 GROUP BY user_id").fetchall())
+    logsum_t = dict(con.execute("SELECT token_id, COALESCE(SUM(quota),0) FROM logs WHERE type=2 GROUP BY token_id").fetchall())
 
-print("\n===== 4. 用户 =====")
-user_upd = []
-for u in con.execute("SELECT id, username, quota, used_quota FROM users ORDER BY id").fetchall():
-    ls = logsum_u.get(u["id"], 0); d = delta_u.get(u["id"], 0)
-    if u["used_quota"] == ls:
-        user_upd.append((u["id"], u["used_quota"] + d, u["quota"] - d))
-        print("  用户 %s：已用 %d → %d，余额 %d → %d（差 %+.4f 美元）" %
-              (u["id"], u["used_quota"], u["used_quota"] + d, u["quota"], u["quota"] - d, usd(d)))
-    else:
-        print("  用户 %s：已用 %d 与日志合计 %d 本来就不相等（差 %+d），不改%s" %
-              (u["id"], u["used_quota"], ls, u["used_quota"] - ls, "；其日志差额 %+d 只改日志" % d if d else ""))
+    print("\n===== 4. 用户 =====")
+    for u in con.execute("SELECT id, username, quota, used_quota FROM users ORDER BY id").fetchall():
+        ls = logsum_u.get(u["id"], 0); d = delta_u.get(u["id"], 0)
+        if u["used_quota"] == ls:
+            user_upd.append((u["id"], u["used_quota"] + d, u["quota"] - d))
+            print("  用户 %s：已用 %d → %d，余额 %d → %d（差 %+.4f 美元）" %
+                  (u["id"], u["used_quota"], u["used_quota"] + d, u["quota"], u["quota"] - d, usd(d)))
+        else:
+            print("  用户 %s：已用 %d 与日志合计 %d 本来就不相等（差 %+d），不改%s" %
+                  (u["id"], u["used_quota"], ls, u["used_quota"] - ls, "；其日志差额 %+d 只改日志" % d if d else ""))
 
-print("\n===== 5. 令牌 =====")
-token_upd = []
-for t in con.execute("SELECT id, name, used_quota, remain_quota, unlimited_quota FROM tokens ORDER BY id").fetchall():
-    d = delta_t.get(t["id"], 0)
-    ls_new = logsum_t.get(t["id"], 0) + d
-    new_used = ls_new if ALIGN else t["used_quota"] + d
-    shift = new_used - t["used_quota"]
-    new_remain = t["remain_quota"] - shift if not t["unlimited_quota"] else t["remain_quota"]
-    token_upd.append((t["id"], new_used, new_remain))
-    print("  令牌 %s「%s」：已用 %d → %d，剩余 %d → %d（其中重算 %+.4f 美元%s）" %
-          (t["id"], t["name"], t["used_quota"], new_used, t["remain_quota"], new_remain, usd(d),
-           "，对齐日志 %+.4f 美元" % usd(shift - d) if ALIGN else ""))
-    if not ALIGN and t["used_quota"] != logsum_t.get(t["id"], 0):
-        print("    注意：原已用额度与日志合计差 %+d（%+.4f 美元），加 --align-tokens 可一并对齐" %
-              (t["used_quota"] - logsum_t.get(t["id"], 0), usd(t["used_quota"] - logsum_t.get(t["id"], 0))))
+    print("\n===== 5. 令牌 =====")
+    for t in con.execute("SELECT id, name, used_quota, remain_quota, unlimited_quota FROM tokens ORDER BY id").fetchall():
+        d = delta_t.get(t["id"], 0)
+        ls_new = logsum_t.get(t["id"], 0) + d
+        new_used = ls_new if ALIGN else t["used_quota"] + d
+        shift = new_used - t["used_quota"]
+        new_remain = t["remain_quota"] - shift if not t["unlimited_quota"] else t["remain_quota"]
+        token_upd.append((t["id"], new_used, new_remain))
+        print("  令牌 %s「%s」：已用 %d → %d，剩余 %d → %d（其中重算 %+.4f 美元%s）" %
+              (t["id"], t["name"], t["used_quota"], new_used, t["remain_quota"], new_remain, usd(d),
+               "，对齐日志 %+.4f 美元" % usd(shift - d) if ALIGN else ""))
+        if not ALIGN and t["used_quota"] != logsum_t.get(t["id"], 0):
+            print("    注意：原已用额度与日志合计差 %+d（%+.4f 美元），加 --align-tokens 可一并对齐" %
+                  (t["used_quota"] - logsum_t.get(t["id"], 0), usd(t["used_quota"] - logsum_t.get(t["id"], 0))))
+
+
+# ---------- 6. 渠道 ----------
+chan_upd = []
+if HAS_CH:
+    print("\n===== 6. 渠道（已用额度 = 该渠道非测试日志的合计；渠道测试写日志但不计入渠道） =====")
+    ns = defaultdict(int)                     # 改前的非测试日志合计
+    for r, o in logs:
+        if not is_test(r):
+            ns[r["channel_id"]] += r["quota"]
+    dch = defaultdict(int)                    # 重算差额，只算非测试日志
+    for ch_ in changes:
+        if not ch_[7]:
+            dch[ch_[6]] += ch_[4] - ch_[3]
+    rows = con.execute("SELECT id, name, used_quota FROM channels ORDER BY id").fetchall()
+    ok_ch = [r["id"] for r in rows if ns.get(r["id"], 0) > 0 and (r["used_quota"] or 0) == ns[r["id"]]]
+    off = [r for r in rows if (r["used_quota"] or 0) != ns.get(r["id"], 0)]
+    print("  本来就等于非测试日志合计的渠道 %d 个，不等的 %d 个" % (len(ok_ch), len(off)))
+    if ALIGN_CH and not ok_ch:
+        print("  [!!] 没有一个有消费的渠道符合「已用 = 非测试日志合计」，规则与这版 new-api 不符，不对齐，中止")
+        sys.exit(1)
+    for r in rows:
+        used = r["used_quota"] or 0
+        new = ns.get(r["id"], 0) + dch.get(r["id"], 0) if ALIGN_CH else used + dch.get(r["id"], 0)
+        if new != used:
+            chan_upd.append((r["id"], new))
+            print("  渠道 %s「%s」：已用 %d → %d（%+.4f 美元，其中重算 %+.4f%s）" %
+                  (r["id"], r["name"], used, new, usd(new - used), usd(dch.get(r["id"], 0)),
+                   "，对齐日志 %+.4f" % usd(new - used - dch.get(r["id"], 0)) if ALIGN_CH else ""))
+            if new != ns.get(r["id"], 0) + dch.get(r["id"], 0):
+                print("    注意：改后仍与非测试日志合计 %d 差 %+.4f 美元，加 --align-channels 可对齐" %
+                      (ns.get(r["id"], 0) + dch.get(r["id"], 0), usd(new - ns.get(r["id"], 0) - dch.get(r["id"], 0))))
+        elif used != ns.get(r["id"], 0) + dch.get(r["id"], 0):
+            print("  渠道 %s「%s」：已用 %d 与非测试日志合计 %d 不等（差 %+.4f 美元），加 --align-channels 可对齐" %
+                  (r["id"], r["name"], used, ns.get(r["id"], 0) + dch.get(r["id"], 0), usd(used - ns.get(r["id"], 0) - dch.get(r["id"], 0))))
+    have = {r["id"] for r in rows}
+    for cid in sorted(k for k in set(ns) | set(dch) if k not in have and k is not None):
+        if dch.get(cid):
+            print("  渠道 %s 已删除：重算差额 %+.4f 美元没有渠道行可记" % (cid, usd(dch[cid])))
+elif ALIGN_CH:
+    print("  [!!] 库里没有 channels 表，无法对齐渠道，中止"); sys.exit(1)
+if ONLY_CH and not chan_upd:
+    print("\n  渠道都已对齐，没有要改的。")
 
 if not APPLY:
     print("\n  预演结束，未写库。确认无误后加 --apply 执行。")
@@ -448,6 +508,8 @@ try:
     con.executemany("UPDATE logs SET quota=?, other=? WHERE id=?", [(c[4], c[5], c[0]) for c in changes])
     con.executemany("UPDATE users SET used_quota=?, quota=? WHERE id=?", [(a, b, i) for i, a, b in user_upd])
     con.executemany("UPDATE tokens SET used_quota=?, remain_quota=? WHERE id=?", [(a, b, i) for i, a, b in token_upd])
+    if chan_upd:   # 没有 channels 表的库上，连空的 executemany 也会因为预编译语句而报错
+        con.executemany("UPDATE channels SET used_quota=? WHERE id=?", [(n, i) for i, n in chan_upd])
     # 写后校验：与预期不符就整体回滚
     ids = [c[0] for c in changes]
     exp = {c[0]: c[4] for c in changes}
@@ -465,8 +527,14 @@ try:
         for tid, used, _ in token_upd:
             if used != ls_t.get(tid, 0):
                 raise RuntimeError("令牌 %s 已用 %s 与日志合计 %s 不等" % (tid, used, ls_t.get(tid, 0)))
-    left = sum(1 for r in con.execute("SELECT other FROM logs WHERE type=2 AND other LIKE '%37.5%'")
-               if (json.loads(r[0] or "{}") or {}).get("model_ratio") == FALLBACK_RATIO)
+    if ALIGN_CH:
+        ls_c = dict(con.execute("SELECT channel_id, COALESCE(SUM(quota),0) FROM logs WHERE type=2 AND COALESCE(content,'') <> ? "
+                                "GROUP BY channel_id", (TEST_CONTENT,)).fetchall())
+        for cid, used in con.execute("SELECT id, used_quota FROM channels").fetchall():
+            if (used or 0) != ls_c.get(cid, 0):
+                raise RuntimeError("渠道 %s 已用 %s 与非测试日志合计 %s 不等" % (cid, used, ls_c.get(cid, 0)))
+    left = 0 if ONLY_CH else sum(1 for r in con.execute("SELECT other FROM logs WHERE type=2 AND other LIKE '%37.5%'")
+                                 if (json.loads(r[0] or "{}") or {}).get("model_ratio") == FALLBACK_RATIO)
     if left:
         raise RuntimeError("仍有 %d 条兜底记录" % left)
     con.execute("COMMIT")
@@ -476,6 +544,6 @@ except Exception as e:
     print("  [!!] 写入失败，事务已回滚：%s" % e)
     sys.exit(1)
 ic = con.execute("PRAGMA integrity_check").fetchone()[0]
-print("  已改日志 %d 条、用户 %d 个、令牌 %d 个；完整性: %s" % (len(changes), len(user_upd), len(token_upd), ic))
+print("  已改日志 %d 条、用户 %d 个、令牌 %d 个、渠道 %d 个；完整性: %s" % (len(changes), len(user_upd), len(token_upd), len(chan_upd), ic))
 sys.exit(0 if ic == "ok" else 1)
 PY

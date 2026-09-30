@@ -81,6 +81,10 @@ c.execute("INSERT INTO logs VALUES(10,2,0,1,'充值','',0,0,0,0,0,'')")
 c.execute("INSERT INTO users VALUES(1,'admin','h',0,0),(2,'api','h',100000,67205)")
 # 令牌 1：日志合计 67205，已用多记了 44308（像 9-24 那次漏改）
 c.execute("INSERT INTO tokens VALUES(1,2,'sk-x','main',111513,500000,0)")
+# 渠道：已用 = 非测试日志合计（渠道测试不计入）。8 的非测试日志 4412+2600+2600=9612，多记 44000（像 9-24、9-30 都没改渠道表）；
+# 2、4 本来就对得上；5 只有测试日志，已用 0；12、13 已删除，没有行
+c.execute("CREATE TABLE channels(id integer primary key, name text, used_quota int)")
+c.execute("INSERT INTO channels VALUES(2,'openai',5000),(4,'glm',218),(5,'doubao',0),(8,'bailian',53612)")
 c.commit()
 PY
 }
@@ -258,4 +262,69 @@ MAPARG="--map deepseek-v4-1-flash-260910=deepseek-v4.1-flash"
   [ "$status" -ne 0 ]
   [[ "$output" == *"出现负数"* ]]
   [ "$(sha256sum "$DB")" = "$before" ]
+}
+
+# ── 渠道（channels.used_quota，后台渠道列表的「已使用」） ─────────
+chans() { q "SELECT group_concat(id||':'||used_quota) FROM (SELECT id, used_quota FROM channels ORDER BY id)"; }
+
+@test "渠道：重算时按非测试日志的差额调整，测试日志不计入，已删除的渠道只列出" {
+  run bash "$S" "$DB" "$MODELS" --apply --align-tokens --map deepseek-v4-1-flash-260910=deepseek-v4.1-flash
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # 8：非测试日志 A +39、C +12089、D +4744（E 是测试，不计）→ 53612+16872；5 只有测试日志 G，不变
+  [ "$(chans)" = "2:5000,4:218,5:0,8:70484" ]
+  [[ "$output" == *"渠道 13 已删除"* && "$output" == *"渠道 12 已删除"* ]]
+  [[ "$output" == *"--align-channels 可对齐"* ]]
+}
+
+@test "渠道：--align-channels 对齐到非测试日志合计" {
+  run bash "$S" "$DB" "$MODELS" --apply --align-tokens --align-channels --map deepseek-v4-1-flash-260910=deepseek-v4.1-flash
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # 8：4451+14689+7344
+  [ "$(chans)" = "2:5000,4:218,5:0,8:26484" ]
+  [[ "$output" == *"对齐日志"* && "$output" == *"渠道 1 个"* ]]
+  [[ "$output" != *"可对齐"* ]]
+}
+
+@test "只对齐渠道（模型写 -）：日志、用户、令牌一个都不动；再跑一次没有要改的" {
+  before=$(state)
+  run bash "$S" "$DB" - --apply --align-channels
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(state)" = "$before" ]
+  [ "$(chans)" = "2:5000,4:218,5:0,8:9612" ]
+  [[ "$output" == *"渠道 8「bailian」：已用 53612 → 9612"* ]]
+  run bash "$S" "$DB" - --apply --align-channels
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"渠道都已对齐，没有要改的"* ]]
+}
+
+@test "只对齐渠道：没有一个渠道符合「已用 = 非测试日志合计」时拒绝，库不动" {
+  q "UPDATE channels SET used_quota = used_quota + 1 WHERE id IN (2,4)"
+  before=$(sha256sum "$DB")
+  run bash "$S" "$DB" - --apply --align-channels
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"规则与这版 new-api 不符"* ]]
+  [ "$(sha256sum "$DB")" = "$before" ]
+}
+
+@test "模型写 - 却不带 --align-channels：说明用法，库不动" {
+  before=$(sha256sum "$DB")
+  run bash "$S" "$DB" - --apply
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"要带 --align-channels"* ]]
+  [ "$(sha256sum "$DB")" = "$before" ]
+}
+
+@test "库里没有 channels 表：重算照常，只是跳过渠道；要对齐渠道则拒绝" {
+  q "DROP TABLE channels"
+  run bash "$S" "$DB" "$MODELS" --apply --align-tokens --map deepseek-v4-1-flash-260910=deepseek-v4.1-flash
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(q "SELECT quota FROM logs WHERE id=3")" = 14689 ]
+  run bash "$S" "$DB" - --apply --align-channels
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"没有 channels 表"* ]]
 }

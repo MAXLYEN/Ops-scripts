@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # ops/apply-newapi-quota-fix.sh — 停止 new-api 后修正消费统计并校验回传
-# VERSION: 1.3.1
+# VERSION: 1.4.0
+# 1.4.0: 新增 --align-channels（透传给 fix-newapi-reprice 1.1.0）：渠道的已用额度对齐到非测试日志合计，传回前多校验一项；
+#        可以单独用（不带 --reprice 时只对齐渠道、不重算价格）。重算时渠道也按差额跟着改（原先不改，后台渠道列表的「已使用」对不上）。
 # 1.3.1: --dry-run 改为在副本上完整演练：修正、quota_data 重算、传回前的全部校验都跑一遍（原来只跑修正脚本的试运行，
 #        1.3.0 在生产上正式执行时才在 quota_data 一步失败）。修正与校验合并成 repair，预演与执行走同一段代码。
 # 1.3.0: 新增 --reprice <模型列表>：按后台当前价格重算这些模型的历史消费（fix-newapi-reprice.sh，含兜底记录、用户、令牌），
@@ -10,23 +12,28 @@
 # ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_CONTAINER NEWAPI_PUBLIC_URL
 #
 # 用法: apply-newapi-quota-fix.sh [--dry-run]                      修兜底倍率 37.5（原有行为）
-#       apply-newapi-quota-fix.sh --reprice <模型1,模型2> [--align-tokens] [--map 旧名=参考名,...] [--dry-run]
+#       apply-newapi-quota-fix.sh --reprice <模型1,模型2> [--align-tokens] [--align-channels] [--map 旧名=参考名,...] [--dry-run]
+#       apply-newapi-quota-fix.sh --align-channels [--dry-run]         只把渠道的已用额度对齐到非测试日志合计
 
 set -o pipefail
 
-MODE=fallback DRY=0 MODELS="" ALIGN="" MAPS=""
+MODE=fallback DRY=0 MODELS="" ALIGN="" ALIGN_CH="" MAPS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --reprice) MODE=reprice; MODELS="${2:-}"; shift ;;
     --align-tokens) ALIGN=--align-tokens ;;
+    --align-channels) ALIGN_CH=--align-channels ;;
     --map) MAPS="${2:-}"; shift ;;
     --dry-run) DRY=1 ;;
-    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \?//'; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \?//'; exit 0 ;;
     *) echo "未知参数: $1（--help 看用法）"; exit 1 ;;
   esac
   shift
 done
 [ "$MODE" = reprice ] && [ -z "$MODELS" ] && { echo "--reprice 后面要跟模型列表"; exit 1; }
+# 只带 --align-channels：不重算价格（模型写 -），只对齐渠道
+[ "$MODE" = fallback ] && [ -n "$ALIGN_CH" ] && { MODE=reprice; MODELS=-; }
+[ -n "$ALIGN" ] && [ "$MODELS" = - ] && { echo "--align-tokens 要和 --reprice 一起用"; exit 1; }
 
 ENV_FILE=/etc/ops-scripts/env.conf
 [ -r "$ENV_FILE" ] && . "$ENV_FILE"
@@ -51,7 +58,7 @@ die(){ printf '%s [FAIL] %s\n' "$(date -u '+%F %T')" "$*"; exit 1; }
 fix() {
   if [ "$MODE" = reprice ]; then
     # shellcheck disable=SC2086  # ALIGN 为空时不传
-    "$FIXER3" "$1" "$MODELS" ${2:-} $ALIGN ${MAPS:+--map "$MAPS"}
+    "$FIXER3" "$1" "$MODELS" ${2:-} $ALIGN $ALIGN_CH ${MAPS:+--map "$MAPS"}
   else
     # shellcheck disable=SC2086
     "$FIXER" "$1" ${2:-}
@@ -62,7 +69,8 @@ fix() {
 REPAIR_ERR=""
 repair() {
   local db=$1 r left diff td
-  if [ "$MODE" = reprice ]; then log "  修正：按当前价格重算（logs + users + tokens）"; else log "  修正：兜底倍率（logs + users）"; fi
+  if [ "$MODELS" = - ]; then log "  修正：只对齐渠道的已用额度（不重算价格）"
+  elif [ "$MODE" = reprice ]; then log "  修正：按当前价格重算（logs + users + tokens + channels）"; else log "  修正：兜底倍率（logs + users）"; fi
   fix "$db" --apply || { REPAIR_ERR="修正失败"; return 1; }
   log "  修正：quota_data 看板聚合表"
   "$FIXER2" "$db" --apply || { REPAIR_ERR="看板表修正失败"; return 1; }
@@ -77,7 +85,11 @@ repair() {
     td=$(sqlite3 "$db" "SELECT COUNT(*) FROM tokens t WHERE t.used_quota <> (SELECT COALESCE(SUM(quota),0) FROM logs l WHERE l.type=2 AND l.token_id=t.id);")
     [ "$td" = 0 ] || { REPAIR_ERR="${td} 个令牌的已用额度与日志合计不等"; return 1; }
   fi
-  log "  校验通过：完整性 ok、兜底记录 0、看板与日志总额一致${ALIGN:+、令牌与日志一致}"
+  if [ -n "$ALIGN_CH" ]; then
+    td=$(sqlite3 "$db" "SELECT COUNT(*) FROM channels c WHERE c.used_quota <> (SELECT COALESCE(SUM(quota),0) FROM logs l WHERE l.type=2 AND l.channel_id=c.id AND COALESCE(l.content,'') <> '模型测试');")
+    [ "$td" = 0 ] || { REPAIR_ERR="${td} 个渠道的已用额度与非测试日志合计不等"; return 1; }
+  fi
+  log "  校验通过：完整性 ok、兜底记录 0、看板与日志总额一致${ALIGN:+、令牌与日志一致}${ALIGN_CH:+、渠道与非测试日志一致}"
 }
 
 if [ "$MODE" = reprice ]; then
