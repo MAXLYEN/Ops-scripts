@@ -97,6 +97,7 @@ EOF
 # MENU-EXCLUDE: ops/apply-newapi-quota-fix    一次性历史数据修复，会停容器、改库
 # MENU-EXCLUDE: ops/fix-newapi-fallback-quota 上一项调用的组件，不单独使用
 # MENU-EXCLUDE: ops/fix-newapi-quota-data     同上
+# MENU-EXCLUDE: ops/fix-newapi-reprice        同上
 # MENU-EXCLUDE: ops/deploy-litellm            一次性部署
 # MENU-EXCLUDE: ops/containerize-and-pin      一次性改造
 # MENU-EXCLUDE: ops/newapi-drill              在备用机上分步演练，菜单里容易误触 teardown
