@@ -245,7 +245,7 @@ none() {  # none <正则> <文本>
   OPS_YES=1 lm "$NEW" --rehearse-only
   [ "$status" -eq 0 ]
   has "本次迁移上次恢复出来的"
-  grep -q "^$NEW restore - .* --no-cron --force$" "$RCALLS"
+  grep -q "^$NEW restore - .* --no-cron --no-egress --force$" "$RCALLS"
 }
 
 @test "--check：只列计划，两台都不动" {
@@ -282,7 +282,7 @@ none() {  # none <正则> <文本>
   crontab -l | diff /tmp/cron.before -
   [ ! -s /tmp/rclone.log ]
   [ "$(acts)" = "restore check verify standby" ]
-  grep -qE "^$NEW restore - /root/live-migrate-in/rehearsal-[0-9]+/srvbak_[0-9_]+\.7z --no-cron$" "$RCALLS"
+  grep -qE "^$NEW restore - /root/live-migrate-in/rehearsal-[0-9]+/srvbak_[0-9_]+\.7z --no-cron --no-egress$" "$RCALLS"
   # 包现做现传：新机上的与本机的逐字节一致，旁挂的 .sha256 也传了
   f=$(ls /root/live-migrate/pkgs/rehearsal-*/srvbak_*.7z)
   g=$(ls /root/live-migrate-in/rehearsal-*/srvbak_*.7z)
@@ -350,10 +350,36 @@ none() {  # none <正则> <文本>
   has "回滚完成"
   [ "$(running)" = "running running" ]
   crontab -l | diff /tmp/cron.before -
-  [ "$(tail -1 "$RCALLS")" = "$NEW standby" ]
+  [ "$(tail -2 "$RCALLS" | tr '\n' '|')" = "$NEW egress on|$NEW standby|" ]
   [ "$(phase)" = rolled-back ]
   lm status
   has "已回滚"
+}
+
+@test "外连限制：演练恢复带 --no-egress，切换那次不带（新机接手要能发邮件）；回滚时新机先加回限制再停容器" {
+  OPS_YES=1 lm "$NEW"
+  [ "$status" -eq 0 ]
+  has "容器不许主动连外网"
+  [ "$(grep -c ' restore ' "$RCALLS")" = 2 ]
+  grep ' restore ' "$RCALLS" | sed -n 1p | grep -q -- ' --no-cron --no-egress$'
+  none '--no-egress' "$(grep ' restore ' "$RCALLS" | sed -n 2p)"
+  none "^$NEW egress" "$(cat "$RCALLS")"
+  : > "$RCALLS"
+  OPS_YES=1 lm rollback
+  [ "$status" -eq 0 ]
+  [ "$(cat "$RCALLS")" = "$NEW egress on"$'\n'"$NEW standby" ]
+}
+
+@test "回滚：新机加不回外连限制时照样停容器、本机照样复原，并说明要补做" {
+  OPS_YES=1 lm "$NEW"
+  echo 1 > "$NH/rc.egress"
+  OPS_YES=1 lm rollback
+  [ "$status" -eq 0 ]
+  has "新机的容器外连限制没加上"
+  has "opsget migrate/restore-from-backup egress on"
+  [ "$(tail -1 "$RCALLS")" = "$NEW standby" ]
+  [ "$(running)" = "running running" ]
+  crontab -l | diff /tmp/cron.before -
 }
 
 @test "切换中断（新机恢复失败）：停下并指向回滚；回滚后本机复原，--cutover 可以接着做" {

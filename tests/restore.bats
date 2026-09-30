@@ -470,6 +470,57 @@ GRANT ALL PRIVILEGES ON \`metrics\`.* TO \`metrics\`@\`%\`;" make_v2; v2_local
   none "外连限制没加上" "$output"
 }
 
+@test "--no-egress：正式恢复也在起容器前拦下外连（一键迁移的演练）；不带它再恢复一次（切换）先撤掉" {
+  fake_iptables
+  make_vw
+  restore restore "$VW" --no-start --no-cron --no-egress
+  has "--no-egress：容器主动外连已拦下"
+  has "接手服务时不带 --no-egress 再恢复一次"
+  [ "$(grep -c '^iptables DOCKER-USER .*-j REJECT$' /tmp/ipt.rules)" = 2 ]
+  grep -qx 'Before=docker.service' /etc/systemd/system/ops-drill-egress.service
+  [ -x /usr/local/sbin/ops-drill-egress ]
+  # 正式恢复：不记成 teardown 要删的文件
+  none 'ops-drill-egress' "$(grep '^CREATED' /var/lib/ops-scripts/dr-restore.state)"
+  # 切换：同一批包不带 --no-egress 再恢复
+  restore restore "$VW" --no-start --force
+  has "撤掉上次 --no-egress 加的容器外连限制"
+  [ ! -s /tmp/ipt.rules ]
+  [ ! -e /usr/local/sbin/ops-drill-egress ] && [ ! -e /etc/systemd/system/ops-drill-egress.service ]
+  lacks "接手服务时不带 --no-egress"
+}
+
+@test "egress on|off：单独加上、撤掉；重复加不叠加；脚本被删了也撤得掉；演练机上拒绝 off" {
+  fake_iptables
+  restore egress on
+  [ "$status" -eq 0 ]
+  restore egress on
+  [ "$(wc -l < /tmp/ipt.rules)" = 4 ]
+  [ -e /etc/systemd/system/ops-drill-egress.service ]
+  rm -f /usr/local/sbin/ops-drill-egress
+  restore egress off
+  [ "$status" -eq 0 ]
+  has "撤掉了容器外连限制"
+  [ ! -s /tmp/ipt.rules ]
+  [ ! -e /usr/local/sbin/ops-drill-egress ] && [ ! -e /etc/systemd/system/ops-drill-egress.service ]
+  restore egress off
+  [ "$status" -eq 0 ]
+  has "本机没有容器外连限制"
+  restore egress
+  [ "$status" -ne 0 ]
+  # 没有 iptables：加不上就返回失败（一键迁移的回滚据此提示补做）
+  rm -f /usr/local/bin/iptables /usr/local/bin/ip6tables
+  restore egress on
+  [ "$status" -ne 0 ]
+  has "容器外连限制没加上"
+  fake_iptables; : > /tmp/ipt.rules
+  make_vw
+  restore restore "$VW" --no-start --drill
+  restore egress off
+  [ "$status" -ne 0 ]
+  has "teardown 时一起撤掉"
+  [ "$(wc -l < /tmp/ipt.rules)" = 4 ]
+}
+
 @test "teardown：正式恢复过的机器拒绝清理" {
   make_vw
   restore restore "$VW" --no-start

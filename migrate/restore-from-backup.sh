@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/restore-from-backup.sh — 原机已不在时，用每日加密备份包把新机恢复成原样
-# VERSION: 1.3.1
+# VERSION: 1.4.0
+# 1.4.0: 新增 --no-egress：正式恢复也在起容器前拦下容器主动外连（一键迁移的演练用：原机还在服务，新机的容器用同一份数据，会重复给用户发提醒邮件、Komari 看到被控端全离线会告警）；之后不带它的正式恢复起容器前自动撤掉。新增 egress on|off 单独加上 / 撤掉（一键迁移回滚时新机加回）。
 # 1.3.1: vw 与 xboard 两个包带同一个 compose 项目、同一批账号时只按较新的包做一遍（原先锁版本、启动、Xboard 启动后步骤、建账号都做两遍，镜像清单与手动步骤重复，还有 8 行「cp: are the same file」）；被覆盖的库不再报「已恢复过，跳过」；演练时本机本来就有的单元（面板自己的服务）不再说成「隧道等单元」。
 # 1.3.0: 真机演练发现的三处：新布局整棵放回面板 vhost/ 时也检查并重载 nginx（原先只认单个 *.conf，站点全打不开）；Komari 指标库不进包，恢复时建空库并恢复它的账号（原先账号被当成「对恢复的库没有授权」跳过，Komari 起不来）；teardown 认 compose.yaml 与 docker-compose.yml 任一（原先要两个都在，容器一个都没停），停不下就中止、外连限制与库文件都不动。
 # 1.2.0: --drill 起容器前在 DOCKER-USER 链拒绝容器主动外连（开机自启、先于 docker 生效），加不上就不起容器；teardown 撤掉。演练机上的容器用的是生产数据，否则会给真实用户发提醒邮件、往告警群发离线通知。
@@ -12,14 +13,16 @@
 # 在 init/ 做完、配好 env.conf / 备份密码文件 / rclone 的新机上运行。原机还在时用 migrate/live-migrate（它在新机上调用本脚本）。
 # 用法：
 #   restore-from-backup.sh check    [vw|xboard|all|包路径...]    解开、校验，列出恢复会做什么；不动本机
-#   restore-from-backup.sh restore  [vw|xboard|all|包路径...] [--force] [--drill] [--no-start] [--no-cron] [--image 名称=镜像]
+#   restore-from-backup.sh restore  [vw|xboard|all|包路径...] [--force] [--drill] [--no-start] [--no-cron] [--no-egress] [--image 名称=镜像]
 #   restore-from-backup.sh status
 #   restore-from-backup.sh teardown                               只清理 --drill 恢复出来的内容
+#   restore-from-backup.sh egress on|off                          单独加上 / 撤掉容器外连限制（演练机上只能 teardown 时撤）
 # 不给目标等于 all：从 RCLONE_REMOTES 下的 VW_REMOTE_PATH / XBOARD_REMOTE_PATH 各取最新的包。
 # --force     本机已有数据或在跑的服务时仍然恢复：原有目录移到 .bak.<时间>，原有库先导出再删
 # --drill     临时机上演练：本机有任何数据就拒绝，不装定时任务、不启用 systemd 单元，容器不许主动连外网，之后可 teardown
 # --no-start  只还原文件、库与定时任务，不拉镜像、不起容器、不重载 nginx（打印这些命令）
 # --no-cron   不装定时任务（原机还在服务时的迁移演练用）；其余与正式恢复相同
+# --no-egress 起容器前拦下容器主动外连（原机还在服务时的迁移演练用）；之后不带它的正式恢复会先撤掉再起容器
 # --image     给清单里锁不住版本的容器指定镜像（tag 带版本号或 @sha256 digest），可多次
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -31,13 +34,14 @@ umask 022
 usage() { sed -n '/^# 用法：/,/^[^#]/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 1; }
 
 ACTION=${1:-}; [ -n "$ACTION" ] || usage; shift
-TARGETS=() IMAGES=() DRILL=0 FORCE=0 NOSTART=0 NOCRON=0
+TARGETS=() IMAGES=() DRILL=0 FORCE=0 NOSTART=0 NOCRON=0 NOEGRESS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --drill) DRILL=1 ;;
     --force) FORCE=1 ;;
     --no-start) NOSTART=1 ;;
     --no-cron) NOCRON=1 ;;
+    --no-egress) NOEGRESS=1 ;;
     --image) [ -n "${2:-}" ] || die "--image 后面要跟 名称=镜像"; IMAGES+=("$2"); shift ;;
     --image=*) IMAGES+=("${1#--image=}") ;;
     -h|--help) usage ;;
@@ -1334,20 +1338,22 @@ nginx_step() {
   fi
 }
 
-# ── 演练机：容器不许主动连外网 ──────────────────────────────
-# 演练机上的容器用的是生产数据：Xboard 会给真实用户发到期提醒邮件，Komari 看到被控端全都离线会往告警渠道发通知。
+# ── 容器不许主动连外网：演练机，和原机还在服务时的迁移演练（--no-egress）───
+# 这两种机器上的容器用的是生产数据：Xboard 会给真实用户发到期提醒邮件（原机还在服务时就是重复发），
+# Komari 看到被控端全都离线（它们还在向原机上报）会往告警渠道发通知。
 # 在 DOCKER-USER 链拒绝从容器网桥出去的新连接。回包、宿主机 nginx 反代到容器、容器连宿主机 MySQL 都不走这条规则，
 # 拉镜像是 dockerd 在宿主机上做的，也不受影响。写成开机自启、排在 docker 之前的单元，重启机器后照样生效
+# （停着的 restart: always 容器，机器重启后会被 dockerd 拉起来）
 EGRESS_BIN=/usr/local/sbin/ops-drill-egress
 EGRESS_UNIT=/etc/systemd/system/ops-drill-egress.service
 EGRESS_OK=1
-drill_egress_guard() {
-  local d rc
+egress_files() {  # 写出脚本与单元；演练时记进状态，teardown 据此删
   mkdir -p "$(dirname "$EGRESS_BIN")"
-  [ -e "$EGRESS_BIN" ] || st_add CREATED "$EGRESS_BIN"
+  [ "$DRILL" = 1 ] && [ ! -e "$EGRESS_BIN" ] && st_add CREATED "$EGRESS_BIN"
   cat > "$EGRESS_BIN" <<'SH'
 #!/bin/sh
-# restore-from-backup --drill 装的：演练机上的容器不许主动连外网；teardown 时删掉
+# restore-from-backup 装的（--drill、--no-egress 或 egress on）：这台机器上的容器不许主动连外网。
+# 撤掉：演练机 teardown；其余 restore-from-backup egress off，或不带 --no-egress 再正式恢复一次
 # 用法：ops-drill-egress start|stop（重复 start 不会叠加规则）
 act=${1:-start} applied=0
 # 从容器网桥出去、目标不是同一网桥的新连接：拒绝
@@ -1368,10 +1374,10 @@ done
 [ "$act" = stop ] || [ "$applied" = 1 ] || { echo "没有 iptables，限制没加上" >&2; exit 1; }
 SH
   chmod 700 "$EGRESS_BIN"
-  [ -e "$EGRESS_UNIT" ] || st_add CREATED "$EGRESS_UNIT"
+  [ "$DRILL" = 1 ] && [ ! -e "$EGRESS_UNIT" ] && st_add CREATED "$EGRESS_UNIT"
   cat > "$EGRESS_UNIT" <<EOF
 [Unit]
-Description=ops-scripts drill host: containers may not open outbound connections
+Description=ops-scripts restored copy of production: containers may not open outbound connections
 Before=docker.service
 
 [Service]
@@ -1383,27 +1389,48 @@ ExecStop=$EGRESS_BIN stop
 [Install]
 WantedBy=multi-user.target docker.service
 EOF
+}
+
+egress_present() { [ -e "$EGRESS_UNIT" ] || [ -e "$EGRESS_BIN" ]; }
+
+egress_on() {  # 加上并设成开机自启（重复加不叠加）
+  egress_files
   if [ -d /run/systemd/system ]; then
     systemctl daemon-reload && systemctl enable ops-drill-egress.service >/dev/null 2>&1 \
-      && systemctl restart ops-drill-egress.service; rc=$?
+      && systemctl restart ops-drill-egress.service
   else
-    "$EGRESS_BIN" start; rc=$?
+    "$EGRESS_BIN" start
   fi
-  if [ "$rc" -eq 0 ]; then
-    ok "演练：容器主动外连已拦下（不会给用户发邮件、往告警渠道发通知；开机后先于 docker 生效）"
+}
+
+egress_off() {  # 撤掉规则、取消开机自启、删掉脚本与单元
+  [ -d /run/systemd/system ] && systemctl disable --now ops-drill-egress.service >/dev/null 2>&1
+  egress_files                     # 用本版的 stop 撤：脚本被删过、或是旧版写的，都撤得掉
+  "$EGRESS_BIN" stop || return 1
+  rm -f "$EGRESS_BIN" "$EGRESS_UNIT"
+  [ -d /run/systemd/system ] && systemctl daemon-reload 2>/dev/null
+  return 0
+}
+
+egress_guard() {  # 起容器前：--drill / --no-egress 加上；加不上就不起容器
+  local d lbl=演练 again=--drill why="演练机上的容器用生产数据，不拦外连会给真实用户发提醒邮件、往告警渠道发离线通知"
+  if [ "$DRILL" = 0 ]; then
+    lbl=--no-egress again=--no-egress
+    why="原机还在服务，这里的容器用同一份数据：不拦外连会重复给用户发提醒邮件，Komari 看到被控端全都离线会发告警"
+  fi
+  if egress_on; then
+    ok "$lbl：容器主动外连已拦下（不会给用户发邮件、往告警渠道发通知；开机后先于 docker 生效）"
   elif [ "$NOSTART" = 1 ]; then
     EGRESS_OK=0
-    manual "起容器之前先让 $EGRESS_BIN start 成功（装好 docker 后 iptables 就有了）" \
-           "演练机上的容器用生产数据，不拦外连会给真实用户发提醒邮件、往告警渠道发离线通知"
+    manual "起容器之前先让 $EGRESS_BIN start 成功（装好 docker 后 iptables 就有了）" "$why"
   else
     EGRESS_OK=0
-    warn "演练：容器外连限制没加上（见上），不启动容器"
-    manual "修好后 $EGRESS_BIN start，再重跑 restore … --drill 启动容器" \
-           "演练机上的容器用生产数据，不拦外连会给真实用户发提醒邮件、往告警渠道发离线通知"
+    warn "$lbl：容器外连限制没加上（见上），不启动容器"
+    manual "修好后 $EGRESS_BIN start，再重跑 restore … $again 启动容器" "$why"
   fi
   for d in "${PROJ_DIRS[@]}"; do
     grep -qsE '^[[:space:]]*network_mode:[[:space:]]*["'"'"']?host' "$d"/compose.y*ml "$d"/docker-compose.y*ml \
-      && warn "演练：$d 用 host 网络，它的外连不经过网桥，拦不住"
+      && warn "$lbl：$d 用 host 网络，它的外连不经过网桥，拦不住"
   done
   return 0
 }
@@ -1415,7 +1442,17 @@ start_all() {
   if [ "$NOSTART" = 0 ] && touched_under /etc/docker/daemon.json; then
     systemctl restart docker && ok "docker 已按原机的 daemon.json 重启" || warn "docker 重启失败"
   fi
-  [ "$DRILL" = 1 ] && drill_egress_guard
+  if [ "$DRILL" = 1 ] || [ "$NOEGRESS" = 1 ]; then
+    egress_guard
+  elif egress_present; then
+    # 上次 --no-egress（一键迁移的演练）留下的：这次是接手服务，容器要能发邮件、发通知
+    if egress_off; then
+      ok "撤掉上次 --no-egress 加的容器外连限制（接手服务，容器要能发邮件、发通知）"
+    else
+      warn "上次 --no-egress 加的容器外连限制没撤掉（见上）"
+      manual "restore-from-backup.sh egress off" "限制还在的话，这台机器上的容器发不了邮件、发不了告警通知"
+    fi
+  fi
   for n in "${!IT_KIND[@]}"; do
     [ "${IT_KIND[n]}" = compose-project ] && [ "${PL_ACT[n]}" != DUP ] || continue
     d=${IT_DST[n]}
@@ -1469,6 +1506,8 @@ summary() {
     manual "演练结束后清理：restore-from-backup.sh teardown" "演练机上的恢复内容要删掉，避免留着生产数据的副本"
     manual "演练机上 Vaultwarden 的网站图标、发信测试这类要连外网的功能会失败，属于预期" "容器主动外连被拦下了，防止用生产数据给用户发邮件、发通知"
   else
+    [ "$NOEGRESS" = 1 ] && manual "接手服务时不带 --no-egress 再恢复一次（起容器前自动撤掉外连限制），或 restore-from-backup.sh egress off" \
+      "原机还在服务，这里的容器不许主动连外网，免得重复发提醒邮件、报被控端离线；Vaultwarden 发信测试这类功能因此会失败，属于预期"
     ip=$(curl -fsS -m 5 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{ print $1 }')
     manual "把各站点域名的 DNS 解析改到本机 ${ip:-（公网 IP）}；NAT 机器填公网出口" \
            "切换是把真实流量交给这台机器的最后一步，保留人工确认；不做 Cloudflare 自动切换：演练机上误跑一次就会劫持生产流量"
@@ -1590,10 +1629,7 @@ do_teardown() {
     done < <(st_rows PLACED | cut -f2 | sort -u)
     [ -z "$stuck" ] || die "这些项目的容器停不下来:$stuck。外连限制、库和文件都还没动：先 docker ps 看一下、手动 docker rm -f，再重跑 teardown"
   fi
-  if [ -e "$EGRESS_UNIT" ] || [ -e "$EGRESS_BIN" ]; then
-    [ -d /run/systemd/system ] && systemctl disable ops-drill-egress.service >/dev/null 2>&1
-    [ -x "$EGRESS_BIN" ] && "$EGRESS_BIN" stop && ok "撤掉演练时加的容器外连限制"
-  fi
+  egress_present && egress_off && ok "撤掉演练时加的容器外连限制"
   section "数据库"
   if mysql_ok; then
     while read -r p; do my -e "DROP DATABASE IF EXISTS \`$p\`" && ok "删库 $p"; done < <(st_rows DBCREATED | cut -f2 | sort -u)
@@ -1631,10 +1667,27 @@ do_teardown() {
   finish
 }
 
+do_egress() {  # egress on|off：一键迁移回滚时新机加回（原机又在服务了）；手动撤掉
+  [ ${#TARGETS[@]} -eq 1 ] || usage
+  case "${TARGETS[0]}" in
+    on)
+      egress_on || die "容器外连限制没加上（见上）"
+      ok "容器主动外连已拦下（开机后先于 docker 生效）；撤掉：restore-from-backup.sh egress off" ;;
+    off)
+      [ "$(st_mode)" = drill ] && die "这台机器是演练恢复：外连限制在 teardown 时一起撤掉"
+      if ! egress_present; then log "本机没有容器外连限制"
+      elif egress_off; then ok "撤掉了容器外连限制"
+      else die "容器外连限制没撤掉（见上）"; fi ;;
+    *) usage ;;
+  esac
+  finish
+}
+
 case "$ACTION" in
   check)    do_check ;;
   restore)  do_restore ;;
   status)   do_status ;;
   teardown) do_teardown ;;
+  egress)   do_egress ;;
   *)        usage ;;
 esac

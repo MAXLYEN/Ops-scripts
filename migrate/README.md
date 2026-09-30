@@ -14,8 +14,8 @@ new-api 落地机不走这里：演练与恢复见 `ops/newapi-drill`，换落�
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `live-migrate.sh` | 1.0.0 | 原机还在：一键迁移，在旧机上运行（预检 → 演练 → 停写切换 → DNS，DNS 前可回滚） |
-| `restore-from-backup.sh` | 1.3.1 | 原机已不在时，用每日加密备份包把新机恢复成原样；也是一键迁移在新机上调用的恢复步骤 |
+| `live-migrate.sh` | 1.1.0 | 原机还在：一键迁移，在旧机上运行（预检 → 演练 → 停写切换 → DNS，DNS 前可回滚） |
+| `restore-from-backup.sh` | 1.4.0 | 原机已不在时，用每日加密备份包把新机恢复成原样；也是一键迁移在新机上调用的恢复步骤 |
 | `01-inventory.sh` | 2.0.1 | 旧流程：在新旧机器采集迁移前环境清单 |
 | `02-nat-probe.sh` | 2.0.2 | 旧流程：从外部验证迁入机的端口入站可达性 |
 | `03-pre-migrate.sh` | 2.0.4 | 旧流程：在迁出机停服并制作完整冷快照 |
@@ -66,9 +66,9 @@ opsget migrate/live-migrate rollback                                 # DNS 切�
 
 1. 旧机用装好的 `vw-fullbackup` / `xboard-fullbackup --local-only` 现做加密包到 `/root/live-migrate/pkgs`（不上传、不清理、不报心跳）
 2. 经 SSH 直传新机 `/root/live-migrate-in`，新机上再算一遍 sha256 核对
-3. 新机 `restore-from-backup restore <包> --no-cron`：正式恢复并起服务，但**不装定时任务**（旧机还在服务，新机不能往网盘传包、按保留期删云端的包）。新机上已有本次迁移上次恢复出来的数据时带 `--force`
+3. 新机 `restore-from-backup restore <包> --no-cron --no-egress`：正式恢复并起服务，但**不装定时任务**（旧机还在服务，新机不能往网盘传包、按保留期删云端的包），**容器不许主动连外网**（新机的容器用的是同一份数据：Xboard 的定时任务会重复给用户发提醒邮件，Komari 看到被控端全都离线——它们还在向旧机上报——会往告警渠道发通知；做法同 `--drill`，见下面「季度演练」）。新机上已有本次迁移上次恢复出来的数据时带 `--force`
 4. 核对：新机 `restore-from-backup check` 逐项比对（恢复计划里还标着放置、冲突的就是没对上的）；新机 `08-post-start-check`；旧机经 `--resolve` 分别访问旧机（127.0.0.1）和新机 IP 上的每个站点，对比状态码；配了 `NEWAPI_TUNNEL_UNIT` 的，检查新机到落地机的隧道和 `NEWAPI_LOCAL_URL`
-5. 新机停掉全部容器，只留数据和拉好的镜像（切换时启动快；也免得 Xboard 的定时任务在副本上给用户发邮件）
+5. 新机停掉全部容器，只留数据和拉好的镜像（切换时启动快）。外连限制留着：它开机自启，新机万一重启、`restart: always` 的容器被拉起来也发不出去
 
 `--no-start` 让演练只放文件、导库，不在新机上起容器，这时 08 验收和逐站对比跳过。演练发现差异时，交互运行会在切换前列出差异再问；`OPS_YES=1` 自动模式不往下切换。
 
@@ -78,14 +78,14 @@ opsget migrate/live-migrate rollback                                 # DNS 切�
 2. 旧机 crontab 里调用备份脚本的行（`*-fullbackup`，加上 `BACKUP_SCRIPTS` 里的）加 `#MIGRATE-PAUSED ` 前缀，别的行不动。旧机以后也不会再把停服那一刻的旧数据当成最新的包传上网盘
 3. 旧机停掉全部容器（停写；MySQL、nginx 照常，出包要用 MySQL）
 4. 再核对一次落地机等机器的放行名单，再做一次包（备份脚本的锁改为等上一轮结束），传到新机
-5. 新机 `restore … --force` 并启动：这次装定时任务，新机接手备份
+5. 新机 `restore … --force` 并启动：这次装定时任务，新机接手备份；不带 `--no-egress`，起容器前撤掉演练时加的外连限制（新机接手后要能发邮件、发告警）
 6. 新机 08 验收、逐站对比（和演练时旧机的状态码比）、隧道
 
 新机恢复失败时停在这里：修好后 `--cutover` 接着做（沿用第一次写的回滚脚本），或回滚。
 
 **DNS**（人工）：从 vhost（或 `DOMAINS`）列出要改的记录，经公共 DNS（DoH，默认 Cloudflare 与 Google，环境变量 `LIVE_MIGRATE_DOH` 可换）查出现在的值；AAAA 记录改成新机的 IPv6 或删掉；开了 Cloudflare 代理的改源站 IP。不接 Cloudflare API，原因与从备份包恢复相同。改好后在终端里输 `yes`（`OPS_YES` 不算；或加 `--verify-dns`）开始复核：每个域名的公共 DNS 答案要是新机 IP（或代理地址且公网访问正常）才算完成，还没生效就过一会儿再跑 `--dns --verify-dns`。复核通过后删掉新机上临时放行旧机的规则，问一次后删掉落地机等机器上旧机的放行。
 
-**回滚**（DNS 切换前任何时候）：`live-migrate.sh rollback` 或 `bash /root/live-migrate/rollback.sh`（不依赖 ops-scripts，可以直接跑）：新机停掉全部容器并暂停备份定时任务（连不上就跳过：DNS 没切，新机没接流量）；旧机去掉备份任务的 `#MIGRATE-PAUSED ` 前缀、启动切换时停掉的容器。新机 IP 留在落地机等机器的放行名单里，放弃这次迁移的话自己删掉。回滚后可以重新演练、切换。
+**回滚**（DNS 切换前任何时候）：`live-migrate.sh rollback` 或 `bash /root/live-migrate/rollback.sh`（不依赖 ops-scripts，可以直接跑）：新机先加回容器外连限制（`restore-from-backup egress on`：旧机又在服务了，新机回到和演练后一样的待命状态），再停掉全部容器并暂停备份定时任务（连不上就跳过：DNS 没切，新机没接流量；外连限制没加上会提示补做）；旧机去掉备份任务的 `#MIGRATE-PAUSED ` 前缀、启动切换时停掉的容器。新机 IP 留在落地机等机器的放行名单里，放弃这次迁移的话自己删掉。回滚后可以重新演练、切换。
 
 ### SSH 放行名单
 
@@ -137,6 +137,7 @@ opsget migrate/restore-from-backup restore /root/srvbak_x.7z /root/xboard_y.7z  
 - **已有数据**：有上面说的冲突时直接拒绝；加 `--force` 才覆盖，原有目录移到 `.bak.<时间>`，原有库先导出到暂存目录再删。
 - **可以重跑**：状态记在 `/var/lib/ops-scripts/dr-restore.state`。同一批包重跑时，已恢复过的跳过（服务跑起来后改过的数据目录不会被覆盖）、导了一半的库删掉重导、crontab 不重复。
 - **`--no-cron`**：正式恢复并启动，但不装定时任务（不并入原机的定时任务、不排备份）。原机还在服务时的迁移演练用（一键迁移就是这样调用的），接手服务时不带它再恢复一次。
+- **`--no-egress`**：正式恢复也在起容器前拦下容器主动外连（与 `--drill` 同一套 `ops-drill-egress` 规则与单元），列进手动步骤。原机还在服务时的迁移演练用（一键迁移这样调用）。之后不带它的正式恢复（接手服务那次）起容器前自动撤掉；也可以单独 `restore-from-backup egress on` / `egress off`（一键迁移回滚时用 `on`）。演练机上 `egress off` 拒绝，等 `teardown` 一起撤。
 - **季度演练**：在临时机上 `restore --drill`，本机有任何数据就拒绝，不装定时任务（否则会从演练机往生产网盘传包并按保留期删云端旧包），不启用 systemd 单元（隧道会连到生产机），起容器前在 `DOCKER-USER` 链拒绝容器主动外连（容器用的是生产数据，不拦会给真实用户发提醒邮件、往告警渠道发离线通知；写成开机自启、排在 docker 之前的 `ops-drill-egress` 单元，加不上就不起容器）；验证完 `teardown` 先停掉恢复出来的容器（停不下就中止，外连限制、库和文件都不动），再删库、账号、文件，撤掉外连限制，替换过的系统配置从 `.bak` 放回，`env.conf` 还原，演练时装的 docker 一并卸载。正式恢复过的机器拒绝 `teardown`。
 - 暂存目录 `/root/dr_restore` 里是解开的明文包（dump、密钥、证书私钥），验证完删掉。
 

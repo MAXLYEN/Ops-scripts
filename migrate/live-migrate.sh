@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/live-migrate.sh — 原机还在时的一键迁移（在旧机上运行）：预检 → 演练 → 停写切换 → DNS
-# VERSION: 1.0.0
+# VERSION: 1.1.0
+# 1.1.0: 演练时新机恢复带 --no-egress：容器不许主动连外网（原机还在服务，新机上的 Xboard 会重复给用户发提醒邮件，Komari 看到被控端全离线会告警）；切换那次恢复不带它，起容器前撤掉；回滚时新机先加回限制再停容器。「DNS 已经改好」的确认改用公共库的 is_yes（前后空格、大小写、全角字符不再让 yes 被当成否）。
 # 1.0.0: 首版。预检两台机器；演练时本机照常服务，用备份脚本 --local-only 现做加密包经 SSH 直传新机，restore-from-backup --no-cron 恢复、check 比对、08 验收、经 --resolve 逐站对比后停掉新机的容器；切换时暂停本机备份定时任务、停容器、再做一次包、restore --force 并启动；DNS 保持人工，确认后经公共 DNS 复核；DNS 切换前随时可回滚。SSH 只用密钥、复用一条连接；恢复后新机临时放行本机 IP，落地机等机器的放行名单同步加上新机。
 # ENV-REQUIRED: BACKUP_PASS_FILE|VW_PASS_FILE MYSQL_DEFAULTS_FILE PANEL_VHOST_DIR
 # 用法：
@@ -14,7 +15,7 @@
 #   --dns            只做 DNS：列出要改的记录，确认改好后经公共 DNS 复核
 # --no-start    演练只放文件、导库，不在新机上起容器（站点对比与 08 验收跳过）
 # --verify-dns  不再询问，直接按「已经改好」复核 DNS
-# rollback      DNS 切换前：新机停容器并暂停它的备份任务，本机恢复备份定时任务、启动切换时停掉的容器
+# rollback      DNS 切换前：新机加回容器外连限制、停容器并暂停它的备份任务，本机恢复备份定时任务、启动切换时停掉的容器
 # 新机要求：Debian 12、做完 init/、装好 docker、同一大版本的 MySQL、nginx（或宝塔）、opsget 固定在同一版本、没有业务数据；
 # 本机能用密钥登录新机的 root（ops/setup-key-login）。新机没有 env.conf 或备份密码文件时从本机复制过去。
 
@@ -107,6 +108,7 @@ lm_agent() {
       shift
       OPS_YES=1 opsget migrate/restore-from-backup restore "$@" ;;
     check)  opsget migrate/restore-from-backup check "$@" ;;
+    egress) opsget migrate/restore-from-backup egress "$@" ;;
     verify) opsget migrate/08-post-start-check ;;
     tunnel) lm_tunnel "$@" ;;
     allow-me)   lm_allow_me "$@" ;;
@@ -338,7 +340,7 @@ ask_tty() {  # 只认终端里亲手输入的 yes（OPS_YES 不算）：「DNS �
   local a
   printf '  %s (yes/no) ' "$1"
   { read -r a </dev/tty; } 2>/dev/null || { echo; return 1; }
-  [ "$a" = yes ]
+  is_yes "$a"
 }
 my_ips() {  # 本机的各个 IPv4：配置的公网 IP、出口、网卡上的
   { printf '%s\n' "${OLD_HOST_IP:-}" "${O[egress]:-}"; hostname -I 2>/dev/null | tr ' ' '\n'; } \
@@ -485,11 +487,12 @@ show_plan() {
 
   1. 演练（本机照常服务，不停任何东西）
      本机用 ${BK_USE[*]} 现做加密包到 $WORK/pkgs（--local-only：不上传、不清理），经 SSH 直传新机 $RIN；
-     新机 restore-from-backup --no-cron$([ "$NOSTART" = 1 ] && echo ' --no-start')（起服务但不装定时任务，免得新机往网盘传包）→ check 逐项比对 →
-     08 验收 → 本机经 --resolve 分别访问两台、逐站对比 → 新机停掉容器，只留数据
+     新机 restore-from-backup --no-cron --no-egress$([ "$NOSTART" = 1 ] && echo ' --no-start')（起服务但不装定时任务，免得新机往网盘传包；
+     容器不许主动连外网，免得新机的 Xboard 重复给用户发提醒邮件、Komari 报被控端全离线）→ check 逐项比对 →
+     08 验收 → 本机经 --resolve 分别访问两台、逐站对比 → 新机停掉容器，只留数据（外连限制留着，等切换）
   2. 切换（再确认一次；从这里起服务中断，直到 DNS 切过去）
      写回滚脚本 → 暂停本机的备份定时任务（#MIGRATE-PAUSED，与 03 同一个标记）→ 停本机全部容器 →
-     再做一次包 → 传到新机 → restore --force 并启动（这次装定时任务，新机接手备份）→ 08 验收、逐站对比、隧道
+     再做一次包 → 传到新机 → restore --force 并启动（这次装定时任务，新机接手备份；起容器前撤掉外连限制）→ 08 验收、逐站对比、隧道
   3. DNS（人工）：列出要改的记录，你在 DNS 服务商那里改好后回来确认，再经公共 DNS 复核
   回滚：DNS 切换前任何时候 live-migrate.sh rollback（或 bash $WORK/rollback.sh）
 
@@ -704,7 +707,7 @@ write_rollback() {
   {
     printf '#!/usr/bin/env bash\n'
     printf '# live-migrate 回滚脚本（DNS 切换前用）：%s 从 %s 迁往 %s（%s）\n' "$(date -u '+%F %T UTC')" "$(hostname)" "$IP" "$ID"
-    printf '# 新机停容器、暂停它的备份定时任务；本机恢复备份定时任务、启动切换时停掉的容器。\n'
+    printf '# 新机加回容器外连限制、停容器、暂停它的备份定时任务；本机恢复备份定时任务、启动切换时停掉的容器。\n'
     printf '# DNS 已经切到新机、新机接过写入之后别用它：会丢新机上的数据（见 migrate/README.md「DNS 切换之后要切回」）。\n'
     printf '# 只用密钥登录新机；新机连不上时第 1 步跳过，本机照样回滚。\n\n'
     declare -f "${AGENT_FUNCS[@]}"
@@ -714,7 +717,11 @@ write_rollback() {
     printf 'SSH=(ssh %s -o StrictHostKeyChecking=yes -o BatchMode=yes -o ControlMaster=no root@%s)\n' "$(printf '%q ' "${SSH_BASE[@]}")" "$IP"
     printf 'RUN=(%s)\n\n' "$(printf '%q ' "${RUN[@]}")"
     cat <<'EOF'
-echo "1/3 新机：停容器、暂停备份定时任务"
+echo "1/3 新机：加回容器外连限制，停容器、暂停备份定时任务"
+# 本机要恢复服务了：新机的容器再起来（比如新机重启时 restart: always 的）会重复发提醒邮件、报被控端离线
+if ! printf '%s\n' "$AGENT" | "${SSH[@]}" 'bash -s -- egress on'; then
+  echo "  ✗ 新机的容器外连限制没加上：连得上新机时在上面 opsget migrate/restore-from-backup egress on"
+fi
 if ! printf '%s\n' "$AGENT" | "${SSH[@]}" 'bash -s -- standby'; then
   echo "  ✗ 新机连不上或执行失败。DNS 还没切，新机没有接流量；回滚照样继续，之后上新机 docker stop 全部容器、暂停备份定时任务"
 fi
@@ -734,8 +741,9 @@ rehearse() {
   build_pkgs rehearsal
   section "演练 2/5：传到新机"
   send_pkgs "$PKGDIR" "$RIN/rehearsal-$TS"
-  section "演练 3/5：新机恢复（不装定时任务）"
-  args=("${RPKGS[@]}" --no-cron)
+  section "演练 3/5：新机恢复（不装定时任务，容器不许主动连外网）"
+  # --no-egress：本机还在服务，新机的容器不许主动连外网（会重复给用户发提醒邮件；Komari 看到被控端全离线会告警）
+  args=("${RPKGS[@]}" --no-cron --no-egress)
   [ "$OURS" = 1 ] && args+=(--force)
   [ "$NOSTART" = 1 ] && args+=(--no-start)
   [ "$OURS" = 1 ] && log "新机上是本次迁移上次恢复出来的数据：带 --force 覆盖（原有的留 .bak）"
@@ -780,7 +788,7 @@ cutover() {
   peers allow
   build_pkgs cutover
   send_pkgs "$PKGDIR" "$RIN/cutover-$TS"
-  section "切换 5/6：新机恢复并启动（这次装定时任务）"
+  section "切换 5/6：新机恢复并启动（这次装定时任务，起容器前撤掉演练时的外连限制）"
   new_restore cutover "${RPKGS[@]}" --force; rc=$?
   allow_me
   [ "$rc" -eq 0 ] || die "新机恢复失败（退出码 $rc，输出在 $WORK/logs/cutover-restore-$TS.log）。本机已停写：修好后 live-migrate.sh $IP --ssh-port $PORT --cutover 接着做，或 live-migrate.sh rollback 回到切换前"
@@ -903,7 +911,7 @@ do_rollback() {
   esac
   [ -f "$WORK/rollback.sh" ] || die "没有 $WORK/rollback.sh"
   section "回滚（DNS 切换前）"
-  echo "  新机停容器、暂停备份定时任务；本机恢复备份定时任务、启动：$(st_rows STOPPED | cut -f2 | tr '\n' ' ')"
+  echo "  新机加回容器外连限制、停容器、暂停备份定时任务；本机恢复备份定时任务、启动：$(st_rows STOPPED | cut -f2 | tr '\n' ' ')"
   confirm "执行回滚？"
   bash "$WORK/rollback.sh" || warn "回滚脚本有步骤失败（见上）"
   st_add PHASE rolled-back
