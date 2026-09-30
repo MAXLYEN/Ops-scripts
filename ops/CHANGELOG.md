@@ -2,6 +2,14 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-09-30：前置机 SSH 放行名单
+
+约定是每台机器用 ufw 只放行本地出口、前置机和各节点机连 SSH，真机演练时发现前置机的 SSH 端口一直是 `LIMIT IN Anywhere`，没有名单。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `ssh-allowlist.sh` | 新增 → 1.0.0 | 名单 = `~/.vps-hosts.txt` 里的机器 + `ADMIN_IPS` + `ALLOW_EXTRA_IPS`（去重，可写网段，比 /8 宽的与认不出的跳过并告警）；按 `sshd -T` 与当前会话的端口加 `ufw allow from <IP> to any port <端口> proto tcp comment 'ssh-allowlist'`，全部加上后才删不限来源的 allow / limit 规则（有一条没加上就不删）；只增删自己打注释的规则，名单变了再跑一次即同步。默认预演；`--apply` 先备份 `user.rules` / `user6.rules`、`systemd-run --on-active=300` 布置自动回滚，`--confirm` 取消、`--rollback` 立即回滚；当前会话来源不在名单里时拒绝执行 |
+
 ## 2026-09-29：面板整机备份自动化
 
 面板整机备份（「设置 → 备份还原」）原来只能在面板里手动点，再用 `panel-backup-upload` 手动上传。真机演练时它派上了用场：面板的反向代理项目记录不在每日包里（已由 `lib/common.sh` 1.2.5 补上），当时靠手动上传的整机备份把面板里的记录找了回来。
