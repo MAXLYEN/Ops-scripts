@@ -7,7 +7,7 @@
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
 | `litellm-fullbackup.sh` | 1.0.0 | 从汇总机拉取 LiteLLM 节点的库导出与工作目录，加密上传 |
-| `newapi-fullbackup.sh` | 1.1.0 | 从汇总机拉取 new-api 数据，生成一致性快照并加密上传 |
+| `newapi-fullbackup.sh` | 1.2.0 | 从汇总机拉取 new-api 数据，生成一致性快照并加密上传 |
 | `vw-fullbackup.sh` | 2.6.0 | 备份 Vaultwarden、Komari、SubConverter 与系统配置 |
 | `xboard-fullbackup.sh` | 2.5.0 | 生成 Xboard 加密备份包并上传云端 |
 

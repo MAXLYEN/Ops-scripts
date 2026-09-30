@@ -2,6 +2,14 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-09-30：按真机大演练（整套从零恢复）的发现修复
+
+在两台临时机上按灾难恢复手册从零恢复了前置机、new-api 落地机和 LiteLLM，并把前置机到落地机的隧道串起来端到端调用成功。暴露出的问题里，下面这些在脚本侧修掉；手册侧的改动见 `docs/disaster-recovery.md`。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `common.sh` | 1.2.6 → 1.2.7 | 新增 `ensure_rclone`：rclone 缺失或低于 `RCLONE_MIN_VERSION`（默认 1.75.0）时，从 downloads.rclone.org 取当前版本，按同目录 `SHA256SUMS` 校验后装到 `/usr/local/bin/rclone`（`RCLONE_DL_BASE` 可换下载源，测试用）；新增 `rclone_version`、`ver_ge`。起因：备份包不收 rclone 二进制，新机从 apt 装到的是 Debian 12 的 1.60，对 OneDrive 能列目录、下载却报 `unauthenticated`，面板整机备份（只在 OneDrive）这条兜底路径因此断了；同一份授权换官方 1.75 立刻正常 |
+
 ## 2026-09-30：确认提示容忍空格、大小写与全角字符
 
 | 文件 | 原版本 → 当前版本 | 变更 |

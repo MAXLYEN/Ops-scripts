@@ -13,7 +13,7 @@
 | `mail-doctor.sh` | 1.0.3 | 诊断告警邮件的配置与发送链路 |
 | `panel-cron-inspect.sh` | 2.0.5 | 查看面板计划任务的真实命令与运行状态 |
 | `panel-data-locate.sh` | 2.0.2 | 定位面板数据在磁盘上的存储位置 |
-| `preflight-backup.sh` | 2.0.2 | 检查备份脚本运行前的依赖与配置 |
+| `preflight-backup.sh` | 2.1.0 | 检查备份脚本运行前的依赖与配置 |
 | `save-fw.sh` | 2.0.2 | 在修改防火墙前保存当前配置快照 |
 | `script-inventory.sh` | 1.0.2 | 盘点本机脚本并区分仓库来源与本地文件 |
 | `ssl-audit.sh` | 2.1.2 | 核对证书文件、站点引用与续期记录 |

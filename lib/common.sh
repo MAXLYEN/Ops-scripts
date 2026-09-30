@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.2.6
+# VERSION: 1.2.7
+# 1.2.7: 新增 ensure_rclone（缺失或低于 1.75.0 时装官方版到 /usr/local/bin/rclone，按 SHA256SUMS 校验）与 rclone_version、ver_ge。真机演练发现 Debian 源的 rclone 1.60 下载 OneDrive 报 unauthenticated。
 # 1.2.6: 新增 is_yes，confirm 改用它：处理退格、去掉首尾空白（含回车、全角空格）、全角转半角、不分大小写后等于 yes 才算同意（生产机上输了 yes 却被当成取消）；空输入、y 仍然不算。
 # 1.2.5: 收面板的项目类站点目录 /www/server/*_project（反向代理项目等的记录，每个 ≤5MB；超过的记进 rootfs-skipped）。真机演练发现：不收的话 nginx 照常转发，面板里却看不到、改不了这些站点。
 # 1.2.4: 面板 data/ 不收监控历史（system.db 只留表结构）、漏洞扫描库 warning/、GeoLite2 国家库：生产机上它们占 rootfs 的 250MB 里的 245MB，vw 与 xboard 包各带一份，每 6 小时上云会塞满网盘；都能由面板重新生成或下载。
@@ -12,7 +13,7 @@ set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 # shellcheck disable=SC2034  # 供调用方查询公共库版本
-OPS_COMMON_VERSION="1.2.3"
+OPS_COMMON_VERSION="1.2.7"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
@@ -155,6 +156,47 @@ docker_ready() { command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&
 # ufw 重载可能打乱 dockerd 自插的链，检查并按需重启
 docker_chain_ok() {
   iptables -S DOCKER 2>/dev/null | grep -q -- '-j ACCEPT'
+}
+
+# ── rclone ──────────────────────────────────────────────────
+# 发行版源里的 rclone 常旧好几年（Debian 12 是 1.60），旧版对 OneDrive 能列目录、下载却报
+# unauthenticated（真机演练实测：同一份授权换官方 1.75 立刻正常）。备份包不收 /usr/local/bin/rclone
+# （几十 MB 的静态二进制），所以新机上一律装官方版：不从 apt 装 rclone。
+rclone_version() { rclone version 2>/dev/null | awk 'NR == 1 { v = $2; sub(/^v/, "", v); sub(/-.*/, "", v); print v }'; }
+ver_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$2" ]; }   # ver_ge <甲> <乙>：甲 ≥ 乙
+
+# ensure_rclone：缺失或低于 RCLONE_MIN_VERSION（默认 1.75.0）时，从 downloads.rclone.org 取当前版本，
+# 用同目录的 SHA256SUMS 校验后装到 /usr/local/bin/rclone（PATH 里排在 /usr/bin 前面）。不动配置。
+ensure_rclone() {
+  local min=${RCLONE_MIN_VERSION:-1.75.0} cur="" arch ver zip dir tmp base=${RCLONE_DL_BASE:-https://downloads.rclone.org}
+  command -v rclone >/dev/null 2>&1 && cur=$(rclone_version)
+  if [ -n "$cur" ] && ver_ge "$cur" "$min"; then return 0; fi
+  case "$(uname -m)" in
+    x86_64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) warn "rclone：不认识的架构 $(uname -m)，请手动装官方版（≥ $min）"; return 1 ;;
+  esac
+  log "rclone ${cur:-未安装}，低于 $min：装官方版到 /usr/local/bin/rclone"
+  ver=$(curl -fsSL --retry 2 --max-time 30 "$base/version.txt" 2>/dev/null | awk '{ print $2 }')
+  [[ $ver =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { warn "取不到 rclone 的最新版本号（$base/version.txt）"; return 1; }
+  zip="rclone-$ver-linux-$arch.zip"; dir="rclone-$ver-linux-$arch"; tmp=$(mktemp -d)
+  if curl -fsSL --retry 2 --max-time 300 -o "$tmp/$zip" "$base/$ver/$zip" \
+     && curl -fsSL --retry 2 --max-time 30 -o "$tmp/SHA256SUMS" "$base/$ver/SHA256SUMS" \
+     && (cd "$tmp" && grep -E "^[0-9a-f]{64}  $zip\$" SHA256SUMS | sha256sum -c --status) \
+     && { if command -v python3 >/dev/null 2>&1; then
+            python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract(sys.argv[2], sys.argv[3])' "$tmp/$zip" "$dir/rclone" "$tmp"
+          else
+            command -v unzip >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -qq unzip >/dev/null
+            unzip -q -o "$tmp/$zip" "$dir/rclone" -d "$tmp"
+          fi; } \
+     && install -m 755 "$tmp/$dir/rclone" /usr/local/bin/rclone; then
+    rm -rf "$tmp"; hash -r
+    ok "rclone $(rclone_version) 已装到 /usr/local/bin/rclone"
+    return 0
+  fi
+  rm -rf "$tmp"
+  warn "官方 rclone 没装上（下载、SHA256 校验或解压失败）；手动装：curl -fsSL https://rclone.org/install.sh -o /tmp/rclone-install.sh && bash /tmp/rclone-install.sh"
+  return 1
 }
 
 # ── HTTP 探测 ───────────────────────────────────────────────

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/09-restore-backup-stack.sh — 在迁入机重建备份依赖和配置
-# VERSION: 2.0.1
+# VERSION: 2.1.0
+# 2.1.0: rclone 改用 ensure_rclone 装官方版（Debian 源的 1.60 下载 OneDrive 报 unauthenticated），不再从 apt 装；apt 安装前说明锁被占用时最多等 5 分钟。
 # 2.0.1: 整理注释并补充目录文档，执行逻辑未变。
 # 不自动安装 cron；业务切换并观察正常后再恢复。
 
@@ -12,11 +13,11 @@ STAGE=${1:-${RESTORE_STAGE:-/root/restore_stage}}
 [ -d "$STAGE" ] || die "暂存目录不存在: $STAGE（先跑 07-restore-containers）"
 
 section "1. 安装依赖"
-DEPS="${BACKUP_DEPS:-rclone p7zip-full rsync msmtp msmtp-mta sqlite3}"
+DEPS="${BACKUP_DEPS:-p7zip-full rsync msmtp msmtp-mta sqlite3}"
 NEED=""
-for p in $DEPS; do dpkg -s "$p" >/dev/null 2>&1 || NEED="$NEED $p"; done
+for p in $DEPS; do [ "$p" = rclone ] && continue; dpkg -s "$p" >/dev/null 2>&1 || NEED="$NEED $p"; done
 if [ -n "$NEED" ]; then
-  log "待装:$NEED"
+  log "待装:$NEED（apt 锁被别的进程占用时最多等 5 分钟）"
   log "（若含 msmtp-mta，它会自动替换掉系统自带的 MTA，这是预期行为）"
   export DEBIAN_FRONTEND=noninteractive
   apt-get -o DPkg::Lock::Timeout=300 update -qq 2>/dev/null
@@ -25,12 +26,13 @@ if [ -n "$NEED" ]; then
 else
   ok "依赖齐全"
 fi
+# rclone 不从 apt 装：发行版源里的旧版下载 OneDrive 会失败，装官方版到 /usr/local/bin（PATH 里优先）
+if ensure_rclone; then log "rclone $(rclone_version)"
+else warn "rclone 装不上官方版（需 ≥ ${RCLONE_MIN_VERSION:-1.75.0}）"; fi
 # 注意：探测版本别用 --version，有些命令（如 7z）不认这个参数会误判为未安装
 for c in rclone rsync msmtp sqlite3 7z; do
   printf '  %-10s %s\n' "$c" "$(command -v "$c" >/dev/null 2>&1 && echo 已装 || echo 缺失)"
 done
-log "提示：包管理器的 rclone 版本可能远旧于原机。它是静态二进制，"
-log "      直接从原机 scp 到 /usr/local/bin/rclone 可保持一致（PATH 里优先）"
 
 section "2. 归位配置文件"
 put() {  # put <暂存内路径> <目标> <权限>

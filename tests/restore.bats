@@ -28,6 +28,8 @@ setup() {
     "MYSQL_DEFAULTS_FILE=/root/.my.cnf" "PANEL_VHOST_DIR=$R/vhost" "PANEL_CERT_DIR=$R/cert" \
     "SVC_VW_DIR=$R/opt/vaultwarden" 'SVC_KOMARI_DATA=""' "BACKUP_DEPS='p7zip-full sqlite3'"
   fake_mysql
+  # 恢复会检查 rclone 版本，缺了或太旧就去官网下载；测试里放一个版本够新的假 rclone（ensure_rclone 另见 rclone.bats）
+  printf '#!/bin/sh\necho "rclone v9.9.9"\n' > /usr/local/bin/rclone; chmod 755 /usr/local/bin/rclone
   # xboard 骨架要从 GitHub 拉；测试里不联网，让它确定地失败
   printf '#!/bin/sh\nexit 1\n' > /usr/local/bin/git; chmod 755 /usr/local/bin/git
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/restore-from-backup.sh — 原机已不在时，用每日加密备份包把新机恢复成原样
-# VERSION: 1.4.0
+# VERSION: 1.5.0
+# 1.5.0: 真机演练发现：备份依赖原先写在装定时任务的步骤里，--drill / --no-cron 时整段跳过，恢复后 msmtp、rclone 都没有（告警发不出、verify-backup-pass 跑不了）；改为任何模式都装。rclone 不再从 apt 装（Debian 12 源是 1.60，下载 OneDrive 报 unauthenticated），改用 ensure_rclone 装官方版；装依赖时说明 apt 锁被占用最多等 5 分钟，不再静默卡住。
 # 1.4.0: 新增 --no-egress：正式恢复也在起容器前拦下容器主动外连（一键迁移的演练用：原机还在服务，新机的容器用同一份数据，会重复给用户发提醒邮件、Komari 看到被控端全离线会告警）；之后不带它的正式恢复起容器前自动撤掉。新增 egress on|off 单独加上 / 撤掉（一键迁移回滚时新机加回）。
 # 1.3.1: vw 与 xboard 两个包带同一个 compose 项目、同一批账号时只按较新的包做一遍（原先锁版本、启动、Xboard 启动后步骤、建账号都做两遍，镜像清单与手动步骤重复，还有 8 行「cp: are the same file」）；被覆盖的库不再报「已恢复过，跳过」；演练时本机本来就有的单元（面板自己的服务）不再说成「隧道等单元」。
 # 1.3.0: 真机演练发现的三处：新布局整棵放回面板 vhost/ 时也检查并重载 nginx（原先只认单个 *.conf，站点全打不开）；Komari 指标库不进包，恢复时建空库并恢复它的账号（原先账号被当成「对恢复的库没有授权」跳过，Komari 起不来）；teardown 认 compose.yaml 与 docker-compose.yml 任一（原先要两个都在，容器一个都没停），停不下就中止、外连限制与库文件都不动。
@@ -135,7 +136,7 @@ fetch_latest() {  # fetch_latest <vw|xboard>：从各远端挑最新的一个下
   dir=${!key:-}
   [ -n "${RCLONE_REMOTES:-}" ] && [ -n "$dir" ] \
     || die "没给包路径。要从云端取 $kind 包，得在 env.conf 填 RCLONE_REMOTES 和 $key；或者先把包下载到本机，把路径传进来"
-  ensure_cmds rclone:rclone
+  ensure_rclone || die "装不上 rclone，没法从云端取包；先手动装官方 rclone，或把包下载到本机再传路径"
   for r in $RCLONE_REMOTES; do
     n=$(rclone lsf "$r:$dir" --include "$pat" 2>/dev/null | sort | tail -1)
     if [ -z "$n" ]; then warn "$r:$dir 里没有 $pat（或连不上）"; continue; fi
@@ -1126,13 +1127,23 @@ restore_cron() {
   else
     manual "备份定时任务没排上：opsget ops/install-backup-cron --apply" "装不上 install-backup-cron（opsget 不可用或拉不到仓库）"
   fi
-  # 备份脚本的依赖（7z、rclone、sqlite3、msmtp）
-  p=""; for s in ${BACKUP_DEPS:-p7zip-full rclone sqlite3 msmtp msmtp-mta}; do dpkg -s "$s" >/dev/null 2>&1 || p="$p $s"; done
+}
+
+# 备份与告警要用的软件（7z、sqlite3、msmtp；rclone 单独装官方版）。任何模式都装：演练机上也要能发告警、
+# 跑 verify-backup-pass；只装软件，不装定时任务，不会往网盘写东西
+backup_deps() {
+  local p="" s
+  for s in ${BACKUP_DEPS:-p7zip-full sqlite3 msmtp msmtp-mta}; do
+    [ "$s" = rclone ] && continue
+    dpkg -s "$s" >/dev/null 2>&1 || p="$p $s"
+  done
   if [ -n "$p" ]; then
-    log "安装备份依赖:$p"
+    log "安装备份依赖:$p（apt 锁被别的进程占用时最多等 5 分钟）"
     # shellcheck disable=SC2086
     DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -qq $p >/dev/null || warn "备份依赖没装全:$p"
   fi
+  ensure_rclone || manual "装官方 rclone（≥ ${RCLONE_MIN_VERSION:-1.75.0}）：curl -fsSL https://rclone.org/install.sh -o /tmp/rclone-install.sh && bash /tmp/rclone-install.sh" \
+                          "备份包不收 rclone 二进制；发行版源里的旧版下载 OneDrive 会失败"
   [ -f /etc/msmtprc ] || manual "告警邮件：/etc/msmtprc 不在本机" "旧版备份包不收它；照原机配置补上后用 opsget ops/mail-doctor --send 验证"
 }
 
@@ -1254,6 +1265,8 @@ apply_all() {
     section "定时任务"
     restore_cron
   fi
+  section "备份依赖"
+  backup_deps
 }
 
 # ── 启动 ────────────────────────────────────────────────────

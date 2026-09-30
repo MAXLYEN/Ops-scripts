@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # backup/newapi-fullbackup.sh — 从汇总机拉取 new-api 数据，生成一致性快照并加密上传
-# VERSION: 1.1.0
+# VERSION: 1.2.0
+# 1.2.0: 包里 RESTORE.md 的起容器改为从 container-inspect.json 生成命令（原先手写示例漏了原机另加的环境变量，如 STREAMING_TIMEOUT；真机演练发现），并写明后台要用正式域名登录、渠道测试失败怎么分辨。
 # 1.1.0: 改为 GFS 分级保留（每小时一次时全留 2 天），防重入锁，包内新增 images.tsv（镜像 digest）。
 # ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_BAK_DIR BACKUP_PASS_FILE MAIL_TO
 # 定时任务调用已安装的本地脚本；SQLite 使用在线备份生成一致性快照。
@@ -264,18 +265,36 @@ cp -a data-rest/. {{DATA_DIR}}/ 2>/dev/null || true
 放回旧的 WAL 文件会让 SQLite 拿到不一致的状态。包里本来就没有这两个文件。
 
 ## 3. 起容器
-镜像 tag 见 `system/image-tag.txt`，完整参数见 `system/container-inspect.json`。
-原始启动命令形如：
+**照原容器的参数起**：镜像 tag 在 `system/image-tag.txt`，环境变量、端口、挂载、重启策略在
+`system/container-inspect.json`。在解包目录里用下面这段从 inspect 生成启动命令，不会漏掉原机另加的
+环境变量（例如 `STREAMING_TIMEOUT`；手写命令漏过，真机演练里发现）：
 
 ```bash
-docker run -d --name {{CONTAINER}} --restart always \
-  -p 127.0.0.1:3000:3000 \
-  -e TZ=UTC \
-  -v {{DATA_DIR}}:/data \
-  calciumion/new-api:<image-tag.txt 里的版本>
+python3 - > run-newapi.sh <<'PY'
+import json, shlex
+c = json.load(open("system/container-inspect.json"))
+c = c[0] if isinstance(c, list) else c
+hc = c["HostConfig"]
+a = ["docker", "run", "-d", "--name", c["Name"].lstrip("/"),
+     "--restart", (hc.get("RestartPolicy") or {}).get("Name") or "always"]
+for port, binds in (hc.get("PortBindings") or {}).items():
+    for b in binds or []:
+        a += ["-p", ((b.get("HostIp") or "") + ":" if b.get("HostIp") else "") + b["HostPort"] + ":" + port.split("/")[0]]
+for e in c["Config"].get("Env") or []:
+    if not e.startswith("PATH="):
+        a += ["-e", e]
+for m in c.get("Mounts") or []:
+    if m.get("Type") == "bind":
+        a += ["-v", m["Source"] + ":" + m["Destination"]]
+a.append(open("system/image-tag.txt").read().strip())
+print(" ".join(shlex.quote(x) for x in a))
+PY
+cat run-newapi.sh     # 核对：镜像是具体版本（不是 latest），端口只绑 127.0.0.1；环境变量里可能有密钥，别贴给别人
+bash run-newapi.sh
 ```
 
-**锁死具体版本号，不要用 :latest** —— 版本漂移后 migration 可能不可逆。
+原机的命令大致是 `docker run -d --name {{CONTAINER}} --restart always -p 127.0.0.1:3000:3000 -e TZ=UTC -v {{DATA_DIR}}:/data calciumion/new-api:<版本>`，
+另加原机设过的环境变量。**锁死具体版本号，不要用 :latest** —— 版本漂移后 migration 可能不可逆。
 
 ## 4. 自检
 ```bash
@@ -301,7 +320,10 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/
 4. Turnstile 站点的 Hostname
 
 ## 6. 恢复后要自己核对的
-- 渠道里的上游 Key 是否还在（加密存于 DB，跟包一起恢复）
+- **后台要用正式域名登录**：人机验证（Turnstile）和通行密钥都绑定了域名，用 `IP:3000` 或 `127.0.0.1:3000`
+  打开登不上；前置机的隧道和 nginx 接好后按正式域名（https）登录，或经 SSH 通道让浏览器把正式域名解析到本机
+- 渠道里的上游 Key 是否还在（加密存于 DB，跟包一起恢复）：管理员在「渠道」逐个点「测试」。失败的分清
+  「地区不支持」（换上游支持的地区）和「key 绑了来源 IP」（去厂商控制台加新落地机的 IP）
 - 令牌是否还有效
 - 额度与速率限制设置
 RESTORE_EOF

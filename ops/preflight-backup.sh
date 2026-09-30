@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/preflight-backup.sh — 检查备份脚本运行前的依赖与配置
-# VERSION: 2.0.2
+# VERSION: 2.1.0
+# 2.1.0: rclone 改用 ensure_rclone 装官方版（缺失或低于 1.75.0 都会装；Debian 源的 1.60 下载 OneDrive 报 unauthenticated），不再从 apt 装；apt 安装前说明锁被占用时最多等 5 分钟，并保留 apt 的报错输出（真机演练里它静默等锁，看起来像卡死）。
 # 2.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: BACKUP_DIRS BACKUP_SCRIPTS
 
@@ -23,14 +24,20 @@ done
 if [ -n "$MISS" ]; then
   warn "缺失:$MISS —— 尝试安装"
   declare -A PKG=( [sqlite3]=sqlite3 [7z]=p7zip-full [mysqldump]=default-mysql-client
-                   [flock]=util-linux [msmtp]=msmtp [rclone]=rclone [curl]=curl )
-  NEED=""; for c in $MISS; do NEED="$NEED ${PKG[$c]:-$c}"; done
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get -o DPkg::Lock::Timeout=300 update -qq 2>/dev/null
-  # shellcheck disable=SC2086
-  apt-get -o DPkg::Lock::Timeout=300 install -y -qq $NEED 2>/dev/null
-  for c in $MISS; do command -v "$c" >/dev/null 2>&1 && ok "$c 已装上" || warn "$c 仍缺失"; done
+                   [flock]=util-linux [msmtp]=msmtp [curl]=curl )
+  NEED=""; for c in $MISS; do [ "$c" = rclone ] && continue; NEED="$NEED ${PKG[$c]:-$c}"; done
+  if [ -n "$NEED" ]; then
+    log "apt 安装:$NEED（apt 锁被别的进程占用时最多等 5 分钟）"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get -o DPkg::Lock::Timeout=300 update -qq 2>/dev/null
+    # shellcheck disable=SC2086
+    apt-get -o DPkg::Lock::Timeout=300 install -y -qq $NEED >/dev/null
+  fi
 fi
+# rclone 另外处理：已装但版本太旧也要换（能列目录、下载 OneDrive 却失败，最难发现）
+ensure_rclone || warn "rclone 不可用，或低于 ${RCLONE_MIN_VERSION:-1.75.0} 且装不上官方版"
+if command -v rclone >/dev/null 2>&1; then printf '  %-12s %s\n' "rclone 版本" "$(rclone_version)"; fi
+for c in $MISS; do command -v "$c" >/dev/null 2>&1 && ok "$c 已装上" || warn "$c 仍缺失"; done
 
 section "2. 备份脚本声明的依赖"
 for s in $BACKUP_SCRIPTS; do
