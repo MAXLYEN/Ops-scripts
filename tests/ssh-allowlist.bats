@@ -141,6 +141,71 @@ tagged() { grep -c "comment 'ssh-allowlist'" "$S/rules"; }
   [ ! -e "$PENDING" ]
 }
 
+@test "--add：规范后写进 ADMIN_IPS（留 .bak）再执行；已在名单里的、认不出的、太宽的都拒绝" {
+  sa --add 198.51.100.99
+  grep -qx 'ADMIN_IPS="198.51.100.7 198.51.100.64/26 198.51.100.99"' /etc/ops-scripts/env.conf
+  ls /etc/ops-scripts/env.conf.bak.* >/dev/null
+  grep -qxF "ufw allow from 198.51.100.99 to any port 59967 proto tcp comment 'ssh-allowlist'" "$S/rules"
+  [ -e "$PENDING" ]
+  has "ssh-allowlist.sh --confirm"
+  sa --confirm
+  cp /etc/ops-scripts/env.conf "$S/env.before"
+  sa --add 198.51.100.99
+  [ "$status" -ne 0 ]; has "已经在名单里"
+  sa --add 0.0.0.0/0
+  [ "$status" -ne 0 ]; has "网段太宽"
+  sa --add bogus
+  [ "$status" -ne 0 ]; has "认不出的地址"
+  cmp /etc/ops-scripts/env.conf "$S/env.before"
+}
+
+@test "--remove：从 ADMIN_IPS、ALLOW_EXTRA_IPS、机群清单里一并去掉（各留 .bak）；机群与 LLM 白名单给提示；不能删当前来源" {
+  sa --apply; sa --confirm
+  sa --remove 203.0.113.21
+  none '203.0.113.21' "$(cat /root/.vps-hosts.txt)"
+  grep -qx 'root@203.0.113.22:60690' /root/.vps-hosts.txt
+  ls /root/.vps-hosts.txt.bak.* >/dev/null
+  has "是 ~/.vps-hosts.txt 里的机器"
+  none 'from 203.0.113.21 ' "$(cat "$S/rules")"
+  sa --confirm
+  sa --remove 192.0.2.10
+  grep -qx 'ALLOW_EXTRA_IPS="198.51.100.7"' /etc/ops-scripts/env.conf
+  has "opsget ops/sync-llm-allowlist"
+  sa --confirm
+  cp /etc/ops-scripts/env.conf "$S/env.before"
+  sa --remove 198.51.100.7
+  [ "$status" -ne 0 ]; has "是你当前会话的来源"
+  cmp /etc/ops-scripts/env.conf "$S/env.before"
+}
+
+@test "菜单：新增 → 确认执行 → 新窗口能登录输 yes，保留并取消定时回滚" {
+  drive "bash $SRC/ops/ssh-allowlist.sh" 1 198.51.100.99 yes yes
+  has "[1] 新增  [2] 删除"
+  grep -q '198.51.100.99' /etc/ops-scripts/env.conf
+  grep -qF 'from 198.51.100.99 ' "$S/rules"
+  has "已取消自动回滚，新规则保留"
+  [ ! -e "$PENDING" ]
+}
+
+@test "菜单：按编号删除；新窗口登不上输别的，当场回滚" {
+  drive "bash $SRC/ops/ssh-allowlist.sh" 2 4 yes no
+  has "从 机群 里去掉 203.0.113.21"
+  has "已回滚到执行前的规则"
+  grep -q 'ufw reload' "$S/calls"
+  [ "$(cat /etc/ufw/user.rules)" = ORIGINAL4 ]
+  grep -qx 'root@203.0.113.21:22' /root/.vps-hosts.txt     # 顺带改过的机群清单也改回去了
+  has "也改回去了"
+  [ ! -e "$PENDING" ]
+}
+
+@test "菜单：不确认就什么都不写" {
+  cp /etc/ops-scripts/env.conf "$S/env.before"; cp "$S/rules" "$S/before"
+  drive "bash $SRC/ops/ssh-allowlist.sh" 1 198.51.100.99 no
+  cmp /etc/ops-scripts/env.conf "$S/env.before"
+  cmp "$S/rules" "$S/before"
+  [ ! -e "$PENDING" ]
+}
+
 @test "认不出的地址与太宽的网段跳过并告警，不写进规则" {
   env_conf 'ADMIN_IPS="198.51.100.7 0.0.0.0/0 not-an-ip"'
   sa --apply
