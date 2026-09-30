@@ -76,9 +76,9 @@ opsget ops/litellm-drill teardown <备用机IP>           # 删掉演练实例�
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `apply-newapi-quota-fix.sh` | 1.3.0 | 停止 new-api 后修正消费统计并校验回传；`--dry-run` 只拉在线备份副本预演 |
+| `apply-newapi-quota-fix.sh` | 1.3.1 | 停止 new-api 后修正消费统计并校验回传；`--dry-run` 在在线备份的副本上完整演练 |
 | `fix-newapi-fallback-quota.sh` | 1.0.1 | 修正 new-api 兜底倍率造成的虚高消费 |
-| `fix-newapi-quota-data.sh` | 1.0.1 | 按已修正的日志重算 new-api 配额统计 |
+| `fix-newapi-quota-data.sh` | 1.1.0 | 按已修正的日志重算 new-api 配额统计（按组合汇总核对，兼容拆行） |
 | `fix-newapi-reprice.sh` | 1.0.0 | 按后台当前价格重算指定模型的历史消费（日志、用户、令牌） |
 | `newapi-drill.sh` | 1.0.4 | 在备用机演练 new-api 备份的恢复与清理 |
 | `newapi-linkcheck.sh` | 1.0.3 | 检查 new-api 隧道和公网访问全链路 |
@@ -95,7 +95,7 @@ opsget ops/litellm-drill teardown <备用机IP>           # 删掉演练实例�
 
 `cleanup-tidy.sh`、`cleanup-purge.sh` 和 `bind-localhost.sh` 默认先预演，带 `--apply` 才执行。涉及数据库修正的 `fix-newapi-*.sh` 应在容器停止并完成备份后使用；`apply-newapi-quota-fix.sh` 串联停服、拉库、修正、校验和恢复。
 
-改了模型价格、要把历史消费按新价格重算时：先 `apply-newapi-quota-fix.sh --reprice <模型1,模型2> --align-tokens --dry-run` 预演（在线备份一份副本来算，不停容器），看过明细再去掉 `--dry-run` 执行。价格从库里读（表达式计费 → 按次价格 → 倍率，与 new-api 的优先级相同），不写死在脚本里；动手前先用每条表达式计费日志自带的表达式重算、与实际扣费比对，对不上超过 2% 就拒绝。仍按兜底倍率 37.5 计费的记录一起按其模型的当前价格重算，模型没有价格时用 `--map 旧名=参考名` 指定。用户额度只改「已用额度原本等于日志合计」的用户（只有渠道测试记录的管理员不改）；`--align-tokens` 把令牌已用额度对齐到它名下日志的合计，日志被清理过的库不要用。灾难恢复演练 `newapi-drill.sh`、`litellm-drill.sh` 只在备用机运行，并拒绝生产目标。
+改了模型价格、要把历史消费按新价格重算时：先 `apply-newapi-quota-fix.sh --reprice <模型1,模型2> --align-tokens --dry-run` 预演（在线备份一份副本，在副本上把修正、看板表重算和传回前的全部校验完整跑一遍，不停容器），看过明细再去掉 `--dry-run` 执行。价格从库里读（表达式计费 → 按次价格 → 倍率，与 new-api 的优先级相同），不写死在脚本里；动手前先用每条表达式计费日志自带的表达式重算、与实际扣费比对，对不上超过 2% 就拒绝。仍按兜底倍率 37.5 计费的记录一起按其模型的当前价格重算，模型没有价格时用 `--map 旧名=参考名` 指定。用户额度只改「已用额度原本等于日志合计」的用户（只有渠道测试记录的管理员不改）；`--align-tokens` 把令牌已用额度对齐到它名下日志的合计，日志被清理过的库不要用。灾难恢复演练 `newapi-drill.sh`、`litellm-drill.sh` 只在备用机运行，并拒绝生产目标。
 
 `containerize-and-pin.sh` 保留改名前的旧容器以便回滚，并锁定当前镜像 digest，不执行升级。`deploy-litellm.sh` 将容器端口绑定本机；加入模型后 `LITELLM_SALT_KEY` 必须保持不变，丢失该密钥将无法解开已加密的凭据；它随 `backup/litellm-fullbackup` 的加密包备份（包里的 `workdir/.env`）。`panel-backup-upload.sh` 默认用 7z 加密，`--raw` 会上传未加密原包；`--prune N` 只清理本机上传台账 `/var/lib/ops-scripts/panel-backup-uploaded.list` 里的包，不碰其他服务器的文件。`ssh-allowlist.sh` 的名单是 `~/.vps-hosts.txt` 里的机器、`ADMIN_IPS`、`ALLOW_EXTRA_IPS`（与 `sync-llm-allowlist` 同一套来源），按 `sshd -T` 的端口加 `ufw allow from <IP> ... comment 'ssh-allowlist'`，加完才删不限来源的 allow / limit 规则；只增删自己打过注释的规则，其他端口不动。在终端里直接运行进菜单：带编号列出名单，选新增（写进 `ADMIN_IPS`）或删除（从 `ADMIN_IPS`、`ALLOW_EXTRA_IPS`、`~/.vps-hosts.txt` 里一并去掉，机群里的机器会提示其他脚本也在用），先看改完的防火墙变化、确认后才写配置并执行，执行后当场问新窗口能不能登录：输 `yes` 保留，输别的或 270 秒内不输就回滚防火墙、这次改的配置也改回（运行菜单的窗口断了时，定时回滚与 `--rollback` 同样连配置一起改回；新窗口能登录就在新窗口里 `--confirm`）；不能删当前会话的来源。命令行等价写法 `--add <IP>` / `--remove <IP>`，没有终端时（或 `--preview`）只预演；`--apply` 前备份 `/etc/ufw/user*.rules` 到 `/root/ops-backups/ufw.<时间>` 并用 `systemd-run` 布置 5 分钟后自动回滚，另开窗口登录成功后 `--confirm` 取消，`--rollback` 立即回滚。当前会话的来源 IP 不在名单里时拒绝执行；有一条放行没加上时不删全开的规则。`panel-backup-create.sh` 由 `install-backup-cron` 排在每周日 UTC 19:30：复制面板「设置 → 备份还原」里最近一次备份的任务配置（备份内容一致）、换新时间戳，前台运行面板自带的 `backup_manager.py backup_data`，出了包再交给 `panel-backup-upload --prune`；本机按时间戳只留最近 `PANEL_BACKUP_KEEP` 份（包、工作目录、面板里的任务记录一起删，面板手动建的也算在内）。面板里至少要手动建过一次备份，它照那次勾选的内容备份；失败时告警、心跳 `/fail`，本机旧包不动。`cleanup-purge.sh` 默认保留 crontab 正在调用的脚本、`BACKUP_SCRIPTS` 及它们依赖的 `env.conf` 与 `ops-common.sh`，`PURGE_CRON_SCRIPTS=1` 才一并删除。
 

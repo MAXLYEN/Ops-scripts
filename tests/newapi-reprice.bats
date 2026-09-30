@@ -1,11 +1,14 @@
 #!/usr/bin/env bats
-# tests/newapi-reprice.bats — 真跑 ops/fix-newapi-reprice 与一个按 new-api rc.38 表结构造的 SQLite 库。
+# tests/newapi-reprice.bats — 真跑 ops/fix-newapi-reprice、ops/fix-newapi-quota-data 与一个按 new-api rc.38 表结构造的 SQLite 库。
 # 期望值都是手算的（见每条日志旁的注释），不复用脚本里的公式。
 # 能证明：表达式计费与倍率计费的重算、p 扣除缓存命中、按日志时间分忙时 / 闲时、兜底记录与 --map、
-#         用户只改原本对得上的、令牌加差额或对齐日志、自检对不上就拒绝、重复执行不再变化、预演不写库。
-# 证明不了：真实 new-api 读到改过的库之后的显示与行为（要在生产上用 --dry-run 看明细、改完到面板核对）。
+#         用户只改原本对得上的、令牌加差额或对齐日志、自检对不上就拒绝、重复执行不再变化、预演不写库；
+#         quota_data 同一组合拆成多行（节点名不同）时按组合汇总核对、差额落到最大的一行，真对不上或会出负数时拒绝。
+# 证明不了：真实 new-api 读到改过的库之后的显示与行为（要在生产上用 --dry-run 演练、改完到面板核对）；
+#         apply-newapi-quota-fix 的 SSH、停容器、传回（只在生产上验证）。
 
 S=/src/ops/fix-newapi-reprice.sh
+QD=/src/ops/fix-newapi-quota-data.sh
 D=/tmp/reprice
 DB=$D/one-api.db
 MODELS=qwen3.8-flash,glm-5.3,deepseek-v4-pro-0813
@@ -167,4 +170,92 @@ state() { q "SELECT group_concat(id||':'||quota) FROM (SELECT id, quota FROM log
   echo "$output"
   [ "$status" -ne 0 ]
   [[ "$output" == *"qwen3.8-flash"*"表达式不支持"* ]]
+}
+
+# ── quota_data（看板聚合表） ─────────────────────────────────
+# qd_seed：换成 rc.38 的完整 quota_data 表，按「小时+用户+模型+渠道+令牌」从日志聚合出一行一组合；
+# 再给 deepseek 那一小时补一条日志（id 11），让该组合拆成两行（节点名 n1 / n2），像容器重建后那样。
+qd_seed() {
+  python3 - "$DB" <<'PY'
+import calendar, json, sqlite3, sys, time
+c = sqlite3.connect(sys.argv[1])
+T = lambda s: calendar.timegm(time.strptime(s, "%Y-%m-%d %H:%M"))
+# 11：北京 10:10 忙时，(1000+100×2.285714)×0.175=215.0 → 215；新价 1000×1.335331+100×4.005994=1735.93 → 868
+o = {"model_ratio": 0.175, "completion_ratio": 2.285714, "cache_ratio": 0.028571, "model_price": -1,
+     "cache_tokens": 0, "group_ratio": 1, "user_group_ratio": -1}
+c.execute("INSERT INTO logs VALUES(11,2,?,2,'','deepseek-v4-pro-0813',215,1000,100,8,1,?)",
+          (T("2026-09-29 02:10"), json.dumps(o, separators=(",", ":"))))
+c.execute("UPDATE users SET used_quota = used_quota + 215 WHERE id=2")
+c.execute("UPDATE tokens SET used_quota = used_quota + 215 WHERE id=1")
+c.executescript('''
+DROP TABLE quota_data;
+CREATE TABLE quota_data(id integer primary key, user_id int, username text, model_name text, created_at int,
+  use_group text, token_id int, channel_id int, node_name text, token_used int, count int, quota int);
+INSERT INTO quota_data(user_id, username, model_name, created_at, use_group, token_id, channel_id, node_name, token_used, count, quota)
+  SELECT user_id, 'u', model_name, (created_at/3600)*3600, 'default', token_id, channel_id, 'n1',
+         SUM(prompt_tokens+completion_tokens), COUNT(*), SUM(quota)
+  FROM logs WHERE type=2 AND id <> 11 GROUP BY 1,3,4,6,7,8 ORDER BY MIN(id);
+''')
+# id 11 单独进一行 n2：同一组合拆成两行
+c.execute("INSERT INTO quota_data(user_id, username, model_name, created_at, use_group, token_id, channel_id, node_name, token_used, count, quota) "
+          "VALUES(2,'u','deepseek-v4-pro-0813',?,'default',1,8,'n2',1100,1,215)", ((T("2026-09-29 02:10") // 3600) * 3600,))
+c.commit()
+PY
+}
+MAPARG="--map deepseek-v4-1-flash-260910=deepseek-v4.1-flash"
+
+@test "quota_data：同一组合拆成两行时按组合核对，差额落到额度大的那行，改完与日志一致" {
+  qd_seed
+  bash "$S" "$DB" "$MODELS" --apply --align-tokens $MAPARG
+  run bash "$QD" "$DB"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"拆成多行的组合: 1"* ]]
+  [[ "$output" == *"试运行结束，未写库"* ]]
+  run bash "$QD" "$DB" --apply
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"两表差额: 0"*"仍有差额的组合: 0"* ]]
+  # 组合原合计 2600+215=2815，新合计 14689+868=15557，差额 12742 落到 n1（原 2600，较大）
+  [ "$(q "SELECT group_concat(node_name||':'||quota||':'||count, ',') FROM (SELECT * FROM quota_data WHERE model_name='deepseek-v4-pro-0813' AND channel_id=8 AND created_at=(SELECT (created_at/3600)*3600 FROM logs WHERE id=3) ORDER BY node_name)")" = "n1:15342:1,n2:215:1" ]
+  [ "$(q "SELECT (SELECT SUM(quota) FROM quota_data) - (SELECT SUM(quota) FROM logs WHERE type=2)")" = 0 ]
+  # 用户 2 的日志多了 11 号（+868），仍与日志一致
+  [ "$(q "SELECT used_quota FROM users WHERE id=2")" = "$(q "SELECT SUM(quota) FROM logs WHERE type=2 AND user_id=2")" ]
+}
+
+@test "quota_data：组合的次数真对不上时拒绝，并列出是哪个组合" {
+  qd_seed
+  q "UPDATE quota_data SET count = count + 1 WHERE node_name='n2'"
+  before=$(sha256sum "$DB")
+  run bash "$QD" "$DB" --apply
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"次数不一致的组合: 1"* && "$output" == *"deepseek-v4-pro-0813"* && "$output" == *"中止"* ]]
+  [ "$(sha256sum "$DB")" = "$before" ]
+}
+
+@test "quota_data：日志有而看板没有的组合拒绝（不凭空造行）" {
+  qd_seed
+  q "DELETE FROM quota_data WHERE model_name='gpt-6-sol'"
+  bash "$S" "$DB" "$MODELS" --apply --align-tokens $MAPARG    # 有差额要写，才能看出是不是在写之前就拦下
+  before=$(sha256sum "$DB")
+  run bash "$QD" "$DB" --apply
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"日志有、看板没有的组合: 1"* && "$output" == *"中止"* ]]
+  [ "$(sha256sum "$DB")" = "$before" ]
+}
+
+@test "quota_data：差额比承担行还大、改完会出负数时拒绝" {
+  qd_seed
+  # doubao 兜底那一组合拆成 30000 + 22275 两行（次数 1 + 0），重算后合计 580，差额 -51695 落到 30000 那行会变负
+  q "UPDATE quota_data SET quota=30000 WHERE model_name='doubao-seed-2-1-pro'"
+  q "INSERT INTO quota_data(user_id, username, model_name, created_at, use_group, token_id, channel_id, node_name, token_used, count, quota) SELECT user_id, username, model_name, created_at, use_group, token_id, channel_id, 'n2', 0, 0, 22275 FROM quota_data WHERE model_name='doubao-seed-2-1-pro'"
+  bash "$S" "$DB" "$MODELS" --apply --align-tokens $MAPARG
+  before=$(sha256sum "$DB")
+  run bash "$QD" "$DB" --apply
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"出现负数"* ]]
+  [ "$(sha256sum "$DB")" = "$before" ]
 }

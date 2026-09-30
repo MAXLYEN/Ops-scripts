@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # ops/apply-newapi-quota-fix.sh — 停止 new-api 后修正消费统计并校验回传
-# VERSION: 1.3.0
+# VERSION: 1.3.1
+# 1.3.1: --dry-run 改为在副本上完整演练：修正、quota_data 重算、传回前的全部校验都跑一遍（原来只跑修正脚本的试运行，
+#        1.3.0 在生产上正式执行时才在 quota_data 一步失败）。修正与校验合并成 repair，预演与执行走同一段代码。
 # 1.3.0: 新增 --reprice <模型列表>：按后台当前价格重算这些模型的历史消费（fix-newapi-reprice.sh，含兜底记录、用户、令牌），
 #        可带 --align-tokens、--map；新增 --dry-run：用在线备份拉一份副本预演，不停容器、不改任何东西。
 #        汇总机本机装了 newapi-fullbackup.sh 时，改库前先用 cron 的同一把锁跑一次备份。
@@ -56,6 +58,28 @@ fix() {
   fi
 }
 
+# repair <库>：修正 → 重算 quota_data → 传回前校验。任何一步失败返回非 0，原因在 REPAIR_ERR
+REPAIR_ERR=""
+repair() {
+  local db=$1 r left diff td
+  if [ "$MODE" = reprice ]; then log "  修正：按当前价格重算（logs + users + tokens）"; else log "  修正：兜底倍率（logs + users）"; fi
+  fix "$db" --apply || { REPAIR_ERR="修正失败"; return 1; }
+  log "  修正：quota_data 看板聚合表"
+  "$FIXER2" "$db" --apply || { REPAIR_ERR="看板表修正失败"; return 1; }
+  log "  校验"
+  r=$(sqlite3 "$db" 'PRAGMA integrity_check;')
+  [ "$r" = "ok" ] || { REPAIR_ERR="完整性校验失败：$r"; return 1; }
+  left=$(sqlite3 "$db" "SELECT COUNT(*) FROM logs WHERE type=2 AND other LIKE '%\"model_ratio\":37.5%';")
+  [ "$left" = 0 ] || { REPAIR_ERR="仍有 ${left} 条兜底记录"; return 1; }
+  diff=$(sqlite3 "$db" "SELECT (SELECT SUM(quota) FROM quota_data) - (SELECT SUM(quota) FROM logs WHERE type=2);")
+  [ "$diff" = 0 ] || { REPAIR_ERR="quota_data 与 logs 总额差 ${diff}"; return 1; }
+  if [ -n "$ALIGN" ]; then
+    td=$(sqlite3 "$db" "SELECT COUNT(*) FROM tokens t WHERE t.used_quota <> (SELECT COALESCE(SUM(quota),0) FROM logs l WHERE l.type=2 AND l.token_id=t.id);")
+    [ "$td" = 0 ] || { REPAIR_ERR="${td} 个令牌的已用额度与日志合计不等"; return 1; }
+  fi
+  log "  校验通过：完整性 ok、兜底记录 0、看板与日志总额一致${ALIGN:+、令牌与日志一致}"
+}
+
 if [ "$MODE" = reprice ]; then
   [ -x "$FIXER3" ] || die "找不到 $FIXER3（先 opsget -i ops/fix-newapi-reprice）"
 else
@@ -77,11 +101,11 @@ if [ "$DRY" = 1 ]; then
   scp -q -P "$JP_PORT" "${JP_HOST}:${TMPDB}" "${W}/preview.db"; RC=$?
   $SSH "rm -f '${TMPDB}'"
   [ "$RC" = 0 ] || die "拉取副本失败"
-  log "  副本 $(du -h "${W}/preview.db" | cut -f1)，开始试运行"
+  log "  副本 $(du -h "${W}/preview.db" | cut -f1)，在副本上完整演练（修正 + 看板表 + 传回前校验）"
   echo
-  fix "${W}/preview.db" || die "试运行未通过（见上面的 [!!]），没有改动任何东西"
+  repair "${W}/preview.db" || die "演练未通过：${REPAIR_ERR}。没有停容器，也没有改落地机上的库"
   echo
-  log "预演结束：没有停容器，也没有改落地机上的库。副本留在 ${W}/preview.db"
+  log "预演通过：修正与全部校验都成功。没有停容器，也没有改落地机上的库。演练后的副本在 ${W}/preview.db"
   exit 0
 fi
 
@@ -124,29 +148,14 @@ scp -P "$JP_PORT" "${JP_HOST}:${JP_DIR}/one-api.db" "${W}/one-api.db" || {
 cp -a "${W}/one-api.db" "${W}/one-api.db.before"
 log "  拉回 $(du -h "${W}/one-api.db" | cut -f1)，改动前副本已留存"
 
-# 3. 修正
-if [ "$MODE" = reprice ]; then log "3/5 按当前价格重算（logs + users + tokens）"; else log "3/5 执行修正（logs + users）"; fi
-fix "${W}/one-api.db" --apply || {
-  $SSH "docker start ${CT}"; die "修正失败，落地机上的库未被改动，容器已重启"
+# 3. 修正并校验
+log "3/5 修正并校验"
+repair "${W}/one-api.db" || {
+  $SSH "docker start ${CT}"; die "${REPAIR_ERR}，未传回；落地机上的库未被改动，容器已重启"
 }
 
-log "3b/5 执行修正（quota_data 看板聚合表）"
-"$FIXER2" "${W}/one-api.db" --apply || {
-  $SSH "docker start ${CT}"; die "看板表修正失败，落地机上的库未被改动，容器已重启"
-}
-
-# 4. 校验后传回
-log "4/5 校验并传回"
-R=$(sqlite3 "${W}/one-api.db" 'PRAGMA integrity_check;')
-[ "$R" = "ok" ] || { $SSH "docker start ${CT}"; die "完整性校验失败：$R，未传回"; }
-LEFT=$(sqlite3 "${W}/one-api.db" "SELECT COUNT(*) FROM logs WHERE type=2 AND other LIKE '%\"model_ratio\":37.5%';")
-[ "$LEFT" = 0 ] || { $SSH "docker start ${CT}"; die "仍有 ${LEFT} 条兜底记录，未传回"; }
-DIFF=$(sqlite3 "${W}/one-api.db" "SELECT (SELECT SUM(quota) FROM quota_data) - (SELECT SUM(quota) FROM logs WHERE type=2);")
-[ "$DIFF" = 0 ] || { $SSH "docker start ${CT}"; die "quota_data 与 logs 总额差 ${DIFF}，未传回"; }
-if [ -n "$ALIGN" ]; then
-  TD=$(sqlite3 "${W}/one-api.db" "SELECT COUNT(*) FROM tokens t WHERE t.used_quota <> (SELECT COALESCE(SUM(quota),0) FROM logs l WHERE l.type=2 AND l.token_id=t.id);")
-  [ "$TD" = 0 ] || { $SSH "docker start ${CT}"; die "${TD} 个令牌的已用额度与日志合计不等，未传回"; }
-fi
+# 4. 传回
+log "4/5 传回"
 
 # 删 -wal 前再确认一次为空：第 2 步之后若有别的进程写过库，这里会拦下
 $SSH "[ ! -s ${JP_DIR}/one-api.db-wal ] && cp -a ${JP_DIR}/one-api.db ${JP_DIR}/one-api.db.bak-${TS} && rm -f ${JP_DIR}/one-api.db-wal ${JP_DIR}/one-api.db-shm" \
