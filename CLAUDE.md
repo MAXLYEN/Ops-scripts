@@ -34,3 +34,8 @@ MSYS_NO_PATHCONV=1 wsl.exe -d Debian -u root --cd /mnt/d/Projects/Github/Ops-scr
 - 需要配置的脚本声明 `# ENV-REQUIRED:`，键必须在 `config/env.example.conf` 里
 - 新增脚本：加进 `MANIFEST`，并在 `bin/opsbox` 登记进菜单或写 `# MENU-EXCLUDE:` 说明原因（lint 会检查）
 - cron 只调用本地已安装脚本，不调用 `opsget`
+
+## 跨项目修改
+
+- 本会话只修改本项目目录内的文件。需要改其他项目（D:\Projects 下的兄弟仓库、server-inventory、工作区 D:\Projects\README.md 等）时，不直接改，把任务连同背景、依据和验证步骤发给该项目的 Claude 会话处理（用 list_sessions 按 cwd 找）；没有对应会话时先问用户。读取其他项目作参考不受限。（用户 2026-09-30 要求，所有项目统一此约定）
+- 例如发版后要更新 server-inventory 的 `services/ops-scripts.md`，发给 server-inventory 的会话去改
