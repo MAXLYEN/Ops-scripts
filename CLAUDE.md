@@ -39,3 +39,4 @@ MSYS_NO_PATHCONV=1 wsl.exe -d Debian -u root --cd /mnt/d/Projects/Github/Ops-scr
 
 - 本会话只修改本项目目录内的文件。需要改其他项目（D:\Projects 下的兄弟仓库、server-inventory、工作区 D:\Projects\README.md 等）时，不直接改，把任务连同背景、依据和验证步骤发给该项目的 Claude 会话处理（用 list_sessions 按 cwd 找）；没有对应会话时先问用户。读取其他项目作参考不受限。（用户 2026-09-30 要求，所有项目统一此约定）
 - 例如发版后要更新 server-inventory 的 `services/ops-scripts.md`，发给 server-inventory 的会话去改
+- 有问必有答：收到其他会话发来的任务，必须回复发送方（SendMessage 到消息的 from 地址）：完成时报结果（改了什么、提交号、验证结果），受阻或需要用户确认时也要回复说明卡在哪里，不能只做不回或不做不回。发出任务的一方要跟进到收到回复为止。（用户 2026-09-30 要求）
