@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.2.7
+# VERSION: 1.2.8
+# 1.2.8: warn 记下每条告警原文，finish 在「完成（N 条告警）」下面再列一遍（只累加了 OPS_WARNINGS、没走 warn 的，另起一行说明条数）。真机演练的 teardown 报了 1 条告警，原文滚出了屏幕，事后查不到是哪条。
 # 1.2.7: 新增 ensure_rclone（缺失或低于 1.75.0 时装官方版到 /usr/local/bin/rclone，按 SHA256SUMS 校验）与 rclone_version、ver_ge。真机演练发现 Debian 源的 rclone 1.60 下载 OneDrive 报 unauthenticated。
 # 1.2.6: 新增 is_yes，confirm 改用它：处理退格、去掉首尾空白（含回车、全角空格）、全角转半角、不分大小写后等于 yes 才算同意（生产机上输了 yes 却被当成取消）；空输入、y 仍然不算。
 # 1.2.5: 收面板的项目类站点目录 /www/server/*_project（反向代理项目等的记录，每个 ≤5MB；超过的记进 rootfs-skipped）。真机演练发现：不收的话 nginx 照常转发，面板里却看不到、改不了这些站点。
@@ -13,7 +14,7 @@ set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 # shellcheck disable=SC2034  # 供调用方查询公共库版本
-OPS_COMMON_VERSION="1.2.7"
+OPS_COMMON_VERSION="1.2.8"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
@@ -21,19 +22,25 @@ OPS_COMMON_VERSION="1.2.7"
 _ts() { date -u '+%F %T'; }
 log()  { printf '[%s] %s\n'        "$(_ts)" "$*"; }
 ok()   { printf '[%s] [OK]   %s\n' "$(_ts)" "$*"; }
-warn() { printf '[%s] [警告] %s\n' "$(_ts)" "$*" >&2; OPS_WARNINGS=$((OPS_WARNINGS+1)); }
+warn() { printf '[%s] [警告] %s\n' "$(_ts)" "$*" >&2; OPS_WARNINGS=$((OPS_WARNINGS+1)); OPS_WARN_LIST+=("$*"); }
 die()  { printf '[%s] [致命] %s\n' "$(_ts)" "$*" >&2; exit 1; }
 OPS_WARNINGS=0
+OPS_WARN_LIST=()
 
 section() { printf '\n===== %s =====\n' "$*"; }
 
-# 汇总退出：有告警时以非零码退出，便于 cron 判断
+# 汇总退出：有告警时以非零码退出，便于 cron 判断；告警原文在末尾再列一遍
 finish() {
   printf '\n'
   if [ "$OPS_WARNINGS" -eq 0 ]; then
     log "完成（0 告警）"
   else
     log "完成（${OPS_WARNINGS} 条告警）"
+    # 告警早早滚出屏幕时，收尾处还能看到是哪几条
+    local w
+    for w in "${OPS_WARN_LIST[@]}"; do printf '  - %s\n' "$w"; done
+    [ "$OPS_WARNINGS" -le "${#OPS_WARN_LIST[@]}" ] \
+      || printf '  （另有 %d 条只计了数，原文见上面的输出）\n' "$((OPS_WARNINGS - ${#OPS_WARN_LIST[@]}))"
     return 1
   fi
 }

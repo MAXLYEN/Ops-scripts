@@ -462,8 +462,10 @@ litellm-fullbackup.sh
 演练恢复的命令：
 
 ```bash
-time restore-from-backup.sh restore /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7z --drill
+time restore-from-backup.sh restore /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7z --drill 2>&1 | tee /root/drill-restore.log
 ```
+
+演练里的每个脚本都用 `2>&1 | tee /root/drill-<步骤>.log` 留一份完整输出。告警原文会在收尾的「完成（N 条告警）」下面再列一遍（公共库 1.2.8 起），但前面的明细只在日志里；终端往回翻不到，机器一销毁就没了（2026-09-30 的演练里 teardown 报了 1 条告警，事后查不到是哪条）。
 
 要检查的：Vaultwarden 能登录、密码条目都在；XBoard 后台能登录，用户和节点都在；宝塔面板能登录，站点和反向代理都在；Komari 能打开，服务器列表都在。另外再跑一次 `opsget migrate/08-post-start-check`。
 
@@ -519,12 +521,12 @@ time restore-from-backup.sh restore /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7
 **结束：**
 
 ```bash
-restore-from-backup.sh teardown
+restore-from-backup.sh teardown 2>&1 | tee /root/drill-teardown.log
 ```
 
-然后在商家后台**销毁这台机器**。
+先把日志取回电脑（`scp -P <SSH端口> 'root@演练机IP:/root/drill-*.log' .`），确认收尾处列出的告警都看过了，再在商家后台**销毁这台机器**。
 
-**记下来**：日期、总耗时（从开机器到服务能用）、脚本列出的手动步骤、遇到的问题。
+**记下来**：日期、总耗时（从开机器到服务能用）、脚本列出的手动步骤、遇到的问题、各步骤的告警原文。
 
 **LiteLLM 单独演练**：不用开整套大演练，有一台空闲机器就行。首次上线 LiteLLM 备份后做一次，之后每季度、或改了 LiteLLM 部署之后做一次。在前置机上：
 

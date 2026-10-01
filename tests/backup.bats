@@ -348,6 +348,22 @@ EOF
   done
 }
 
+@test "finish：收尾时把告警原文再列一遍（滚出屏幕也查得到）；只计数没留原文的另起一行说明" {
+  run bash -c '. /src/lib/common.sh; warn "MySQL 不可用"; ok 中间; warn "拒绝删除 /opt"; finish'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"完成（2 条告警）"* ]]
+  local tail_; tail_=${output#*完成（2 条告警）}
+  [[ "$tail_" == *"  - MySQL 不可用"* ]]
+  [[ "$tail_" == *"  - 拒绝删除 /opt"* ]]
+  [[ "$tail_" != *"另有"* ]]
+  run bash -c '. /src/lib/common.sh; warn 甲; OPS_WARNINGS=$((OPS_WARNINGS+1)); finish'
+  [ "$status" -eq 1 ]
+  [[ "${output#*完成（2 条告警）}" == *"  - 甲"*"另有 1 条只计了数"* ]]
+  run bash -c '. /src/lib/common.sh; ok 好; finish'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"完成（0 告警）" ]]
+}
+
 @test "init/ 各脚本自带的 is_yes 与 lib/common.sh 的一模一样（它们不依赖公共库，只能各放一份）" {
   fn() { sed -n '/^is_yes() {/,/^}/p' "$1"; }
   [ -n "$(fn /src/lib/common.sh)" ]
