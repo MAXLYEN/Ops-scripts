@@ -128,20 +128,38 @@ PY
   none '/fail' "$(cat "$L/curl.log")"
 }
 
-@test "本机只留最近 3 份（包、工作目录、任务记录一起删，面板手动建的也算）；云端每个网盘也只留 3 份" {
+@test "本机自动备份只留最近 3 份（包、工作目录、任务记录一起删）；面板手动建的不动；云端每个网盘也只留 3 份" {
+  task 1790000000 '备份-2026-09-01-0900'          # 另一条手动建的，比自动备份都旧
+  task 1790000001 '自动备份-2026-09-02-0000'; task 1790000002 '自动备份-2026-09-03-0000'; task 1790000003 '自动备份-2026-09-04-0000'
+  create
+  [ "$status" -eq 0 ]
+  [ ! -e "$BR/20260101-0000_1790000001_backup.tar.gz" ] && [ ! -e "$BR/1790000001_backup" ]
+  for t in 1790000002 1790000003 1790000000 1790642642; do
+    [ -e "$BR/20260101-0000_${t}_backup.tar.gz" ] && [ -d "$BR/${t}_backup" ]
+  done
+  python3 - "$BR/backup_task.json" <<'PY'
+import json, sys
+names = [t['backup_name'] for t in json.load(open(sys.argv[1]))]
+assert '备份-2026-09-01-0900' in names and '备份-2026-09-28-1743' in names, names
+assert '自动备份-2026-09-02-0000' not in names, names
+assert sum(n.startswith('自动备份-') for n in names) == 3 and len(names) == 5, names
+PY
+  has "删掉 1790000001 的包与工作目录"
+  none "1790000000" "$(grep '删掉' <<<"$output")"
+  create; create; create
+  [ "$status" -eq 0 ]
+  [ "$(ls "$BR"/*_backup.tar.gz | wc -l)" = 5 ]                       # 2 份手动 + 3 份自动
+  [ -e "$BR/20260101-0000_1790000000_backup.tar.gz" ] && [ -e "$BR/20260101-0000_1790642642_backup.tar.gz" ]
+  [ "$(cloud onedrive | wc -l)" = 3 ] && [ "$(cloud gdrive | wc -l)" = 3 ]
+  [ "$(grep -c . "$L/bt.calls")" = 4 ] && [ "$(sort -u "$L/bt.calls" | wc -l)" = 4 ]   # 每次时间戳都不同
+}
+
+@test "只有手动建的备份时一份都不删" {
   task 1790000001; task 1790000002; task 1790000003
   create
   [ "$status" -eq 0 ]
-  for t in 1790000001 1790000002; do
-    [ ! -e "$BR/20260101-0000_${t}_backup.tar.gz" ] && [ ! -e "$BR/${t}_backup" ]
-  done
-  [ -e "$BR/20260101-0000_1790000003_backup.tar.gz" ] && [ -d "$BR/1790000003_backup" ]
-  [ "$(python3 -c "import json;print(len(json.load(open('$BR/backup_task.json'))))")" = 3 ]
-  create; create; create
-  [ "$status" -eq 0 ]
-  [ "$(ls "$BR"/*_backup.tar.gz | wc -l)" = 3 ]
-  [ "$(cloud onedrive | wc -l)" = 3 ] && [ "$(cloud gdrive | wc -l)" = 3 ]
-  [ "$(grep -c . "$L/bt.calls")" = 4 ] && [ "$(sort -u "$L/bt.calls" | wc -l)" = 4 ]   # 每次时间戳都不同
+  for t in 1790000001 1790000002 1790000003 1790642642; do [ -e "$BR/20260101-0000_${t}_backup.tar.gz" ]; done
+  has "自动备份不超过 3 份，不用清理"
 }
 
 @test "面板的备份程序没出包：不上传、不清理旧包，告警落盘、心跳 /fail" {

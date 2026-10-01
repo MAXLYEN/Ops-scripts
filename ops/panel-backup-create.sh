@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/panel-backup-create.sh — 照面板上次的设置生成整机备份，加密上传，本机与云端各留最近几份
-# VERSION: 1.0.0
+# VERSION: 1.1.0
+# 1.1.0: 本机清理只算本脚本建的「自动备份-」任务，留最近 PANEL_BACKUP_KEEP 份；面板里手动建的备份（包、工作目录、任务记录）一律不动，由人自己处理。已在宝塔 13.1.0 上确认 backup_manager.py 的调用方式与任务字段未变。
 # 1.0.0: 首版。复制面板「设置 → 备份还原」里最近一次备份的任务配置（备份内容一致），换新时间戳写回 backup_task.json，前台运行面板自带的 backup_manager.py backup_data 并等它结束；出了包再调用 panel-backup-upload 加密上传、清理云端，本机只留最近 PANEL_BACKUP_KEEP 份（包、工作目录、任务记录一起删）；失败时告警（邮件 → webhook → 落盘）、心跳 /fail，本机旧包不动。
 # ENV-REQUIRED: RCLONE_REMOTES BACKUP_PASS_FILES
 # 用法：panel-backup-create.sh [--no-upload]
@@ -126,13 +127,14 @@ case "${cnt#* }" in
      alert "[面板整机备份部分失败] $(hostname)" "有 ${cnt#* } 项没备份成功，包照样上传：$PKG"$'\n\n'"$(tail -n 30 "$DIR/backup.log" 2>/dev/null)" ;;
 esac
 
-section "本机只留最近 $KEEP 份"
-# 按时间戳排，旧的连同工作目录、任务记录一起删（面板手动建的也算在内）
+section "本机自动备份只留最近 $KEEP 份"
+# 只算本脚本建的「自动备份-」任务，按时间戳排，旧的连同工作目录、任务记录一起删；面板里手动建的不动
 old=$(python3 - "$TASKS" "$KEEP" <<'PY'
 import json, os, sys
 path, keep = sys.argv[1], int(sys.argv[2])
 tasks = json.load(open(path, encoding='utf-8'))
-ok = sorted((t for t in tasks if str(t.get('timestamp', '')).isdigit()), key=lambda t: int(t['timestamp']))
+ok = sorted((t for t in tasks if str(t.get('timestamp', '')).isdigit()
+             and str(t.get('backup_name', '')).startswith('自动备份-')), key=lambda t: int(t['timestamp']))
 drop = {str(t['timestamp']) for t in ok[:-keep]}
 if drop:
     rest = [t for t in tasks if str(t.get('timestamp')) not in drop]
@@ -144,7 +146,7 @@ print(' '.join(sorted(drop)))
 PY
 ) || { warn "清理本机旧包时读不了 $TASKS，这次不清理"; old=""; }
 if [ -z "$old" ]; then
-  log "不超过 $KEEP 份，不用清理"
+  log "自动备份不超过 $KEEP 份，不用清理（手动建的不计）"
 else
   for t in $old; do
     [[ $t =~ ^[0-9]+$ ]] || continue
