@@ -5,6 +5,13 @@ env.conf
 # opsget / install_file 替换前留下的旧版备份
 *.bak.*
 
-# 本地工具目录
+# 规则文件只在本地编辑保存，不进仓库
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+AGENTS.override.md
+.claude/
 .codex/
+
+# 本地工具目录
 __pycache__/
