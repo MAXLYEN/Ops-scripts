@@ -524,7 +524,7 @@ time restore-from-backup.sh restore /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7
 restore-from-backup.sh teardown 2>&1 | tee /root/drill-teardown.log
 ```
 
-先把日志取回电脑（`scp -P <SSH端口> 'root@演练机IP:/root/drill-*.log' .`），确认收尾处列出的告警都看过了，再在商家后台**销毁这台机器**。
+先把日志取回电脑：演练机上 `tar czf /root/drill-logs.tgz /root/drill-*.log`，电脑上 `scp -P <SSH端口> root@演练机IP:/root/drill-logs.tgz .`（Windows 的 scp 不认 `*`，所以先打成一个包）。确认收尾处列出的告警都看过了，再在商家后台**销毁这台机器**。
 
 **记下来**：日期、总耗时（从开机器到服务能用）、脚本列出的手动步骤、遇到的问题、各步骤的告警原文。
 
