@@ -76,6 +76,7 @@ open(d + '/backup.json', 'w').write('{}')
 name = '%s/%s_%s_backup.tar.gz' % (base, datetime.datetime.fromtimestamp(int(ts)).strftime('%Y%m%d-%H%M'), ts)
 with tarfile.open(name, 'w:gz') as tf:
     tf.add(d, arcname=ts + '_backup')
+os.chmod(name, 0o644); os.chmod(d, 0o755)          # 宝塔 13.1 出的包是 644
 failed = 1 if os.path.exists(L + '/bt-partial') else 0
 t[0].update(backup_status=2, backup_file=name, backup_count={'success': 13 - failed, 'failed': failed})
 json.dump(tasks, open(path, 'w'))
@@ -118,6 +119,9 @@ assert t['backup_data'] == ['site', 'database', 'ssh'] and t['database_id'] == '
 assert t['backup_path'].endswith('/%s_backup' % sys.argv[2])
 PY
   has "照「备份-2026-09-28-1743」的设置"
+  pkg=$(ls "$BR"/*_"$ts"_backup.tar.gz)
+  [ "$(stat -c %a "$pkg")" = 600 ]                                   # 面板出的包是 644，脚本收紧
+  [ -z "$(find "$BR/${ts}_backup" -perm /077)" ]
   has "成功/失败项：13/0"
   for r in onedrive gdrive; do
     f=$(cloud "$r"); [[ $f == *_"$ts"_backup.7z ]]
