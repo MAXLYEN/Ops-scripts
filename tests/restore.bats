@@ -491,6 +491,29 @@ GRANT ALL PRIVILEGES ON \`metrics\`.* TO \`metrics\`@\`%\`;" make_v2; v2_local
   lacks "接手服务时不带 --no-egress"
 }
 
+@test "--no-egress：用原机身份对外上报的宿主机单元（komari-agent）只放文件不启用，隧道等照常启用；切换那次全部启用" {
+  fake_iptables
+  make_v2
+  local s=/tmp/pkgsrc/v2 u
+  mkdir -p "$s/rootfs/etc/systemd/system"
+  for u in komari-agent newapi-tunnel; do
+    printf '[Service]\nExecStart=/bin/true\n' > "$s/rootfs/etc/systemd/system/$u.service"
+    printf '/etc/systemd/system/%s.service\t644\troot:root\tsystemd-unit\n' "$u" >> "$s/restore-manifest.tsv"
+  done
+  seal "$s" "$V2" tar
+  v2_local
+  restore restore "$V2" --no-start --no-cron --no-egress
+  [ -f /etc/systemd/system/komari-agent.service ]
+  none 'systemctl enable --now komari-agent' "$output"
+  has 'systemctl enable --now newapi-tunnel.service'
+  has '--no-egress：komari-agent.service 只放文件，不启用'
+  restore restore "$V2" --no-start --force
+  has 'systemctl enable --now komari-agent.service'
+  has 'systemctl enable --now newapi-tunnel.service'
+  lacks '只放文件，不启用'
+  rm -f /etc/systemd/system/komari-agent.service /etc/systemd/system/newapi-tunnel.service
+}
+
 @test "egress on|off：单独加上、撤掉；重复加不叠加；脚本被删了也撤得掉；演练机上拒绝 off" {
   fake_iptables
   restore egress on

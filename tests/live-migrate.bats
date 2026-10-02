@@ -453,3 +453,28 @@ none() {  # none <正则> <文本>
   has "复制了本机的"
   has "备份密码文件复制到新机"
 }
+
+@test "standby（新机待命）：停容器之外，还停用并取消自启用原机身份上报的 komari-agent；隧道单元不动；没启用就不碰" {
+  local fns
+  fns=$(for f in lm_agent lm_svc lm_report_units_off lm_cron_re lm_cron; do sed -n "/^$f() {/,/^}/p" "$SRC/migrate/live-migrate.sh"; done)
+  [ -n "$fns" ]
+  cat > /usr/local/bin/systemctl <<'SH'
+#!/bin/sh
+echo "$*" >> /tmp/systemctl.log
+case "$1" in is-enabled|is-active) grep -qx "$2" /tmp/units.on 2>/dev/null ;; esac
+SH
+  chmod 755 /usr/local/bin/systemctl
+  rm -f /tmp/systemctl.log
+  printf '%s\n' komari-agent.service newapi-tunnel.service > /tmp/units.on
+  run bash -c "$fns"$'\n''lm_agent standby'
+  [ "$status" -eq 0 ]
+  has "停用 komari-agent.service"
+  grep -qx 'disable --now komari-agent.service' /tmp/systemctl.log
+  none 'newapi-tunnel' "$(grep -v '^is-' /tmp/systemctl.log)"
+  [ "$(running)" = "exited exited" ]
+  : > /tmp/units.on; rm -f /tmp/systemctl.log
+  run bash -c "$fns"$'\n''lm_agent standby'
+  [ "$status" -eq 0 ]
+  none '^disable' "$(cat /tmp/systemctl.log)"
+  rm -f /usr/local/bin/systemctl /tmp/systemctl.log /tmp/units.on
+}

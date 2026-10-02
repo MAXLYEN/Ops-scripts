@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/restore-from-backup.sh — 原机已不在时，用每日加密备份包把新机恢复成原样
-# VERSION: 1.5.0
+# VERSION: 1.5.1
+# 1.5.1: --no-egress（一键迁移的演练）时，用原机身份往外上报的宿主机单元（komari-agent）只放文件、不启用：容器外连限制拦不住宿主机进程，启用了新机就在 Komari 里冒充原机上报。隧道等其他单元照常启用（核对要用）；不带 --no-egress 的恢复（切换）照常全部启用。
 # 1.5.0: 真机演练发现：备份依赖原先写在装定时任务的步骤里，--drill / --no-cron 时整段跳过，恢复后 msmtp、rclone 都没有（告警发不出、verify-backup-pass 跑不了）；改为任何模式都装。rclone 不再从 apt 装（Debian 12 源是 1.60，下载 OneDrive 报 unauthenticated），改用 ensure_rclone 装官方版；装依赖时说明 apt 锁被占用最多等 5 分钟，不再静默卡住。
 # 1.4.0: 新增 --no-egress：正式恢复也在起容器前拦下容器主动外连（一键迁移的演练用：原机还在服务，新机的容器用同一份数据，会重复给用户发提醒邮件、Komari 看到被控端全离线会告警）；之后不带它的正式恢复起容器前自动撤掉。新增 egress on|off 单独加上 / 撤掉（一键迁移回滚时新机加回）。
 # 1.3.1: vw 与 xboard 两个包带同一个 compose 项目、同一批账号时只按较新的包做一遍（原先锁版本、启动、Xboard 启动后步骤、建账号都做两遍，镜像清单与手动步骤重复，还有 8 行「cp: are the same file」）；被覆盖的库不再报「已恢复过，跳过」；演练时本机本来就有的单元（面板自己的服务）不再说成「隧道等单元」。
@@ -1448,6 +1449,10 @@ egress_guard() {  # 起容器前：--drill / --no-egress 加上；加不上就�
   return 0
 }
 
+# 用原机身份往外上报的宿主机单元（监控探针）：一键迁移演练时不启用。一键迁移的 standby 用同一份名单停掉它们
+REPORT_UNITS="komari-agent.service"
+reports_as_original() { case " $REPORT_UNITS " in *" $1 "*) return 0 ;; esac; return 1; }
+
 start_all() {
   local n d un
   section "启动"
@@ -1490,6 +1495,12 @@ start_all() {
     if [ "$DRILL" = 1 ]; then
       # 本机本来就有、内容也一样的（面板自己的服务之类）不用提
       [ "${PL_ACT[n]}" = SAME ] || log "演练：$un 只放文件，不启用（原机启用的单元，隧道这类会连到生产机）"
+      continue
+    fi
+    # --no-egress（一键迁移的演练）：原机还在服务。用原机身份往外上报的宿主机程序不受容器外连限制，
+    # 一启动新机就冒充原机（Komari 里同一台机器两处上报）；隧道这类照常启用，核对要用
+    if [ "$NOEGRESS" = 1 ] && reports_as_original "$un"; then
+      log "--no-egress：$un 只放文件，不启用（它用原机的身份往外上报；接手服务时不带 --no-egress 再恢复一次会启用）"
       continue
     fi
     if [ "$NOSTART" = 1 ]; then printf '    systemctl enable --now %s\n' "$un"; continue; fi

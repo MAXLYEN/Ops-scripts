@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/live-migrate.sh — 原机还在时的一键迁移（在旧机上运行）：预检 → 演练 → 停写切换 → DNS
-# VERSION: 1.1.0
+# VERSION: 1.1.1
+# 1.1.1: standby（演练结束、回滚时新机退回待命）除了停容器，还停用并取消自启用原机身份上报的 komari-agent（回滚时它在新机上跑着，会和恢复服务的原机一起上报）；隧道单元不动。
 # 1.1.0: 演练时新机恢复带 --no-egress：容器不许主动连外网（原机还在服务，新机上的 Xboard 会重复给用户发提醒邮件，Komari 看到被控端全离线会告警）；切换那次恢复不带它，起容器前撤掉；回滚时新机先加回限制再停容器。「DNS 已经改好」的确认改用公共库的 is_yes（前后空格、大小写、全角字符不再让 yes 被当成否）。
 # 1.0.0: 首版。预检两台机器；演练时本机照常服务，用备份脚本 --local-only 现做加密包经 SSH 直传新机，restore-from-backup --no-cron 恢复、check 比对、08 验收、经 --resolve 逐站对比后停掉新机的容器；切换时暂停本机备份定时任务、停容器、再做一次包、restore --force 并启动；DNS 保持人工，确认后经公共 DNS 复核；DNS 切换前随时可回滚。SSH 只用密钥、复用一条连接；恢复后新机临时放行本机 IP，落地机等机器的放行名单同步加上新机。
 # ENV-REQUIRED: BACKUP_PASS_FILE|VW_PASS_FILE MYSQL_DEFAULTS_FILE PANEL_VHOST_DIR
@@ -96,9 +97,9 @@ lm_agent() {
     sha)   sha256sum "$@" | cut -c1-64 ;;
     running) command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null ;;
     stop|start) lm_svc "$act" "$@" ;;
-    standby)  # 新机退回待命：停掉全部容器，暂停备份定时任务（演练结束、回滚时用）
+    standby)  # 新机退回待命：停掉全部容器和用原机身份上报的探针，暂停备份定时任务（演练结束、回滚时用）
       command -v docker >/dev/null 2>&1 && mapfile -t r < <(docker ps --format '{{.Names}}' 2>/dev/null)
-      lm_svc stop "${r[@]}"; lm_cron pause ;;
+      lm_svc stop "${r[@]}"; lm_report_units_off; lm_cron pause ;;
     pause-cron)  lm_cron pause ;;
     resume-cron) lm_cron resume ;;
     restore)  # restore <操作者 IP 或 -> <restore-from-backup 参数...>
@@ -116,6 +117,17 @@ lm_agent() {
     peer-allow|peer-drop) lm_peer "${act#peer-}" "$@" ;;
     *) echo "未知动作: $act" >&2; return 2 ;;
   esac
+}
+
+# 用原机身份往外上报的宿主机单元（与 restore-from-backup 的 REPORT_UNITS 同一份名单）：
+# 新机待命时停掉并取消开机自启，否则 Komari 里新旧两台冒充同一台上报；切换时不带 --no-egress 的恢复会重新启用
+lm_report_units_off() {
+  local u units="komari-agent.service"
+  command -v systemctl >/dev/null 2>&1 || return 0
+  for u in $units; do
+    systemctl is-enabled "$u" >/dev/null 2>&1 || systemctl is-active "$u" >/dev/null 2>&1 || continue
+    if systemctl disable --now "$u" >/dev/null 2>&1; then echo "  ✓ 停用 $u（它用原机的身份上报）"; else echo "  ✗ 停用 $u 失败"; fi
+  done
 }
 
 lm_probe() {  # lm_probe [必填键...]：这台机器的状况，每行一个 键=值
@@ -271,7 +283,7 @@ lm_peer() {  # lm_peer allow|drop <新前置机 IP>：落地机等机器上，�
   done
 }
 
-AGENT_FUNCS=(lm_agent lm_probe lm_svc lm_cron_re lm_cron lm_tunnel lm_ufw_del lm_allow_me lm_peer)
+AGENT_FUNCS=(lm_agent lm_probe lm_svc lm_report_units_off lm_cron_re lm_cron lm_tunnel lm_ufw_del lm_allow_me lm_peer)
 agent_src() {
   declare -f "${AGENT_FUNCS[@]}"
   # shellcheck disable=SC2016  # 原样发到对面，由对面的 bash 展开
