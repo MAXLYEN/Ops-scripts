@@ -57,6 +57,7 @@ env_conf() {  # env_conf [额外行...]
 
 fakes() {
   # ssh：跳过选项，远端命令在本机执行（-n 时 stdin 接 /dev/null）
+  # $L/probe-drop、$L/snap-drop 里写 N：前 N 次连接探测握手超时 / 前 N 次拉快照传到一半断开（退出码 255，同真 ssh）
   cat > "$FB/ssh" <<'EOF'
 #!/bin/bash
 echo "ssh $*" >> /tmp/ll/ssh.log
@@ -64,6 +65,9 @@ while [ $# -gt 0 ]; do
   case "$1" in -o|-p|-i|-l) shift 2 ;; -n) exec </dev/null; shift ;; -*) shift ;; *) break ;; esac
 done
 shift
+dec() { local f=/tmp/ll/$1 n; [ -s "$f" ] || return 1; n=$(cat "$f"); [ "$n" -gt 0 ] || return 1; echo $((n - 1)) > "$f"; }
+if [ "$*" = true ] && dec probe-drop; then echo "Connection timed out during banner exchange" >&2; exit 255; fi
+if [[ "$*" == *"bash -s"* ]] && dec snap-drop; then cat >/dev/null; echo "Timeout, server 198.51.100.7 not responding." >&2; exit 255; fi
 exec bash -c "$*"
 EOF
   # docker：$L/containers 是现有容器；事件记进 $L/events
@@ -166,7 +170,7 @@ for a; do [ "$a" = -w ] && { printf 200; exit 0; }; done
 for a; do case "$a" in */v1/models) cat >/dev/null; printf '{"data":[{"id":"relay/a"},{"id":"relay/b"},{"id":"direct/c"}]}'; exit 0 ;; esac; done
 exit 0
 EOF
-  printf '#!/bin/sh\nexit 0\n' > "$FB/sleep"
+  printf '#!/bin/sh\necho "$*" >> /tmp/ll/sleep.log\n' > "$FB/sleep"
   chmod 755 "$FB"/*
 }
 
@@ -237,11 +241,47 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   grep -q -- '-p 2345 root@198.51.100.7' "$L/ssh.log"
 }
 
+@test "备份：线路抖动（握手超时、传到一半断开）隔一会儿重试，成功了照常出包、不告警；节点上中断留下的旧暂存被清掉" {
+  echo 2 > "$L/probe-drop"; echo 1 > "$L/snap-drop"
+  mkdir -p /tmp/litellm-snap-stale /tmp/litellm-snap-fresh; touch -d '3 hours ago' /tmp/litellm-snap-stale
+  backup
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"结束：正常"* ]]
+  [ "$(grep -c '连接中断或超时' "$L/backup.log")" = 3 ]
+  grep -q 'Timeout, server 198.51.100.7 not responding' "$L/backup.log"
+  [ "$(grep -cx 180 "$L/sleep.log")" = 3 ]
+  [ -n "$(pkg)" ]
+  [ ! -e "$L/alerts.log" ]
+  [ "$(tail -1 "$L/curl.log")" = "curl -fsS -m 10 --retry 2 https://hc.example/ping/ll" ]
+  [ ! -e /tmp/litellm-snap-stale ] && [ -d /tmp/litellm-snap-fresh ]
+  rm -rf /tmp/litellm-snap-fresh
+}
+
+@test "备份：重试用完仍连不上就失败并说明试了几次：不出包、心跳 /fail、告警落盘" {
+  echo 9 > "$L/probe-drop"
+  backup
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"试了 3 次"* ]]
+  [ "$(grep -c ' true$' "$L/ssh.log")" = 3 ]
+  [ -z "$(pkg)" ]
+  [ "$(tail -1 "$L/curl.log")" = "curl -fsS -m 10 --retry 2 https://hc.example/ping/ll/fail" ]
+  grep -q '\[FAIL\] LiteLLM backup' "$L/alerts.log"
+  # 传到一半断开、重试用完也一样
+  echo 0 > "$L/probe-drop"; echo 9 > "$L/snap-drop"; rm -f "$L/alerts.log"
+  backup
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"快照生成或传输失败（试了 3 次"* ]]
+  [ -z "$(pkg)" ]
+}
+
 @test "备份：pg_restore --list 读不开导出就失败：不出包、心跳 /fail、告警落盘" {
   touch "$L/toc-bad"
   backup
   [ "$status" -eq 1 ]
   [[ "$output" == *"pg_restore --list 读不了这份导出"* ]]
+  # 节点上的命令自己报错，不是线路问题：不重试
+  [ "$(grep -c 'bash -s' "$L/ssh.log")" = 1 ]
+  [ ! -e "$L/sleep.log" ] || none '^180$' "$(cat "$L/sleep.log")"
   [ -z "$(pkg)" ]
   [ -z "$(ls "$L/cloud")" ]
   [ "$(tail -1 "$L/curl.log")" = "curl -fsS -m 10 --retry 2 https://hc.example/ping/ll/fail" ]

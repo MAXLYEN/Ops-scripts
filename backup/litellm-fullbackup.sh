@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # backup/litellm-fullbackup.sh — 从汇总机拉取 LiteLLM 节点的库导出与工作目录，加密上传
-# VERSION: 1.0.0
+# VERSION: 1.1.0
+# 1.1.0: 线路短时抖动时自动重试：SSH 握手超时、传到一半断开（ssh 退出码 255）隔 BACKUP_SSH_RETRY_WAIT 秒（默认 180）重试，最多 BACKUP_SSH_TRIES 次（默认 3），都失败才报失败；节点上的命令自己报错不重试。节点上被中断的拉取留下的旧暂存目录（超过 2 小时）下次清掉。起因：前置机到节点的线路在北京时间晚高峰丢包，2026-10-03、10-05 两次 12:40 那轮失败。
 # 1.0.0: 首版。远端 pg_dump -Fc 一致性导出并用容器自己的 pg_restore --list 校验；工作目录（.env 等，不含 pgdata 与日志）；三个容器的镜像 digest 与 inspect；GFS 分级保留，防重入锁，心跳。
 # ENV-REQUIRED: LITELLM_HOST LITELLM_WORKDIR LITELLM_BACKUP_DIR BACKUP_PASS_FILE RCLONE_REMOTES MAIL_TO
 # 定时任务调用已安装的本地脚本（ops/install-backup-cron，每 6 小时 :40）。Redis 只是缓存，不备份（见 RESTORE.md）。
@@ -130,8 +131,24 @@ else
   SSH_PORT=22; PORT_FROM="默认"
 fi
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30)
-ssh -n "${SSH_OPTS[@]}" -p "$SSH_PORT" "root@$LITELLM_HOST" true 2>>"$LOG" \
-  || { fail "SSH 连不上 $LITELLM_HOST:$SSH_PORT（端口来自 $PORT_FROM）"; finish 1; }
+# 线路短时抖动（晚高峰丢包）时 SSH 会握手超时或传到一半断开，ssh 退出码是 255：隔一会儿重试，
+# 都失败才算失败。节点上的命令自己报错（退出码不是 255）不是线路问题，不重试
+SSH_TRIES="${BACKUP_SSH_TRIES:-3}"
+SSH_WAIT="${BACKUP_SSH_RETRY_WAIT:-180}"
+ssh_retry() {  # ssh_retry <说明> <命令...>：命令返回 255 时等 SSH_WAIT 秒再试，最多 SSH_TRIES 次
+  local what=$1 i=1 rc
+  shift
+  while :; do
+    "$@"; rc=$?
+    [ "$rc" -eq 255 ] || return "$rc"
+    [ "$i" -lt "$SSH_TRIES" ] || return 255
+    log "${what}：连接中断或超时（第 ${i}/${SSH_TRIES} 次），${SSH_WAIT} 秒后重试"
+    sleep "$SSH_WAIT"; i=$((i + 1))
+  done
+}
+probe() { ssh -n "${SSH_OPTS[@]}" -p "$SSH_PORT" "root@$LITELLM_HOST" true 2>>"$LOG"; }
+ssh_retry "SSH 连接" probe \
+  || { fail "SSH 连不上 $LITELLM_HOST:$SSH_PORT（端口来自 $PORT_FROM；试了 $SSH_TRIES 次）"; finish 1; }
 log "LiteLLM 节点 SSH 可达（$LITELLM_HOST:$SSH_PORT，端口来自 $PORT_FROM）"
 
 mkdir -p "$LITELLM_BACKUP_DIR" || { fail "建不了 $LITELLM_BACKUP_DIR"; finish 1; }
@@ -147,8 +164,11 @@ REMOTE_SNAP=$(cat <<'REMOTE_EOF'
 set -o pipefail
 die()  { echo "[节点] $*" >&2; exit 1; }
 warn() { echo "[节点] $*" >&2; }
+# 上次连接中途断开时，节点上的临时目录可能没来得及删（里面是整库导出和 .env）
+find /tmp -maxdepth 1 -name 'litellm-snap-*' -mmin +120 -exec rm -rf {} + 2>/dev/null
 D=$(mktemp -d /tmp/litellm-snap-XXXXXX) || die "建不了临时目录"
 trap 'rm -rf "$D"' EXIT
+trap 'exit 1' HUP TERM PIPE   # 连接断开：走 EXIT 删临时目录
 [ -d "$W" ] || die "没有工作目录 $W"
 [ -s "$W/.env" ] || die "$W/.env 不存在或为空（LITELLM_SALT_KEY 在里面）"
 grep -q '^LITELLM_SALT_KEY=.' "$W/.env" || die "$W/.env 里没有 LITELLM_SALT_KEY"
@@ -194,11 +214,21 @@ REMOTE_EOF
 
 log "在节点上导出 Postgres（pg_dump -Fc）并打包工作目录"
 REMOTE_ENV="W=$(printf '%q' "$LITELLM_WORKDIR") PG=$PG_CONTAINER CONTAINERS='$CONTAINERS'"
-if ! { declare -f bk_images; printf '%s\n' "$REMOTE_SNAP"; } \
-  | ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" "root@$LITELLM_HOST" "$REMOTE_ENV bash -s" 2>"$STAGE/remote.err" \
-  | tar xzf - -C "$P" 2>>"$STAGE/remote.err"; then
-  sed 's/^/    /' "$STAGE/remote.err" | tee -a "$LOG"
-  fail "快照生成或传输失败（原因见上）"
+pull_snap() {  # 每次重新拉：上一次断在半路的不要
+  local st
+  rm -rf "$P"; mkdir -p "$P" || return 1
+  { declare -f bk_images; printf '%s\n' "$REMOTE_SNAP"; } \
+    | ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" "root@$LITELLM_HOST" "$REMOTE_ENV bash -s" 2>"$STAGE/remote.err" \
+    | tar xzf - -C "$P" 2>>"$STAGE/remote.err"
+  st=("${PIPESTATUS[@]}")
+  [ "${st[1]}" -eq 255 ] && { sed 's/^/    /' "$STAGE/remote.err" | tee -a "$LOG"; return 255; }
+  [ "${st[1]}" -eq 0 ] && [ "${st[2]}" -eq 0 ]
+}
+ssh_retry "拉取快照" pull_snap; rc=$?
+if [ "$rc" -ne 0 ]; then
+  [ "$rc" -eq 255 ] || sed 's/^/    /' "$STAGE/remote.err" | tee -a "$LOG"
+  if [ "$rc" -eq 255 ]; then fail "快照生成或传输失败（试了 $SSH_TRIES 次，每次的原因见上）"
+  else fail "快照生成或传输失败（原因见上）"; fi
   finish 1
 fi
 # 节点上的非致命提示（如某个镜像没有 RepoDigest）也记进日志

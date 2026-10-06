@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # backup/newapi-fullbackup.sh — 从汇总机拉取 new-api 数据，生成一致性快照并加密上传
-# VERSION: 1.2.0
+# VERSION: 1.3.0
+# 1.3.0: 线路短时抖动时自动重试：SSH 握手超时、传到一半断开（ssh 退出码 255）隔 BACKUP_SSH_RETRY_WAIT 秒（默认 180）重试，最多 BACKUP_SSH_TRIES 次（默认 3），都失败才报失败；落地机上的命令自己报错不重试。落地机上被中断的拉取留下的旧暂存目录（超过 2 小时，里面是整库副本）下次清掉，中断时也尽量当场删掉。起因：前置机到落地机的线路在北京时间晚高峰丢包，2026-10-05 14:05 那轮传到一半断开。
 # 1.2.0: 包里 RESTORE.md 的起容器改为从 container-inspect.json 生成命令（原先手写示例漏了原机另加的环境变量，如 STREAMING_TIMEOUT；真机演练发现），并写明后台要用正式域名登录、渠道测试失败怎么分辨。
 # 1.1.0: 改为 GFS 分级保留（每小时一次时全留 2 天），防重入锁，包内新增 images.tsv（镜像 digest）。
 # ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_BAK_DIR BACKUP_PASS_FILE MAIL_TO
@@ -127,8 +128,24 @@ PASS="$(tr -d '\r\n' < "$BACKUP_PASS_FILE")"
 [ "${#PASS}" -ge 16 ] || { fail "备份密码长度不足 16 位"; finish 1; }
 
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30)
-ssh -n "${SSH_OPTS[@]}" -p "$NEWAPI_SSH_PORT" "root@$NEWAPI_HOST" true 2>>"$LOG" \
-  || { fail "SSH 连不上 $NEWAPI_HOST:$NEWAPI_SSH_PORT"; finish 1; }
+# 线路短时抖动（晚高峰丢包）时 SSH 会握手超时或传到一半断开，ssh 退出码是 255：隔一会儿重试，
+# 都失败才算失败。落地机上的命令自己报错（退出码不是 255）不是线路问题，不重试
+SSH_TRIES="${BACKUP_SSH_TRIES:-3}"
+SSH_WAIT="${BACKUP_SSH_RETRY_WAIT:-180}"
+ssh_retry() {  # ssh_retry <说明> <命令...>：命令返回 255 时等 SSH_WAIT 秒再试，最多 SSH_TRIES 次
+  local what=$1 i=1 rc
+  shift
+  while :; do
+    "$@"; rc=$?
+    [ "$rc" -eq 255 ] || return "$rc"
+    [ "$i" -lt "$SSH_TRIES" ] || return 255
+    log "${what}：连接中断或超时（第 ${i}/${SSH_TRIES} 次），${SSH_WAIT} 秒后重试"
+    sleep "$SSH_WAIT"; i=$((i + 1))
+  done
+}
+probe() { ssh -n "${SSH_OPTS[@]}" -p "$NEWAPI_SSH_PORT" "root@$NEWAPI_HOST" true 2>>"$LOG"; }
+ssh_retry "SSH 连接" probe \
+  || { fail "SSH 连不上 $NEWAPI_HOST:$NEWAPI_SSH_PORT（试了 $SSH_TRIES 次）"; finish 1; }
 log "落地机 SSH 可达"
 
 mkdir -p "$NEWAPI_BAK_DIR" || { fail "建不了 $NEWAPI_BAK_DIR"; finish 1; }
@@ -143,7 +160,11 @@ log "在落地机生成 SQLite 一致性快照并打包"
 
 REMOTE_SNAP=$(cat <<REMOTE_EOF
 set -o pipefail
+# 上次连接中途断开时，落地机上的临时目录可能没来得及删（里面是整库副本，落地机盘小）
+find /tmp -maxdepth 1 -name 'newapi-snap-*' -mmin +120 -exec rm -rf {} + 2>/dev/null
 D="\$(mktemp -d /tmp/newapi-snap-XXXXXX)" || exit 1
+trap 'rm -rf "\$D"' EXIT
+trap 'exit 1' HUP TERM PIPE   # 连接断开：走 EXIT 删临时目录
 SRC="${NEWAPI_DATA_DIR}"
 
 # SQLite 在线备份：不停容器，自动合并 WAL
@@ -194,10 +215,20 @@ rm -rf "\$D"
 REMOTE_EOF
 )
 
-if ! printf '%s' "$REMOTE_SNAP" \
-  | ssh "${SSH_OPTS[@]}" -p "$NEWAPI_SSH_PORT" "root@$NEWAPI_HOST" "bash -s" 2>>"$LOG" \
-  | tar xzf - -C "$STAGE/payload" 2>>"$LOG"; then
-  fail "快照生成或传输失败"
+pull_snap() {  # 每次重新拉：上一次断在半路的不要
+  local st
+  rm -rf "$STAGE/payload"; mkdir -p "$STAGE/payload" || return 1
+  printf '%s' "$REMOTE_SNAP" \
+    | ssh "${SSH_OPTS[@]}" -p "$NEWAPI_SSH_PORT" "root@$NEWAPI_HOST" "bash -s" 2>>"$LOG" \
+    | tar xzf - -C "$STAGE/payload" 2>>"$LOG"
+  st=("${PIPESTATUS[@]}")
+  [ "${st[1]}" -eq 255 ] && return 255
+  [ "${st[1]}" -eq 0 ] && [ "${st[2]}" -eq 0 ]
+}
+ssh_retry "拉取快照" pull_snap; rc=$?
+if [ "$rc" -ne 0 ]; then
+  if [ "$rc" -eq 255 ]; then fail "快照生成或传输失败（试了 $SSH_TRIES 次，每次的原因见上）"
+  else fail "快照生成或传输失败"; fi
   finish 1
 fi
 
