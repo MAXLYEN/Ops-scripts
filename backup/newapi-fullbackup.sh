@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # backup/newapi-fullbackup.sh — 从汇总机拉取 new-api 数据，生成一致性快照并加密上传
-# VERSION: 1.3.0
+# VERSION: 1.4.0
+# 1.4.0: 历史数据只收表结构：one-api.db 的 quota_data 在落地机的快照副本上清空（NEWAPI_HISTORY_TABLES 可改，生产库不动）；调用明细 logs 是计费对账依据，照留。数据目录里的程序日志 logs/ 不进包。
 # 1.3.0: 线路短时抖动时自动重试：SSH 握手超时、传到一半断开（ssh 退出码 255）隔 BACKUP_SSH_RETRY_WAIT 秒（默认 180）重试，最多 BACKUP_SSH_TRIES 次（默认 3），都失败才报失败；落地机上的命令自己报错不重试。落地机上被中断的拉取留下的旧暂存目录（超过 2 小时，里面是整库副本）下次清掉，中断时也尽量当场删掉。起因：前置机到落地机的线路在北京时间晚高峰丢包，2026-10-05 14:05 那轮传到一半断开。
 # 1.2.0: 包里 RESTORE.md 的起容器改为从 container-inspect.json 生成命令（原先手写示例漏了原机另加的环境变量，如 STREAMING_TIMEOUT；真机演练发现），并写明后台要用正式域名登录、渠道测试失败怎么分辨。
 # 1.1.0: 改为 GFS 分级保留（每小时一次时全留 2 天），防重入锁，包内新增 images.tsv（镜像 digest）。
@@ -33,6 +34,11 @@ CLOUD_KEEP_DAYS="${NEWAPI_CLOUD_KEEP_DAYS:-400}"
 CLOUD_DIR="${NEWAPI_CLOUD_DIR:-Backup-NewAPI}"
 RCLONE_REMOTES="${NEWAPI_RCLONE_REMOTES:-onedrive gdrive}"
 CONTAINER="${NEWAPI_CONTAINER:-new-api}"
+# one-api.db 里只收表结构、不收数据的历史表（空格分隔；写成空就全收）。logs 是计费对账依据，默认不在里面
+NEWAPI_HIST="${NEWAPI_HISTORY_TABLES-quota_data}"
+NEWAPI_HIST_SQL="''"; for t in $NEWAPI_HIST; do
+  [[ $t =~ ^[A-Za-z0-9_]+$ ]] && NEWAPI_HIST_SQL="$NEWAPI_HIST_SQL,'$t'"
+done
 ALERT_FALLBACK_FILE="${ALERT_FALLBACK_FILE:-/var/log/backup-alerts.log}"
 
 WARN=0
@@ -175,21 +181,29 @@ src = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
 dst = sqlite3.connect(sys.argv[2])
 with dst:
     src.backup(dst)
-dst.close(); src.close()
+src.close()
+# 历史统计只留表结构：在副本上清空，生产库不动。quota_data 是按 logs 汇总的按小时用量，能重算；
+# logs（调用明细）是计费对账的依据，照留
+for (t,) in dst.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN (${NEWAPI_HIST_SQL})").fetchall():
+    with dst:
+        dst.execute('DELETE FROM "%s"' % t)
+    print("HIST %s" % t, file=sys.stderr)
+dst.execute("VACUUM")
+dst.close()
 PY
 else
   echo "落地机上找不到 \$SRC/one-api.db" >&2
   exit 1
 fi
 
-# 其余数据目录内容（排除 db 本体与 WAL/SHM，它们已由快照覆盖）
+# 其余数据目录内容（排除 db 本体与 WAL/SHM，它们已由快照覆盖；logs/ 是程序日志，历史，不收）
 if command -v rsync >/dev/null 2>&1; then
-  rsync -a --exclude 'one-api.db' --exclude 'one-api.db-wal' --exclude 'one-api.db-shm' \
+  rsync -a --exclude 'one-api.db' --exclude 'one-api.db-wal' --exclude 'one-api.db-shm' --exclude '/logs' \
     "\$SRC/" "\$D/data-rest/" 2>/dev/null || true
 else
   mkdir -p "\$D/data-rest"
   (cd "\$SRC" && tar cf - --exclude='one-api.db' --exclude='one-api.db-wal' \
-      --exclude='one-api.db-shm' .) | (cd "\$D/data-rest" && tar xf -) 2>/dev/null || true
+      --exclude='one-api.db-shm' --exclude='./logs' .) | (cd "\$D/data-rest" && tar xf -) 2>/dev/null || true
 fi
 
 # 容器还原线索：镜像 tag、完整 inspect、端口与挂载
@@ -235,6 +249,7 @@ fi
 [ -s "$STAGE/payload/one-api.db" ] || { fail "拉回的快照为空"; finish 1; }
 DBSIZE=$(stat -c %s "$STAGE/payload/one-api.db")
 log "快照到手：one-api.db ${DBSIZE} 字节"
+[ -z "$NEWAPI_HIST" ] || log "历史表只收结构（数据在副本上清空，生产库不动）：$NEWAPI_HIST；程序日志 logs/ 不收"
 
 # 快照完整性自检
 if command -v sqlite3 >/dev/null 2>&1; then
@@ -268,6 +283,7 @@ fi
   echo "数据目录: $NEWAPI_DATA_DIR"
   echo "容器名: $CONTAINER"
   echo "镜像: $(cat "$STAGE/payload/system/image-tag.txt" 2>/dev/null || echo 未知)"
+  echo "只收表结构的历史表: ${NEWAPI_HIST:-无}（恢复后从零开始记）；程序日志 logs/ 不收"
   echo "---- 文件清单 ----"
   (cd "$STAGE/payload" && find . -type f -printf '%10s  %p\n' | sort -k2)
 } > "$STAGE/payload/manifest.txt"
@@ -288,7 +304,7 @@ cat > "$STAGE/payload/RESTORE.md" <<'RESTORE_EOF'
 ```bash
 mkdir -p {{DATA_DIR}}
 cp one-api.db {{DATA_DIR}}/one-api.db
-# data-rest 里是日志等其余内容，按需复制
+# data-rest 里是数据目录的其余内容（程序日志 logs/ 不在包里），按需复制
 cp -a data-rest/. {{DATA_DIR}}/ 2>/dev/null || true
 ```
 

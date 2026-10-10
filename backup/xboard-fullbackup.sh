@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # backup/xboard-fullbackup.sh — 生成 Xboard 加密备份包并上传云端
-# VERSION: 2.5.0
+# VERSION: 2.6.0
+# 2.6.0: 历史数据只收表结构：自己的库里清单上的历史表（v2_log、v2_mail_log、v2_stat*、v2_server_machine_load_history、v2_admin_audit_log、v2_traffic_reset_logs、failed_jobs，需 common.sh 1.3.0）并进 EXCLUDE_TABLES；订单、支付、佣金照导。
 # 2.5.0: 新增 --local-only <目录>：包只写到该目录，不上传、不清理、不报心跳、不发告警；上一轮还在跑就等它结束（一键迁移现做包用）。
 # 2.4.1: 其余业务库跳过 METRICS_DB_NAME（与 vw 一致，指标库只留本地），否则每 6 小时把整个指标库打进包上云。
 # 2.4.0: 新增 rootfs/ 与 restore-manifest.tsv（整个 Xboard 目录、系统配置、crontab、全部 MySQL 账号与业务库、镜像 digest），包内先打 tar 保留属主，改为 GFS 分级保留，防重入锁。
@@ -205,6 +206,18 @@ mysql --defaults-file="$MYCNF" -N -B -e "SELECT CURRENT_USER(); SHOW GRANTS;" \
     > "$WORK/db/${DB_NAME}-grants.txt" 2>/dev/null \
     || warn "无法记录 ${DB_NAME} 的授权信息"
 
+# 历史表（日志、统计、机器负载曲线……，清单在公共库 bk_history_default）也只导结构，并进 EXCLUDE_TABLES
+HIST_TABLES=()
+if declare -F bk_history_pick >/dev/null; then
+    ALL_TABLES=$(mysql --defaults-file="$MYCNF" -N -B \
+        -e "SELECT table_name FROM information_schema.tables WHERE table_schema='$DB_NAME'" 2>/dev/null)
+    mapfile -t HIST_TABLES < <(bk_history_pick "$DB_NAME" "$ALL_TABLES")
+    for t in "${HIST_TABLES[@]}"; do
+        case " ${EXCLUDE_TABLES[*]:-} " in *" $t "*) ;; *) EXCLUDE_TABLES+=("$t") ;; esac
+    done
+    [ "${#HIST_TABLES[@]}" -eq 0 ] || log "历史表只导结构：${HIST_TABLES[*]}"
+fi
+
 DUMP_ARGS=(--defaults-file="$MYCNF" --single-transaction --quick
            --routines --triggers --events --default-character-set=utf8mb4
            --no-tablespaces)
@@ -304,6 +317,7 @@ cp -a "$ENV_FILE" "$WORK/deploy/env.conf" 2>/dev/null
 log "--- 收集 rootfs 与还原清单 ---"
 bk_init "$WORK"
 bk_row "db/${DB_NAME}.sql" - - mysql-db
+for t in "${HIST_TABLES[@]}"; do bk_skip "mysql:$DB_NAME.$t" "历史数据，只收表结构；恢复后从零开始记"; done
 # 整个 Xboard 目录（含 git 检出、.env、compose、容器数据、主题、插件）原样放回，
 # 不用再 git clone 一个可能更新的版本。框架日志不收。
 bk_dir "$XBOARD_DIR" "$XBOARD_DIR/storage/logs" || fail "Xboard 目录收进 rootfs 失败"

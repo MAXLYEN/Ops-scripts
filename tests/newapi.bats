@@ -95,7 +95,7 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   P=$(pkg); [ -n "$P" ] && [ -f "$P.sha256" ]
   rm -rf "$L/x"; 7z x -p"$(head -1 "$PASSF")" -o"$L/x" "$P" </dev/null >/dev/null
   [ "$(sqlite3 "$L/x/one-api.db" 'SELECT count(*) FROM options')" = 2 ]
-  [ -f "$L/x/data-rest/logs/oneapi.log" ]
+  [ ! -e "$L/x/data-rest/logs" ]
   [ -f "$L/cloud/onedrive/Backup-NewAPI/$(basename "$P")" ] && [ -f "$L/cloud/gdrive/Backup-NewAPI/$(basename "$P")" ]
   [ "$(tail -1 "$L/curl.log")" = "curl -fsS -m 10 --retry 2 https://hc.example/ping/na" ]
   [ -z "$(ls -d /tmp/newapi-snap-* 2>/dev/null)" ]
@@ -141,4 +141,18 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   [ "$(grep -c 'bash -s' "$L/ssh.log")" = 1 ]
   [ ! -e "$L/sleep.log" ] || none '^180$' "$(cat "$L/sleep.log")"
   [ -z "$(pkg)" ]
+}
+
+@test "备份：quota_data 在副本上清空（表结构留着）、logs 表照留；程序日志 logs/ 不进包；生产库不动" {
+  sqlite3 "$DATA/one-api.db" "CREATE TABLE quota_data(id, quota); INSERT INTO quota_data VALUES (1, 10), (2, 20);
+                              CREATE TABLE logs(id, content); INSERT INTO logs VALUES (1, 'call');"
+  backup
+  [ "$status" -eq 0 ]
+  P=$(pkg); rm -rf "$L/x"; 7z x -p"$(head -1 "$PASSF")" -o"$L/x" "$P" </dev/null >/dev/null
+  [ "$(sqlite3 "$L/x/one-api.db" 'SELECT count(*) FROM quota_data')" = 0 ]
+  [ "$(sqlite3 "$L/x/one-api.db" 'SELECT count(*) FROM logs')" = 1 ]
+  [ "$(sqlite3 "$L/x/one-api.db" 'SELECT count(*) FROM options')" = 2 ]
+  [ ! -e "$L/x/data-rest/logs" ]
+  [ "$(sqlite3 "$DATA/one-api.db" 'SELECT count(*) FROM quota_data')" = 2 ]
+  grep -q '只收表结构的历史表: quota_data' "$L/x/manifest.txt"
 }

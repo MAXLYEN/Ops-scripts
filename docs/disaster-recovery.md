@@ -557,4 +557,5 @@ opsget ops/litellm-drill teardown <备用机IP>
 | Xboard 的代理节点机器 | 不在这套备份里 | 面板域名不变的话，节点会自己重新连上；域名变了，要在每台节点上重新指定面板地址 |
 | Komari 的历史监控数据（`metrics` 库） | 按设计只在本地保留，不上传云端 | 恢复脚本建一个空库、照原机恢复它的账号，Komari 启动时自己建表，监控历史从零开始记录 |
 | 宝塔面板的证书自动续期 | 包里有 Nginx 配置、证书文件、面板的站点记录（`panel/data/`）和反向代理项目（`/www/server/proxy_project`），续期记录不一定对得上 | DNS 生效后逐个站点重新申请证书（第 4.6 节）。面板里有东西没恢复出来时，用每周的面板整机备份（网盘 `BTBackup-AllServer`，最近 3 份，7z 加密、同一个密码）在面板「设置 → 备份还原」里导入 |
+| 历史数据：Xboard 的日志与统计（含机器负载曲线）、vaultwarden 的事件、Komari 的事件日志与任务结果、new-api 的 `quota_data` 和程序日志、LiteLLM 的花费明细与按天用量 | 按设计只收表结构，不收数据（2026-10 起） | 不用管：表都在，应用照常启动，这些记录从恢复那一刻重新开始。账号、配置、订单、支付、佣金、new-api 的调用明细 `logs` 都在包里 |
 | 开发电脑上的东西 | 仓库在 GitHub 上 | 重新克隆：`git clone https://github.com/MAXLYEN/ops-scripts.git` |

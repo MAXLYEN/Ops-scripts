@@ -188,7 +188,8 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   echo "$output"
   [ "$status" -eq 0 ]
   [[ "$output" == *"结束：正常"* ]]
-  grep -qx "docker exec litellm-postgres pg_dump -U litellm -Fc litellm" "$L/docker.log"
+  # 历史表只导结构：花费明细、按天用量（模式里的 * 原样传给 pg_dump，不被 shell 展开）、健康检查、错误与审计日志
+  grep -qx 'docker exec litellm-postgres pg_dump -U litellm -Fc --exclude-table-data="LiteLLM_SpendLogs" --exclude-table-data="LiteLLM_Daily"\*"Spend" --exclude-table-data="LiteLLM_HealthCheckTable" --exclude-table-data="LiteLLM_ErrorLogs" --exclude-table-data="LiteLLM_AuditLog" litellm' "$L/docker.log"
   grep -qx "docker exec -i litellm-postgres pg_restore --list" "$L/docker.log"
   P=$(pkg); [ -n "$P" ] && [ -f "$P.sha256" ]
   [ "$(stat -c %a "$P")" = 600 ]
@@ -468,4 +469,11 @@ spare() {  # 备用机的样子：清单里有它的端口，没有 litellm 容�
   [ ! -e /opt/litellm-drill ] && [ ! -s "$L/containers" ]
   [ ! -e /var/lib/ops-scripts/litellm-drill-203.0.113.50.state ]
   grep -q "docker rmi ghcr.io/berriai/litellm@sha256:$DIG1" "$L/docker.log"
+}
+
+@test "备份：LITELLM_HISTORY_TABLES 写成空就全部照导" {
+  env_conf 'LITELLM_HISTORY_TABLES=""'
+  backup
+  [ "$status" -eq 0 ]
+  grep -qx "docker exec litellm-postgres pg_dump -U litellm -Fc litellm" "$L/docker.log"
 }

@@ -478,3 +478,55 @@ SH
   none '^disable' "$(cat /tmp/systemctl.log)"
   rm -f /usr/local/bin/systemctl /tmp/systemctl.log /tmp/units.on
 }
+
+@test "xboard 备份：自己的库里历史表（日志、统计、负载曲线）只导结构，订单与用户照导；跳过清单记了它们" {
+  install -m 755 "$SRC/backup/xboard-fullbackup.sh" /usr/local/bin/xboard-fullbackup.sh
+  mkdir -p "$L/opt/xboard/storage" "$L/www" "$L/xbbak" /tmp/out
+  printf '%s\n' 'APP_KEY=base64:abc' 'DB_DATABASE=xboard' > "$L/opt/xboard/.env"
+  printf 'services:\n  xboard:\n    image: ghcr.io/cedar2025/xboard:1.0\n' > "$L/opt/xboard/compose.yaml"
+  echo 'xb pass' > "$L/xbpass"
+  env_conf "SVC_XBOARD_DIR=$L/opt/xboard" XBOARD_DB_NAME=xboard XBOARD_DB_USER=xboard "XBOARD_DB_PASS_FILE=$L/xbpass" \
+    "XBOARD_BACKUP_DIR=$L/xbbak" XBOARD_REMOTE_PATH=xb "WWWROOT=$L/www"
+  # 假 mysql 多回答一句：xboard 库有哪些表；假 mysqldump 记下参数
+  sed -i 's/^  \*GROUP_CONCAT\*) echo NULL ;;/  *"table_schema='"'"'xboard'"'"'"*) printf "%s\n" v2_user v2_order v2_log v2_stat_user v2_server_machine_load_history migrations ;;\n&/' /usr/local/bin/mysql
+  sed -i '2i echo "$*" >> /tmp/mysqldump.args' /usr/local/bin/mysqldump
+  rm -f /tmp/mysqldump.args
+  run /usr/local/bin/xboard-fullbackup.sh --local-only /tmp/out
+  has "历史表只导结构：v2_log v2_stat_user v2_server_machine_load_history"
+  d=$(cat /tmp/mysqldump.args)
+  grep -E ' xboard$' <<<"$d" | grep -q -- '--ignore-table=xboard.v2_log'
+  grep -E ' xboard$' <<<"$d" | grep -q -- '--ignore-table=xboard.v2_server_machine_load_history'
+  none 'ignore-table=xboard.v2_(user|order)|ignore-table=xboard.migrations' "$d"
+  grep -q -- '--no-data xboard v2_log v2_stat_user v2_server_machine_load_history$' <<<"$d"
+  f=$(ls /tmp/out/xboard_2*.7z); rm -rf /tmp/xbx; mkdir /tmp/xbx
+  7z x -p"$(head -1 "$PASSF")" -o/tmp/xbx "$f" </dev/null >/dev/null
+  t=$(ls /tmp/xbx/*.tar* 2>/dev/null | head -1)
+  if [ -n "$t" ]; then tar xf "$t" -C /tmp/xbx; fi
+  grep -rq "^mysql:xboard.v2_log"$'\t'"历史数据" /tmp/xbx --include=rootfs-skipped.txt
+}
+
+@test "vw 备份：vaultwarden 的 event 只导结构；komari.db 的事件日志与任务结果在包里的副本上清空，原库不动" {
+  mkdir -p "$L/opt/komari/data" /tmp/out
+  sqlite3 "$L/opt/komari/data/komari.db" "CREATE TABLE clients(id); INSERT INTO clients VALUES (1);
+    CREATE TABLE logs(id); INSERT INTO logs VALUES (1),(2); CREATE TABLE task_results(id); INSERT INTO task_results VALUES (1);"
+  env_conf "SVC_KOMARI_DATA=$L/opt/komari/data"
+  sed -i 's/^  \*GROUP_CONCAT\*) echo NULL ;;/  *"table_schema='"'"'vaultwarden'"'"'"*) printf "%s\n" users ciphers event ;;\n&/' /usr/local/bin/mysql
+  sed -i '2i echo "$*" >> /tmp/mysqldump.args' /usr/local/bin/mysqldump
+  rm -f /tmp/mysqldump.args
+  run /usr/local/bin/vw-fullbackup.sh --local-only /tmp/out
+  [ "$status" -eq 0 ]
+  d=$(cat /tmp/mysqldump.args)
+  grep -E ' vaultwarden$' <<<"$d" | grep -q -- '--ignore-table=vaultwarden.event'
+  grep -q -- '--no-data --default-character-set=utf8mb4 vaultwarden event$' <<<"$d"
+  f=$(ls /tmp/out/srvbak_2*.7z); rm -rf /tmp/vwx; mkdir /tmp/vwx
+  7z x -p"$(head -1 "$PASSF")" -o/tmp/vwx "$f" </dev/null >/dev/null
+  t=$(ls /tmp/vwx/*.tar* 2>/dev/null | head -1); [ -z "$t" ] || tar xf "$t" -C /tmp/vwx
+  k=$(find /tmp/vwx -path '*komari/komari.db' | head -1); [ -n "$k" ]
+  [ "$(sqlite3 "$k" 'SELECT count(*) FROM logs')" = 0 ]
+  [ "$(sqlite3 "$k" 'SELECT count(*) FROM task_results')" = 0 ]
+  [ "$(sqlite3 "$k" 'SELECT count(*) FROM clients')" = 1 ]
+  [ "$(sqlite3 "$L/opt/komari/data/komari.db" 'SELECT count(*) FROM logs')" = 2 ]
+  s=$(find /tmp/vwx -name rootfs-skipped.txt | head -1)
+  grep -q "^mysql:vaultwarden.event"$'\t' "$s"
+  grep -q "^sqlite:komari.db.logs"$'\t' "$s"
+}

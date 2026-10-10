@@ -2,6 +2,17 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-10-10：历史数据只收表结构
+
+起因：用户 2026-10-10 决定备份包只留核心资料和配置，日志、统计这类历史数据一律不要（OneDrive 只有 5GB）。表结构照留，恢复后应用照常启动，只是这些记录从零开始。订单、支付、佣金和 new-api 的调用明细 logs 和钱有关，不算历史，照留（logs 由用户确认保留）。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `vw-fullbackup.sh` | 2.6.0 → 2.7.0 | vaultwarden 的 `event` 只导结构；komari.db 的 `logs`、`task_results` 在包里的副本上清空（`clients`、`sessions`、`offline_notifications` 等照留）。包里其余业务库（含 xboard）由公共库按清单处理 |
+| `xboard-fullbackup.sh` | 2.5.0 → 2.6.0 | 自己的库：`v2_log`、`v2_mail_log`、`v2_stat`、`v2_stat_server`、`v2_stat_user`、`v2_server_machine_load_history`、`v2_admin_audit_log`、`v2_traffic_reset_logs`、`failed_jobs` 只导结构（`v2_user` 的已用流量、`v2_order`、`v2_payment`、`v2_commission_log`、`v2_gift_card_usage`、`migrations` 照导） |
+| `newapi-fullbackup.sh` | 1.3.0 → 1.4.0 | `quota_data`（按 logs 汇总的按小时用量，可重算）在落地机的快照副本上清空；`logs` 照留；数据目录里的程序日志 `logs/` 不进包 |
+| `litellm-fullbackup.sh` | 1.1.0 → 1.2.0 | `LiteLLM_SpendLogs`、`LiteLLM_Daily*Spend`、`LiteLLM_HealthCheckTable`、`LiteLLM_ErrorLogs`、`LiteLLM_AuditLog` 只导结构；key / user / team 表里的累计花费照导 |
+
 ## 2026-10-05：经 SSH 拉取的备份在线路抖动时自动重试
 
 生产上 LiteLLM 备份 10-03、10-05 两次在 12:40 UTC 那轮失败（一次导出时连接卡住 17 分钟后断开，一次 SSH 握手超时），new-api 备份 10-05 14:05 那轮传到一半断开。两台节点当时负载、内存正常，sshd 没有限流，出事都在北京时间晚高峰，下一轮又都正常；判断是前置机到节点的线路短时丢包（推断，未在晚高峰实测确认）。一次抖动就让整轮失败、发告警，LiteLLM 还要等 6 小时才有下一份。

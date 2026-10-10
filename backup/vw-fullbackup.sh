@@ -1,6 +1,7 @@
 #!/bin/bash
 # backup/vw-fullbackup.sh — 备份 Vaultwarden、Komari、SubConverter 与系统配置
-# VERSION: 2.6.0
+# VERSION: 2.7.0
+# 2.7.0: 历史数据只收表结构：vaultwarden 库的 event 只导结构（清单在公共库，需 common.sh 1.3.0）；komari.db 的 logs、task_results 在包里的副本上清空，原库不动。
 # 2.6.0: 新增 --local-only <目录>：包只写到该目录，不上传、不清理、不报心跳、不发告警；上一轮还在跑就等它结束（一键迁移现做包用）。
 # 2.5.0: 新增 rootfs/ 与 restore-manifest.tsv（系统配置、全部 MySQL 账号与业务库、镜像 digest），改为 GFS 分级保留，防重入锁。
 # ENV-REQUIRED: VW_BACKUP_DIR BACKUP_PASS_FILE|VW_PASS_FILE VW_REMOTE_PATH RCLONE_REMOTES SVC_VW_DIR PANEL_VHOST_DIR PANEL_CERT_DIR DB_CLIENT_HOST DOCKER_CIDR
@@ -149,6 +150,7 @@ mkdir -p "$STAGE"/{db,vaultwarden,komari,subconverter,system} "$OUT_DIR" || die 
 trap 'rm -rf "$STAGE"' EXIT
 
 # 1. Vaultwarden 数据库
+VW_HIST=()
 # 直接从 env 解析连接串，不重复保存密码
 DBURL="$(grep -m1 '^DATABASE_URL=' "$VW_DIR/vaultwarden.env" 2>/dev/null | cut -d= -f2-)"
 if [ -n "$DBURL" ]; then
@@ -170,9 +172,18 @@ if [ -n "$DBURL" ]; then
     { for f in /etc/my.cnf /etc/mysql/my.cnf; do [ -r "$f" ] && printf '!include %s\n' "$f"; done
       printf '[client]\npassword="%s"\n' "$esc"; } > "$DBCNF"
     log "导出数据库 ${DBNAME}@${DBHOST} ..."
-    if "$MYSQLDUMP_BIN" --defaults-file="$DBCNF" -h"$DBHOST" -u"$DBUSER" \
-         --no-tablespaces --single-transaction --routines \
-         --default-character-set=utf8mb4 "$DBNAME" 2>>"$LOG_FILE" \
+    # 历史表（event 等，清单在公共库 bk_history_default）只导结构
+    VW_HIST=(); VW_IGN=()
+    if declare -F bk_history_pick >/dev/null; then
+        mapfile -t VW_HIST < <(bk_history_pick "$DBNAME" "$("$MYSQL_BIN" --defaults-file="$DBCNF" -h"$DBHOST" -u"$DBUSER" -N -B \
+            -e "SELECT table_name FROM information_schema.tables WHERE table_schema='$DBNAME'" 2>/dev/null)")
+        for t in "${VW_HIST[@]}"; do VW_IGN+=("--ignore-table=$DBNAME.$t"); done
+    fi
+    if { "$MYSQLDUMP_BIN" --defaults-file="$DBCNF" -h"$DBHOST" -u"$DBUSER" \
+           --no-tablespaces --single-transaction --routines \
+           --default-character-set=utf8mb4 "${VW_IGN[@]}" "$DBNAME" 2>>"$LOG_FILE" \
+         && { [ "${#VW_HIST[@]}" -eq 0 ] || "$MYSQLDUMP_BIN" --defaults-file="$DBCNF" -h"$DBHOST" -u"$DBUSER" \
+                --no-tablespaces --no-data --default-character-set=utf8mb4 "$DBNAME" "${VW_HIST[@]}" 2>>"$LOG_FILE"; }; } \
          | gzip > "$STAGE/db/${DBNAME}.sql.gz"; then
         SZ=$(du -h "$STAGE/db/${DBNAME}.sql.gz" | cut -f1)
         # 不能只看 -s：gzip 压缩空输入也有 20 字节头，文件永远非空。要看解压后的内容。
@@ -330,6 +341,10 @@ BK_MYSQL="$MYSQL_BIN"
 # shellcheck disable=SC2034
 BK_MYSQLDUMP="$MYSQLDUMP_BIN"
 [ -f "$STAGE/db/${DBNAME:-}.sql.gz" ] && bk_row "db/${DBNAME}.sql.gz" - - mysql-db
+for t in "${VW_HIST[@]}"; do bk_skip "mysql:$DBNAME.$t" "历史数据，只收表结构；恢复后从零开始记"; done
+# Komari 的事件日志与任务执行结果是历史：在包里的副本上清空（表结构留着），原库不动
+[ -f "$STAGE/komari/komari.db" ] && declare -F bk_sqlite_strip >/dev/null \
+    && bk_sqlite_strip "$STAGE/komari/komari.db" komari.db logs task_results
 bk_link "$VW_DIR/data" vaultwarden/data
 bk_link "$VW_DIR/vaultwarden.env" vaultwarden/vaultwarden.env
 bk_link "$VW_DIR/compose.yaml" vaultwarden/compose.yaml && bk_row "$VW_DIR" - - compose-project

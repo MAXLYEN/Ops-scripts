@@ -411,3 +411,89 @@ EOF
   grep -q "^$P/data/hids_data/log"$'\t'"宝塔入侵检测（HIDS）事件日志" "$T/pkg/system/rootfs-skipped.txt"
   grep -qP "^\Q$P/data\E\t\d+\t\S+\tdir$" "$T/pkg/restore-manifest.tsv"
 }
+
+# ── 历史数据不进包：表结构留、数据不留 ──────────────────────
+none() {  # none <正则> <文本>：文本里不能有匹配的行（bats 里写在中间的 `! 命令` 不会让用例失败）
+  grep -qE -- "$1" <<<"$2" || return 0
+  printf '不该出现: %s\n%s\n' "$1" "$2" >&2
+  return 1
+}
+
+# 假 mysql：列库、列表；假 mysqldump：记下参数，按参数输出 CREATE TABLE（--no-data 时只有结构）
+fake_mysql_hist() {
+  cat > "$T/mysql" <<'SH'
+#!/bin/bash
+q="${*: -1}"
+case "$q" in
+  *SCHEMATA*) printf 'vaultwarden\tutf8mb4\tutf8mb4_general_ci\nxboard\tutf8mb4\tutf8mb4_unicode_ci\nshop\tutf8mb4\tutf8mb4_general_ci\n' ;;
+  *"TABLE_SCHEMA='xboard'"*) printf '%s\n' v2_user v2_order v2_commission_log v2_log v2_stat_user v2_server_machine_load_history failed_jobs migrations ;;
+  *"TABLE_SCHEMA='vaultwarden'"*) printf '%s\n' users ciphers event ;;
+  *"TABLE_SCHEMA='shop'"*) printf '%s\n' orders event ;;
+esac
+SH
+  cat > "$T/mysqldump" <<'SH'
+#!/bin/bash
+echo "$*" >> /tmp/bk-test/dump.log
+db=""; nodata=0; tabs=()
+for a; do case "$a" in --no-data) nodata=1 ;; -*) ;; *) if [ -z "$db" ]; then db=$a; else tabs+=("$a"); fi ;; esac; done
+for t in "${tabs[@]}"; do printf 'CREATE TABLE `%s` (id int);\n' "$t"; done
+[ "${#tabs[@]}" -gt 0 ] || printf 'CREATE TABLE `%s_main` (id int);\nINSERT INTO `%s_main` VALUES (1);\n' "$db" "$db"
+echo '-- Dump completed'
+SH
+  chmod 755 "$T/mysql" "$T/mysqldump"
+  BK_MYSQL="$T/mysql" BK_MYSQLDUMP="$T/mysqldump"
+  MYSQL_DEFAULTS_FILE="$T/my.cnf"; : > "$MYSQL_DEFAULTS_FILE"
+}
+
+@test "历史表：只导结构不导数据（Xboard 日志与统计、vaultwarden 的 event），订单与佣金照导；别的库同名表不受影响；记进 rootfs-skipped" {
+  fake_mysql_hist
+  XBOARD_DB_NAME=xboard
+  bk_init "$T/pkg"
+  bk_mysql_dbs
+  d="$T/dump.log"
+  # 每个库一次完整导出（排除历史表的数据）
+  grep -E '(^| )xboard$' "$d" | grep -q -- '--ignore-table=xboard.v2_log'
+  grep -E '(^| )xboard$' "$d" | grep -q -- '--ignore-table=xboard.v2_stat_user'
+  grep -E '(^| )xboard$' "$d" | grep -q -- '--ignore-table=xboard.v2_server_machine_load_history'
+  grep -E '(^| )xboard$' "$d" | grep -q -- '--ignore-table=xboard.failed_jobs'
+  none 'ignore-table=xboard.v2_(order|user|commission_log)|ignore-table=xboard.migrations' "$(cat "$d")"
+  # 不存在的历史表（v2_mail_log 等）不报错、不出现
+  none 'v2_mail_log' "$(cat "$d")"
+  # 再补一次只有结构的导出
+  grep -- '--no-data' "$d" | grep -q ' xboard v2_log v2_stat_user v2_server_machine_load_history failed_jobs$'
+  grep -E '(^| )vaultwarden$' "$d" | grep -q -- '--ignore-table=vaultwarden.event'
+  grep -- '--no-data' "$d" | grep -q ' vaultwarden event$'
+  # 别的库里叫 event 的表是业务数据，照导
+  none 'shop\.event|--no-data.* shop ' "$(cat "$d")"
+  zcat "$T/pkg/db/xboard.sql.gz" | grep -q 'CREATE TABLE `v2_log`'
+  zcat "$T/pkg/db/xboard.sql.gz" | grep -q 'INSERT INTO `xboard_main`'
+  grep -q "^mysql:xboard.v2_log"$'\t'"历史数据" "$T/pkg/system/rootfs-skipped.txt"
+  grep -q "^mysql:vaultwarden.event"$'\t' "$T/pkg/system/rootfs-skipped.txt"
+}
+
+@test "历史表：BACKUP_HISTORY_TABLES 可以改写默认清单；写成空就全部照导" {
+  fake_mysql_hist
+  XBOARD_DB_NAME=xboard BACKUP_HISTORY_TABLES="xboard.v2_log shop.event"
+  bk_init "$T/pkg"
+  bk_mysql_dbs
+  grep -E '(^| )shop$' "$T/dump.log" | grep -q -- '--ignore-table=shop.event'
+  none 'ignore-table=xboard.v2_stat_user' "$(cat "$T/dump.log")"
+  : > "$T/dump.log"; BACKUP_HISTORY_TABLES=""
+  bk_init "$T/pkg2"
+  bk_mysql_dbs
+  none 'ignore-table|--no-data' "$(cat "$T/dump.log")"
+}
+
+@test "SQLite 历史表：副本上清空数据、表结构与其他表照留；不存在的表跳过" {
+  sqlite3 "$T/k.db" "CREATE TABLE clients(id); INSERT INTO clients VALUES (1),(2);
+                     CREATE TABLE logs(id, msg); INSERT INTO logs VALUES (1,'x'),(2,'y');
+                     CREATE TABLE task_results(id); INSERT INTO task_results VALUES (1);"
+  bk_init "$T/pkg"
+  bk_sqlite_strip "$T/k.db" komari.db logs task_results no_such_table
+  [ "$(sqlite3 "$T/k.db" 'SELECT count(*) FROM clients')" = 2 ]
+  [ "$(sqlite3 "$T/k.db" 'SELECT count(*) FROM logs')" = 0 ]
+  [ "$(sqlite3 "$T/k.db" 'SELECT count(*) FROM task_results')" = 0 ]
+  [ "$(sqlite3 "$T/k.db" "PRAGMA integrity_check")" = ok ]
+  grep -q "^sqlite:komari.db.logs"$'\t'"历史数据" "$T/pkg/system/rootfs-skipped.txt"
+  none 'no_such_table' "$(cat "$T/pkg/system/rootfs-skipped.txt")"
+}

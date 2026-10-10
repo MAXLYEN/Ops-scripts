@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # backup/litellm-fullbackup.sh — 从汇总机拉取 LiteLLM 节点的库导出与工作目录，加密上传
-# VERSION: 1.1.0
+# VERSION: 1.2.0
+# 1.2.0: 历史数据只收表结构：pg_dump --exclude-table-data 排除花费明细 SpendLogs、按天用量 Daily*Spend、健康检查、错误与审计日志（LITELLM_HISTORY_TABLES 可改）；key / user / team 的累计花费照导，预算照常生效。
 # 1.1.0: 线路短时抖动时自动重试：SSH 握手超时、传到一半断开（ssh 退出码 255）隔 BACKUP_SSH_RETRY_WAIT 秒（默认 180）重试，最多 BACKUP_SSH_TRIES 次（默认 3），都失败才报失败；节点上的命令自己报错不重试。节点上被中断的拉取留下的旧暂存目录（超过 2 小时）下次清掉。起因：前置机到节点的线路在北京时间晚高峰丢包，2026-10-03、10-05 两次 12:40 那轮失败。
 # 1.0.0: 首版。远端 pg_dump -Fc 一致性导出并用容器自己的 pg_restore --list 校验；工作目录（.env 等，不含 pgdata 与日志）；三个容器的镜像 digest 与 inspect；GFS 分级保留，防重入锁，心跳。
 # ENV-REQUIRED: LITELLM_HOST LITELLM_WORKDIR LITELLM_BACKUP_DIR BACKUP_PASS_FILE RCLONE_REMOTES MAIL_TO
@@ -33,6 +34,10 @@ ALERT_FALLBACK_FILE="${ALERT_FALLBACK_FILE:-/var/log/backup-alerts.log}"
 # 容器名与 ops/deploy-litellm 写进 compose 的一致
 PG_CONTAINER=litellm-postgres
 CONTAINERS="litellm litellm-postgres litellm-redis"
+# 只收表结构、不收数据的历史表（pg_dump 表名模式，空格分隔；写成空就全收）：
+# 每次调用的花费明细、按天汇总的用量、健康检查与错误日志、审计日志
+HIST_DEFAULT='"LiteLLM_SpendLogs" "LiteLLM_Daily"*"Spend" "LiteLLM_HealthCheckTable" "LiteLLM_ErrorLogs" "LiteLLM_AuditLog"'
+LITELLM_HIST="${LITELLM_HISTORY_TABLES-$HIST_DEFAULT}"
 
 WARN=0
 FAIL=0
@@ -178,7 +183,11 @@ mkdir -p "$D/db" "$D/workdir" "$D/system"
 
 # pg_dump 在一个事务快照里读：库照常服务，导出的是同一时刻的一致状态。
 # 绝不复制运行中的 pgdata —— 那是写到一半的数据文件，拿回去起不来或静默损坏。
-docker exec "$PG" pg_dump -U litellm -Fc litellm > "$D/db/litellm.dump" 2> "$D/err" \
+# 历史表只导结构（$HIST，pg_dump 的表名模式：引号里区分大小写，引号外的 * 是通配）；
+# 没有的表不报错。key / user / team 的累计花费在各自的表里，照导，预算照常生效
+read -r -a HA <<< "${HIST:-}"   # 不用 for t in $HIST：模式里的 * 会被当成文件名展开
+X=(); for t in "${HA[@]}"; do X+=("--exclude-table-data=$t"); done
+docker exec "$PG" pg_dump -U litellm -Fc "${X[@]}" litellm > "$D/db/litellm.dump" 2> "$D/err" \
   || die "pg_dump 失败：$(tail -n 3 "$D/err")"
 [ -s "$D/db/litellm.dump" ] || die "pg_dump 输出为空"
 # 用容器自己（同版本）的 pg_restore 读一遍目录：读得开才算导出可用
@@ -213,7 +222,8 @@ REMOTE_EOF
 )
 
 log "在节点上导出 Postgres（pg_dump -Fc）并打包工作目录"
-REMOTE_ENV="W=$(printf '%q' "$LITELLM_WORKDIR") PG=$PG_CONTAINER CONTAINERS='$CONTAINERS'"
+REMOTE_ENV="W=$(printf '%q' "$LITELLM_WORKDIR") PG=$PG_CONTAINER CONTAINERS='$CONTAINERS' HIST=$(printf '%q' "$LITELLM_HIST")"
+[ -z "$LITELLM_HIST" ] || log "历史表只收结构（数据不导）：$LITELLM_HIST"
 pull_snap() {  # 每次重新拉：上一次断在半路的不要
   local st
   rm -rf "$P"; mkdir -p "$P" || return 1

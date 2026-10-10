@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.2.9
+# VERSION: 1.3.0
+# 1.3.0: 历史数据只收表结构：bk_mysql_dbs 对清单里的历史表（Xboard 的日志、统计、机器负载曲线、管理审计、流量重置记录、失败队列，vaultwarden 的 event）只导结构不导数据，记进 rootfs-skipped；清单由 bk_history_default 给出，BACKUP_HISTORY_TABLES 可整个改写。新增 bk_history_want / bk_history_pick / bk_history_tables，以及 bk_sqlite_strip（在包里的 SQLite 副本上清空历史表）。订单、支付、佣金照导。
 # 1.2.9: 面板 data/ 不收入侵检测（HIDS）事件日志 hids_data/log/（含 high/）：宝塔 13.1.0 起每天新增一个约 250MB 的 json，vw 与 xboard 包各带一份，两个包每天各涨约 9.5MB，5GB 的 OneDrive 几天就满；恢复不需要，hids_data 下的配置照收。
 # 1.2.8: warn 记下每条告警原文，finish 在「完成（N 条告警）」下面再列一遍（只累加了 OPS_WARNINGS、没走 warn 的，另起一行说明条数）。真机演练的 teardown 报了 1 条告警，原文滚出了屏幕，事后查不到是哪条。
 # 1.2.7: 新增 ensure_rclone（缺失或低于 1.75.0 时装官方版到 /usr/local/bin/rclone，按 SHA256SUMS 校验）与 rclone_version、ver_ge。真机演练发现 Debian 源的 rclone 1.60 下载 OneDrive 报 unauthenticated。
@@ -15,7 +16,7 @@ set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 # shellcheck disable=SC2034  # 供调用方查询公共库版本
-OPS_COMMON_VERSION="1.2.9"
+OPS_COMMON_VERSION="1.3.0"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
@@ -761,8 +762,48 @@ bk_mysql_users() {
 
 # bk_mysql_dbs <跳过的库...> —— 除系统库和跳过的库外，每个库一个 db/<库名>.sql.gz。
 # 单库 dump，不含 CREATE DATABASE / USE，还原时按文件名建库。字符集记在 db/databases.tsv。
+# 历史数据：只导表结构、不导数据。恢复后应用照常启动（表都在），只是日志、统计、监控曲线从零开始记。
+# 订单、支付、佣金这类和钱有关的记录不算历史，照导。BACKUP_HISTORY_TABLES（库.表，空格分隔）可整个改写，写成空就全部照导
+bk_history_default() {
+  local x=${XBOARD_DB_NAME:-xboard} t
+  for t in v2_log v2_mail_log v2_stat v2_stat_server v2_stat_user v2_server_machine_load_history \
+           v2_admin_audit_log v2_traffic_reset_logs failed_jobs; do printf '%s.%s ' "$x" "$t"; done
+  printf 'vaultwarden.event'
+}
+bk_history_want() {  # bk_history_want <库>：清单里属于这个库的历史表名（不管存不存在），空格分隔
+  local e
+  for e in ${BACKUP_HISTORY_TABLES-$(bk_history_default)}; do
+    [ "${e%%.*}" = "$1" ] && printf '%s ' "${e#*.}"
+  done
+  return 0
+}
+bk_history_pick() {  # bk_history_pick <库> <该库全部表名（每行一个）>：实际存在的历史表，每行一个
+  local e
+  for e in $(bk_history_want "$1"); do grep -qxF -- "$e" <<<"$2" && echo "$e"; done
+  return 0
+}
+bk_history_tables() {  # bk_history_tables <库>：用 MYSQL_DEFAULTS_FILE 查，这个库里实际存在的历史表
+  local have
+  [ -n "$(bk_history_want "$1")" ] || return 0
+  have=$(_bk_my -N -B -e "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='$1'" 2>/dev/null) || return 0
+  bk_history_pick "$1" "$have"
+}
+
+# bk_sqlite_strip <副本路径> <记录用的名字> <表...>：在包里的副本上清空历史表（表结构留着），不碰原库
+bk_sqlite_strip() {
+  local f=$1 name=$2 t n=0
+  shift 2
+  for t in "$@"; do
+    sqlite3 "$f" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='$t'" 2>/dev/null | grep -q 1 || continue
+    sqlite3 "$f" "DELETE FROM \"$t\"" || { warn "$name：清空 $t 失败，照原样进包"; continue; }
+    bk_skip "sqlite:$name.$t" "历史数据，只收表结构；恢复后从零开始记"; n=$((n + 1))
+  done
+  [ "$n" -eq 0 ] || sqlite3 "$f" 'VACUUM' || warn "$name：VACUUM 失败（不影响内容）"
+  return 0
+}
+
 bk_mysql_dbs() {
-  local skip=" information_schema performance_schema mysql sys $* ${BACKUP_SKIP_DBS:-} " db f t
+  local skip=" information_schema performance_schema mysql sys $* ${BACKUP_SKIP_DBS:-} " db f t hist ign
   mkdir -p "$BK_ROOT/db"
   _bk_my -N -B -e "SELECT SCHEMA_NAME, DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME
                    FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME" \
@@ -771,9 +812,15 @@ bk_mysql_dbs() {
     case "$skip" in *" $db "*) continue ;; esac
     case "$db" in */*|.*|'') warn "库名不适合做文件名，跳过: $db"; continue ;; esac
     f="db/$db.sql.gz"
-    if "${BK_MYSQLDUMP:-mysqldump}" --defaults-file="$MYSQL_DEFAULTS_FILE" --single-transaction --quick \
-         --routines --triggers --events --no-tablespaces --default-character-set=utf8mb4 \
-         "$db" 2>/dev/null | gzip > "$BK_ROOT/$f"; then
+    mapfile -t hist < <(bk_history_tables "$db")
+    ign=(); for t in "${hist[@]}"; do ign+=("--ignore-table=$db.$t"); done
+    if { "${BK_MYSQLDUMP:-mysqldump}" --defaults-file="$MYSQL_DEFAULTS_FILE" --single-transaction --quick \
+           --routines --triggers --events --no-tablespaces --default-character-set=utf8mb4 \
+           "${ign[@]}" "$db" 2>/dev/null \
+         && { [ "${#hist[@]}" -eq 0 ] || "${BK_MYSQLDUMP:-mysqldump}" --defaults-file="$MYSQL_DEFAULTS_FILE" \
+                --no-tablespaces --no-data --default-character-set=utf8mb4 "$db" "${hist[@]}" 2>/dev/null; }; } \
+         | gzip > "$BK_ROOT/$f"; then
+      for t in "${hist[@]}"; do bk_skip "mysql:$db.$t" "历史数据，只收表结构；恢复后从零开始记"; done
       # 读完整个流再判断，别让 grep -q 提前关管道
       t=$(zcat "$BK_ROOT/$f" | grep -c '^CREATE TABLE')
       bk_row "$f" - - mysql-db
