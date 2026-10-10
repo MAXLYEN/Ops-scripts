@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/verify-backup-pass.sh — 验证本地密码能否解开云端备份包
-# VERSION: 3.0.0
+# VERSION: 3.1.0
+# 3.1.0: 核对 .sha256：每个 .7z 都要有 .sha256，缺了告警；下载下来的最新包和它的 .sha256 比对，不符告警；网盘能直接报 sha256 的（如 Google Drive）不用下载，目录里每个包都和自己的 .sha256 比一遍，报不了的（如 OneDrive）只比最新包。装了 panel-backup-upload 就把宝塔整机备份的目录（PANEL_BACKUP_REMOTE_PATH，默认 Backups/panel）也校验，每周一次，超过 8 天才算过旧。
 # 3.0.0: 按 2026-10 备份重新规划：装了哪个备份脚本就校验它的 <BACKUP_CLOUD_ROOT>/<包名>（vault、hk-host、newapi、litellm），RCLONE_PATHS 改为可选（额外要校验的目录）。「最新包过旧」按包算：litellm 每周一次，超过 8 天才算；其余超过 VERIFY_MAX_AGE_DAYS（默认 2 天）。
 # 2.2.0: 本机装了哪个备份脚本，就把它的云端目录并入校验（不在 RCLONE_PATHS 里时自动加上并提示补配置），LiteLLM 包不会漏校验。
 # 2.1.0: 新增 --cron（失败告警 + 心跳）；检查最新包的时效，过旧即告警；按修改时间取最新包；超大包跳过。
@@ -64,6 +65,7 @@ declare -A MAXH=()
 while read -r s pkg days; do
   [ -x "${OPS_BIN_DIR:-/usr/local/bin}/$s.sh" ] || continue
   d=$(bk_cloud_dir "$pkg")
+  [ "$pkg" = panel ] && [ -n "${PANEL_BACKUP_REMOTE_PATH:-}" ] && { d=${PANEL_BACKUP_REMOTE_PATH#/}; d=${d%/}; }
   PATHS="$PATHS $d"; MAXH[$d]=$(( ${days:-0} * 24 ))
   echo "  $s → $d"
 done <<'EOF'
@@ -71,6 +73,7 @@ vault-backup vault
 hk-host-backup hk-host
 newapi-fullbackup newapi
 litellm-fullbackup litellm 8
+panel-backup-upload panel 8
 EOF
 for p in ${RCLONE_PATHS:-}; do
   p=${p#/}; p=${p%/}
@@ -78,6 +81,38 @@ for p in ${RCLONE_PATHS:-}; do
   case " $PATHS " in *" $p "*) ;; *) PATHS="$PATHS $p"; echo "  RCLONE_PATHS → $p" ;; esac
 done
 [ -n "${PATHS// /}" ] || { warn "本机一个备份脚本都没装，RCLONE_PATHS 也没填，没有可校验的目录"; finish; exit $?; }
+
+# 每个 .7z 都要有 .sha256。网盘能直接报 sha256 的（如 Google Drive）不用下载，逐个和 .sha256 比；
+# 报不了的（如 OneDrive）只比下面下载下来的最新包
+first3() { local a; read -r -a a <<<"$1"; printf '%s' "${a[*]:0:3}"; [ "${#a[@]}" -le 3 ] || printf ' …'; }
+sha_audit() {  # sha_audit <远端> <目录>
+  local r=$1 p=$2 lst f got want hs d miss="" nm=0 bad="" nb=0 nc=0
+  lst=$(rclone lsf "$r:/$p" --files-only 2>/dev/null) || return 0
+  while IFS= read -r f; do
+    [[ $f == *.7z ]] || continue
+    grep -qxF "$f.sha256" <<<"$lst" || { miss="$miss $f"; nm=$((nm + 1)); }
+  done <<<"$lst"
+  if [ "$nm" -gt 0 ]; then
+    warn "$nm 个包没有 .sha256：$(first3 "$miss")"
+    note "✗ $r:/$p 有 $nm 个包没有 .sha256"
+  fi
+  hs=$(rclone hashsum sha256 "$r:/$p" --include '*.7z' 2>/dev/null | grep -E '^[0-9a-f]{64}  ') || hs=""
+  if [ -z "$hs" ]; then log "这个网盘报不了 sha256，只核对下载下来的最新包"; return 0; fi
+  d="$TD/sha"; rm -rf "$d"; mkdir -p "$d"
+  rclone copy "$r:/$p" "$d/" --include '*.sha256' >/dev/null 2>&1
+  while read -r got f; do
+    [ -f "$d/$f.sha256" ] || continue
+    want=$(cut -d' ' -f1 < "$d/$f.sha256"); nc=$((nc + 1))
+    [ "$want" = "$got" ] || { bad="$bad $f"; nb=$((nb + 1)); }
+  done <<<"$hs"
+  rm -rf "$d"
+  if [ "$nb" -gt 0 ]; then
+    warn "$nb 个包和自己的 .sha256 对不上：$(first3 "$bad")"
+    note "✗ $r:/$p 有 $nb 个包和 .sha256 对不上"
+  else
+    ok "网盘报的 sha256：$nc 个包都和 .sha256 一致"
+  fi
+}
 
 # 逐个远端目录取最新的包，逐个密码试
 for r in $RCLONE_REMOTES; do
@@ -87,6 +122,7 @@ for r in $RCLONE_REMOTES; do
     LINE=$(rclone lsf "$r:/$p" --include '*.7z' --format tsp 2>/dev/null | sort | tail -1)
     if [ -z "$LINE" ]; then warn "没有 .7z 文件"; note "✗ $r:/$p 没有 .7z 文件"; continue; fi
     MT=${LINE%%;*}; REST=${LINE#*;}; SIZE=${REST%%;*}; NEWEST=${REST#*;}
+    sha_audit "$r" "$p"
     case "$SIZE" in ''|*[!0-9]*) SIZE=0 ;; esac   # 个别网盘不报大小（-1），按 0 处理照常下载
     AGE_H=$(( ($(date +%s) - $(date -d "$MT" +%s 2>/dev/null || date +%s)) / 3600 ))
     echo "  最新包: $NEWEST（$MT，$((AGE_H / 24)) 天 $((AGE_H % 24)) 小时前，$((SIZE / 1048576))MB）"
@@ -103,6 +139,15 @@ for r in $RCLONE_REMOTES; do
     fi
     rclone copy "$r:/$p/$NEWEST" "$TD/" 2>&1 | tail -1
     [ -f "$TD/$NEWEST" ] || { warn "下载失败"; note "✗ $r:/$p $NEWEST 下载失败"; continue; }
+    SHA=""
+    if rclone copy "$r:/$p/$NEWEST.sha256" "$TD/" >/dev/null 2>&1 && [ -s "$TD/$NEWEST.sha256" ]; then
+      if [ "$(cut -d' ' -f1 < "$TD/$NEWEST.sha256")" = "$(sha256sum "$TD/$NEWEST" | cut -d' ' -f1)" ]; then
+        ok "sha256 与 .sha256 一致"; SHA="、sha256 一致"
+      else
+        warn "$NEWEST 和它的 .sha256 对不上：包被改过或没传完整"
+        STALE="$STALE，sha256 对不上"
+      fi
+    fi
 
     okpass=""
     for f in $BACKUP_PASS_FILES; do
@@ -119,12 +164,12 @@ for r in $RCLONE_REMOTES; do
       7z l -p"$(cat "$okpass")" "$TD/$NEWEST" < /dev/null 2>/dev/null \
         | tail -12 | sed 's/^/    /'
       if [ -n "$STALE" ]; then note "✗ $r:/$p $NEWEST 可解开$STALE"
-      else note "✓ $r:/$p $NEWEST 可解开（$((AGE_H / 24)) 天前）"; fi
+      else note "✓ $r:/$p $NEWEST 可解开$SHA（$((AGE_H / 24)) 天前）"; fi
     else
       warn "所有已配置的密码都打不开 $NEWEST"
       note "✗ $r:/$p $NEWEST 所有密码都打不开"
     fi
-    rm -f "$TD/$NEWEST"
+    rm -f "$TD/$NEWEST" "$TD/$NEWEST.sha256"
   done
 done
 

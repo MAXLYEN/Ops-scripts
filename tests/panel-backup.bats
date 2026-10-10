@@ -121,12 +121,14 @@ PY
   has "照「备份-2026-09-28-1743」的设置"
   pkg=$(ls "$BR"/*_"$ts"_backup.tar.gz)
   [ "$(stat -c %a "$pkg")" = 600 ]                                   # 面板出的包是 644，脚本收紧
+  (cd "$BR" && sha256sum -c --quiet "$(basename "$pkg").sha256")      # 本机的包也配 .sha256
+  [ "$(stat -c %a "$pkg.sha256")" = 600 ]
   [ -z "$(find "$BR/${ts}_backup" -perm /077)" ]
   has "成功/失败项：13/0"
   for r in onedrive gdrive; do
     f=$(cloud "$r"); [[ $f == *_"$ts"_backup.7z ]]
     7z t -p"$(head -1 "$PASSF")" "$L/cloud/$r/Backups/panel/$f" </dev/null >/dev/null
-    [ -f "$L/cloud/$r/Backups/panel/$f.sha256" ]
+    (cd "$L/cloud/$r/Backups/panel" && sha256sum -c --quiet "$f.sha256")
   done
   grep -qx 'curl -fsS -m 10 --retry 2 https://hc.example/ping/pb/start' "$L/curl.log"
   grep -qx 'curl -fsS -m 10 --retry 2 https://hc.example/ping/pb' "$L/curl.log"
@@ -136,9 +138,11 @@ PY
 @test "本机自动备份只留最近 3 份（包、工作目录、任务记录一起删）；面板手动建的不动；云端每个网盘也只留 3 份" {
   task 1790000000 '备份-2026-09-01-0900'          # 另一条手动建的，比自动备份都旧
   task 1790000001 '自动备份-2026-09-02-0000'; task 1790000002 '自动备份-2026-09-03-0000'; task 1790000003 '自动备份-2026-09-04-0000'
+  touch "$BR/20260101-0000_1790000001_backup.tar.gz.sha256" "$BR/20260101-0000_1790000002_backup.tar.gz.sha256"
   create
   [ "$status" -eq 0 ]
   [ ! -e "$BR/20260101-0000_1790000001_backup.tar.gz" ] && [ ! -e "$BR/1790000001_backup" ]
+  [ ! -e "$BR/20260101-0000_1790000001_backup.tar.gz.sha256" ] && [ -e "$BR/20260101-0000_1790000002_backup.tar.gz.sha256" ]
   for t in 1790000002 1790000003 1790000000 1790642642; do
     [ -e "$BR/20260101-0000_${t}_backup.tar.gz" ] && [ -d "$BR/${t}_backup" ]
   done

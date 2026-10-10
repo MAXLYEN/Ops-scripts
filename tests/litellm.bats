@@ -147,10 +147,17 @@ case "$cmd" in
     if [[ "$2" == *:* ]]; then
       [ -e "/tmp/ll/rclone-fail-${2%%:*}" ] && exit 1
       d=$(loc "$2"); mkdir -p "$d"; cp "$1" "$d/"
+    elif [ -d "$(loc "$1")" ]; then   # 整个目录按 --include 下载
+      s=$(loc "$1"); pat='*'; [ "${3:-}" = --include ] && pat=$4; mkdir -p "$2"
+      for f in "$s"/$pat; do [ -f "$f" ] && cp "$f" "$2/"; done; true
     else
       s=$(loc "$1"); [ -f "$s" ] || exit 1; mkdir -p "$2"; cp "$s" "$2/"
     fi ;;
   check) cmp -s "$1/$4" "$(loc "$2")/$4" ;;
+  hashsum)   # 网盘直接报 sha256（像 Google Drive）；$L/rclone-nohash-<远端> 存在时报不了（像 OneDrive）
+    [ -e "/tmp/ll/rclone-nohash-${2%%:*}" ] && { echo "hash type not supported" >&2; exit 1; }
+    d=$(loc "$2"); pat='*'; [ "${3:-}" = --include ] && pat=$4
+    for f in "$d"/$pat; do [ -f "$f" ] && (cd "$d" && sha256sum "${f##*/}"); done; true ;;
   lsf)
     d=$(loc "$1"); shift; pat='*' fmt=""
     while [ $# -gt 0 ]; do case "$1" in --include) pat=$2; shift 2 ;; --format) fmt=$2; shift 2 ;; *) shift ;; esac; done
@@ -391,6 +398,53 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   for r in onedrive gdrive; do touch -d '3 days ago' "$L"/cloud/$r/Backups/litellm/*.7z; done
   run bash /src/ops/verify-backup-pass.sh
   none '已停止上传' "$output"
+}
+
+@test "校验：每个包都要有 .sha256；最新包下载后比对；网盘能报 sha256 的逐个比，报不了的只比最新包；面板整机备份的目录也校验" {
+  backup; [ "$status" -eq 0 ]
+  printf '#!/bin/sh\n' > /usr/local/bin/litellm-fullbackup.sh; chmod 755 /usr/local/bin/litellm-fullbackup.sh
+  env_conf "BACKUP_PASS_FILES=\"$PASSF\""
+  touch "$L/rclone-nohash-onedrive"                          # OneDrive 报不了 sha256
+  # 再放一个旧包（带 .sha256），网盘报 sha256 的要把它也比到
+  n=$(basename "$(pkg)"); old=litellm_20261001_204000.7z
+  for r in onedrive gdrive; do
+    c="$L/cloud/$r/Backups/litellm"
+    cp "$c/$n" "$c/$old"; (cd "$c" && sha256sum "$old" > "$old.sha256"); touch -d '2 days ago' "$c/$old"
+  done
+  run bash /src/ops/verify-backup-pass.sh
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓ onedrive:/Backups/litellm $n 可解开、sha256 一致"* ]]
+  [[ "$output" == *"✓ gdrive:/Backups/litellm $n 可解开、sha256 一致"* ]]
+  [[ "$output" == *"网盘报的 sha256：2 个包都和 .sha256 一致"* ]]
+  [[ "$output" == *"这个网盘报不了 sha256，只核对下载下来的最新包"* ]]
+  # 缺 .sha256、旧包与 .sha256 不符（不在最新包上，只有能报 sha256 的网盘查得出）、最新包与 .sha256 不符
+  rm "$L/cloud/onedrive/Backups/litellm/$old.sha256"
+  sed -i 's/^./0/' "$L/cloud/gdrive/Backups/litellm/$old.sha256"
+  run bash /src/ops/verify-backup-pass.sh
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"✗ onedrive:/Backups/litellm 有 1 个包没有 .sha256"* ]]
+  [[ "$output" == *"✗ gdrive:/Backups/litellm 有 1 个包和 .sha256 对不上"* ]]
+  [[ "$output" == *"✓ gdrive:/Backups/litellm $n 可解开、sha256 一致"* ]]
+  sed -i 's/^./0/' "$L/cloud/onedrive/Backups/litellm/$n.sha256"
+  run bash /src/ops/verify-backup-pass.sh
+  [[ "$output" == *"✗ onedrive:/Backups/litellm $n 可解开，sha256 对不上"* ]]
+  # 装了 panel-backup-upload 就校验 Backups/panel（PANEL_BACKUP_REMOTE_PATH 可改），每周一次：5 天前的包不算过旧
+  printf '#!/bin/sh\n' > /usr/local/bin/panel-backup-upload.sh; chmod 755 /usr/local/bin/panel-backup-upload.sh
+  pn=20261004-1930_1791142202_backup.7z
+  for r in onedrive gdrive; do
+    mkdir -p "$L/cloud/$r/Backups/panel"; cp "$(pkg)" "$L/cloud/$r/Backups/panel/$pn"
+    (cd "$L/cloud/$r/Backups/panel" && sha256sum "$pn" > "$pn.sha256"); touch -d '5 days ago' "$L/cloud/$r/Backups/panel/$pn"
+  done
+  run bash /src/ops/verify-backup-pass.sh
+  echo "$output"
+  [[ "$output" == *"panel-backup-upload → Backups/panel"* ]]
+  [[ "$output" == *"✓ onedrive:/Backups/panel $pn 可解开、sha256 一致（5 天前）"* ]]
+  [[ "$output" == *"✓ gdrive:/Backups/panel $pn 可解开、sha256 一致（5 天前）"* ]]
+  env_conf "BACKUP_PASS_FILES=\"$PASSF\"" 'PANEL_BACKUP_REMOTE_PATH="BTBackup-AllServer"'
+  run bash /src/ops/verify-backup-pass.sh
+  [[ "$output" == *"panel-backup-upload → BTBackup-AllServer"* ]]
 }
 
 # ── 演练 ────────────────────────────────────────────────────

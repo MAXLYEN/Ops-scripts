@@ -90,6 +90,7 @@ seal() {  # seal <内容目录> <包文件> [tar]：照备份脚本打包加密�
   fi
   (cd "$pack" && 7z a -t7z -mhe=on -p"$(head -1 "$PASSF")" "$out" ./* ./.[!.]* >/dev/null 2>&1) || true
   [ -s "$out" ]
+  (cd "$(dirname "$out")" && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")   # 和备份脚本一样，每个包都配 .sha256
 }
 
 make_vw() {  # make_vw [时间戳]：照 vw-fullbackup 的布局打一个包，路径放 $VW
@@ -722,6 +723,19 @@ SQL
   rm -rf "$R" "$FDB" /var/lib/ops-scripts/dr-restore.state; crontab -r 2>/dev/null; make_split; v2_local
   restore restore "$HK" "$VA" --no-start
   lacks "timedatectl set-timezone"
+}
+
+@test "包旁边没有 .sha256 时告警，恢复照常；.sha256 和包对不上就停" {
+  make_split
+  rm "$VA.sha256"
+  restore check "$HK" "$VA"
+  has "vault_20261010_201500.7z 旁边没有 .sha256"
+  has "sha256 与旁挂的 .sha256 一致"
+  has "===== 恢复计划 ====="
+  sed -i 's/^./0/' "$HK.sha256"
+  restore check "$HK" "$VA"
+  [ "$status" -ne 0 ]
+  has "sha256 与 $HK.sha256 不符"
 }
 
 @test "不给包名：从网盘的 Backups/hk-host 与 Backups/vault 各取最新的一个（连 .sha256）" {

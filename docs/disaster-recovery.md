@@ -122,6 +122,8 @@ cat "$(. /etc/ops-scripts/env.conf; echo "${BACKUP_PASS_FILE:-$VW_PASS_FILE}")"
 
 日志和历史数据（Xboard 的日志与统计、Komari 的事件、LiteLLM 的花费明细等）只有表结构，恢复后从零开始记，这是设计如此。
 
+每个包都配了一个 `.sha256`，记着包的校验和。恢复脚本会自动用它核对，对不上就停；想在自己电脑上先核对：Linux / macOS 用 `sha256sum -c <包>.7z.sha256`，Windows 用 `certutil -hashfile <包>.7z SHA256`，和 `.sha256` 文件里的第一段比。
+
 用 7-Zip 打开 `hk-host_*.7z`，再打开里面的 `payload.tar.gz`。**恢复需要的信息都在这里：**
 
 | 文件 | 看什么 |
@@ -176,7 +178,7 @@ opsget init/run
    curl -fsSL https://get.docker.com | sh
    ```
 
-3. **备份依赖与 rclone**：`restore-from-backup` 1.5.0 起恢复时自动装（任何模式），这里不用手动做。要自己装时注意两点：rclone **一定用官方版**（`curl -fsSL https://rclone.org/install.sh -o /tmp/rclone-install.sh && bash /tmp/rclone-install.sh`；发行版源里的 rclone 太旧，Debian 12 是 1.60，对 OneDrive 能列目录、下载却报 `unauthenticated`，面板整机备份只在 OneDrive 上，这条兜底路径就断了）；其余用 `DEBIAN_FRONTEND=noninteractive apt-get install -y msmtp msmtp-mta p7zip-full rsync sqlite3`。**装软件一律加 `DEBIAN_FRONTEND=noninteractive`**：有的终端显示不了 debconf 的全屏对话框，看起来就像卡死。
+3. **备份依赖与 rclone**：`restore-from-backup` 1.5.0 起恢复时自动装（任何模式），这里不用手动做。要自己装时注意两点：rclone **一定用官方版**（`curl -fsSL https://rclone.org/install.sh -o /tmp/rclone-install.sh && bash /tmp/rclone-install.sh`；发行版源里的 rclone 太旧，Debian 12 是 1.60，对 OneDrive 能列目录、下载却报 `unauthenticated`，从网盘取包这条路就断了）；其余用 `DEBIAN_FRONTEND=noninteractive apt-get install -y msmtp msmtp-mta p7zip-full rsync sqlite3`。**装软件一律加 `DEBIAN_FRONTEND=noninteractive`**：有的终端显示不了 debconf 的全屏对话框，看起来就像卡死。
 
 宝塔安装本身要 40 分钟以上（真机演练实测 46 分钟），是整个恢复里最长的一步，可以趁这时候去做落地机（4.8）。
 
@@ -233,7 +235,29 @@ restore-from-backup.sh check /root/pkgs/hk-host_*.7z /root/pkgs/vault_*.7z
 restore-from-backup.sh restore /root/pkgs/hk-host_*.7z /root/pkgs/vault_*.7z
 ```
 
-（新机已经配好 rclone 和 `env.conf` 的话，也可以不传包，直接 `restore-from-backup.sh restore`，它会从网盘的 `Backups/hk-host` 和 `Backups/vault` 各取最新的一个。）
+（新机已经配好 rclone 和 `env.conf` 的话，也可以不传包，直接 `restore-from-backup.sh restore`，它会从网盘的 `Backups/hk-host` 和 `Backups/vault` 各取最新的一个，连 `.sha256` 一起。）
+
+`check` 和 `restore` 都先用包旁边的 `.sha256` 核对，对不上就停；包旁边没有 `.sha256` 只告警，完整性靠 7z 自带的 CRC。
+
+**后备：2026-10-10 之前的旧格式包。** 新包都用不了时，还有旧方案留下的最后几份，挪在网盘的 `Old-Backups/` 下：`Backup-Server/srvbak_*.7z`（系统与 Vaultwarden）和 `Backup-Xboard/xboard_*.7z`（Xboard），同一个密码，都配了 `.sha256`。恢复脚本认得这两种包，但**不会自动去 `Old-Backups/` 找**，要手动下载后把路径传进去，两个包一起用（时间挑最接近的一对）：
+
+```bash
+rclone copy onedrive:Old-Backups/Backup-Server /root/pkgs/ --include 'srvbak_YYYYMMDD_HHMMSS.7z*'
+```
+
+```bash
+rclone copy onedrive:Old-Backups/Backup-Xboard /root/pkgs/ --include 'xboard_YYYYMMDD_HHMMSS.7z*'
+```
+
+```bash
+restore-from-backup.sh check /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7z
+```
+
+```bash
+restore-from-backup.sh restore /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7z
+```
+
+OneDrive 取不到就把 `onedrive:` 换成 `gdrive:`。这些包停在 2026-10-10，恢复出来的是那时的数据；恢复后照样装新的 `vault-backup`、`hk-host-backup` 和新时间表。
 
 恢复会自动完成：文件（权限、属主跟原机一致）、数据库和全部账号、各服务数据、按原版本拉镜像并启动容器、systemd 单元（包括连落地机的隧道）、Nginx、定时任务（按新频率）。最后 MySQL 的 root 密码也会改成原机的；系统时区不是 UTC 的话改成 UTC（定时任务按 UTC 写）。
 
@@ -563,6 +587,6 @@ opsget ops/litellm-drill teardown <备用机IP>
 | --- | --- | --- |
 | Xboard 的代理节点机器 | 不在这套备份里 | 面板域名不变的话，节点会自己重新连上；域名变了，要在每台节点上重新指定面板地址 |
 | Komari 的历史监控数据（`metrics` 库） | 按设计只在本地保留，不上传云端 | 恢复脚本建一个空库、照原机恢复它的账号，Komari 启动时自己建表，监控历史从零开始记录 |
-| 宝塔面板的证书自动续期 | 包里有 Nginx 配置、证书文件、面板的站点记录（`panel/data/`）和反向代理项目（`/www/server/proxy_project`），续期记录不一定对得上 | DNS 生效后逐个站点重新申请证书（第 4.6 节）。面板里有东西没恢复出来时，用每周的面板整机备份（网盘 `BTBackup-AllServer`，最近 3 份，7z 加密、同一个密码）在面板「设置 → 备份还原」里导入 |
+| 宝塔面板的证书自动续期 | 包里有 Nginx 配置、证书文件、面板的站点记录（`panel/data/`）和反向代理项目（`/www/server/proxy_project`），续期记录不一定对得上 | DNS 生效后逐个站点重新申请证书（第 4.6 节）。面板里有东西没恢复出来时，用每周的面板整机备份（网盘 `Backups/panel`，最近 3 份，7z 加密、同一个密码；连 `.sha256` 一起下载，先 `sha256sum -c <包>.7z.sha256` 核对再解开）在面板「设置 → 备份还原」里导入 |
 | 历史数据：Xboard 的日志与统计（含机器负载曲线）、vaultwarden 的事件、Komari 的事件日志与任务结果、new-api 的 `quota_data` 和程序日志、LiteLLM 的花费明细与按天用量 | 按设计只收表结构，不收数据（2026-10 起） | 不用管：表都在，应用照常启动，这些记录从恢复那一刻重新开始。账号、配置、订单、支付、佣金、new-api 的调用明细 `logs` 都在包里 |
 | 开发电脑上的东西 | 仓库在 GitHub 上 | 重新克隆：`git clone https://github.com/MAXLYEN/ops-scripts.git` |

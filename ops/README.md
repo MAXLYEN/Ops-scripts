@@ -17,12 +17,12 @@
 | `save-fw.sh` | 2.0.2 | 在修改防火墙前保存当前配置快照 |
 | `script-inventory.sh` | 1.0.2 | 盘点本机脚本并区分仓库来源与本地文件 |
 | `ssl-audit.sh` | 2.1.2 | 核对证书文件、站点引用与续期记录 |
-| `verify-backup-pass.sh` | 3.0.0 | 验证本地密码能否解开云端备份包，并检查最新包是否过旧 |
+| `verify-backup-pass.sh` | 3.1.0 | 验证本地密码能否解开云端备份包，核对 `.sha256`，并检查最新包是否过旧 |
 
 
 ### 云端备份每周校验
 
-备份脚本每次只做 `7z t` 自检，证明的是「刚打好的包能解开」；云端的包有没有损坏、密码文件和包还对不对得上、备份是否早已悄悄停止上传，要另外验证。`verify-backup-pass.sh --cron` 对每个 `RCLONE_REMOTES × RCLONE_PATHS` 取最新包下载解开，最新包超过 `VERIFY_MAX_AGE_DAYS`（默认 2 天）也算失败；失败时按「邮件 → webhook → 落盘」发告警，配了 `VERIFY_HEARTBEAT_URL` 还会上报心跳。超过 `VERIFY_MAX_MB` 的包不下载，只在汇总里注明。
+备份脚本每次只做 `7z t` 自检，证明的是「刚打好的包能解开」；云端的包有没有损坏、密码文件和包还对不对得上、备份是否早已悄悄停止上传，要另外验证。`verify-backup-pass.sh --cron` 对每个 `RCLONE_REMOTES × RCLONE_PATHS` 取最新包下载解开，最新包超过 `VERIFY_MAX_AGE_DAYS`（默认 2 天）也算失败；失败时按「邮件 → webhook → 落盘」发告警，配了 `VERIFY_HEARTBEAT_URL` 还会上报心跳。超过 `VERIFY_MAX_MB` 的包不下载，只在汇总里注明。每个 `.7z` 都要有 `.sha256`，缺了算失败；下载的最新包和它的 `.sha256` 比对，不符算失败；网盘能直接报 sha256 的（Google Drive）不用下载，目录里每个包都和自己的 `.sha256` 比一遍，报不了的（OneDrive）只比最新包。装了 `panel-backup-upload` 就把面板整机备份的目录（`PANEL_BACKUP_REMOTE_PATH`，默认 `Backups/panel`）也校验，每周一次，超过 8 天才算过旧。
 
 ```bash
 opsget -i ops/verify-backup-pass
@@ -48,8 +48,8 @@ opsget ops/install-backup-cron --apply    # 写入
 | `containerize-and-pin.sh` | 1.1.1 | 把服务改为 compose 管理并锁定镜像 digest |
 | `decommission-archive.sh` | 2.0.2 | 在机器退役前归档最终状态与数据 |
 | `deploy-litellm.sh` | 1.2.4 | 部署 LiteLLM、Postgres 与 Redis 容器 |
-| `panel-backup-upload.sh` | 1.1.0 | 加密并上传面板生成的整机备份包 |
-| `panel-backup-create.sh` | 1.2.0 | 照面板上次的设置生成整机备份，加密上传，本机与云端各留最近几份 |
+| `panel-backup-upload.sh` | 1.2.0 | 加密并上传面板生成的整机备份包 |
+| `panel-backup-create.sh` | 1.3.0 | 照面板上次的设置生成整机备份，加密上传，本机与云端各留最近几份 |
 | `ssh-allowlist.sh` | 1.1.2 | 本机 SSH 只放行名单里的 IP（ufw）；菜单里新增、删除，改完当场验证，不确认就回滚 |
 | `push-keys.sh` | 1.0.4 | 按主机清单批量下发 SSH 公钥 |
 | `install-backup-cron.sh` | 2.0.0 | 按统一时间表安装备份定时任务（幂等） |
@@ -62,7 +62,7 @@ opsget ops/install-backup-cron --apply    # 写入
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `litellm-drill.sh` | 1.1.0 | 在备用机上演练 LiteLLM 备份包的恢复、核对与清理 |
+| `litellm-drill.sh` | 1.1.1 | 在备用机上演练 LiteLLM 备份包的恢复、核对与清理 |
 
 ```bash
 opsget ops/litellm-drill restore <备用机IP> [包路径]   # 不给包就从网盘取最新的 litellm_*.7z
@@ -80,7 +80,7 @@ opsget ops/litellm-drill teardown <备用机IP>           # 删掉演练实例�
 | `fix-newapi-fallback-quota.sh` | 1.0.1 | 修正 new-api 兜底倍率造成的虚高消费 |
 | `fix-newapi-quota-data.sh` | 1.1.0 | 按已修正的日志重算 new-api 配额统计（按组合汇总核对，兼容拆行） |
 | `fix-newapi-reprice.sh` | 1.1.0 | 按后台当前价格重算指定模型的历史消费（日志、用户、令牌、渠道）；`--align-channels` 把渠道已用额度对齐到非测试日志 |
-| `newapi-drill.sh` | 1.1.0 | 在备用机演练 new-api 备份的恢复与清理 |
+| `newapi-drill.sh` | 1.2.0 | 在备用机演练 new-api 备份的恢复与清理 |
 | `newapi-linkcheck.sh` | 1.0.3 | 检查 new-api 隧道和公网访问全链路 |
 | `newapi-log-prune.sh` | 1.0.3 | 清理超过保留期的 new-api 消费日志 |
 
@@ -97,7 +97,7 @@ opsget ops/litellm-drill teardown <备用机IP>           # 删掉演练实例�
 
 改了模型价格、要把历史消费按新价格重算时：先 `apply-newapi-quota-fix.sh --reprice <模型1,模型2> --align-tokens --dry-run` 预演（在线备份一份副本，在副本上把修正、看板表重算和传回前的全部校验完整跑一遍，不停容器），看过明细再去掉 `--dry-run` 执行。价格从库里读（表达式计费 → 按次价格 → 倍率，与 new-api 的优先级相同），不写死在脚本里；动手前先用每条表达式计费日志自带的表达式重算、与实际扣费比对，对不上超过 2% 就拒绝。仍按兜底倍率 37.5 计费的记录一起按其模型的当前价格重算，模型没有价格时用 `--map 旧名=参考名` 指定。用户额度只改「已用额度原本等于日志合计」的用户（只有渠道测试记录的管理员不改）；`--align-tokens` 把令牌已用额度对齐到它名下日志的合计，日志被清理过的库不要用。灾难恢复演练 `newapi-drill.sh`、`litellm-drill.sh` 只在备用机运行，并拒绝生产目标。
 
-`containerize-and-pin.sh` 保留改名前的旧容器以便回滚，并锁定当前镜像 digest，不执行升级。`deploy-litellm.sh` 将容器端口绑定本机；加入模型后 `LITELLM_SALT_KEY` 必须保持不变，丢失该密钥将无法解开已加密的凭据；它随 `backup/litellm-fullbackup` 的加密包备份（包里的 `workdir/.env`）。`panel-backup-upload.sh` 默认用 7z 加密，`--raw` 会上传未加密原包；`--prune N` 只清理本机上传台账 `/var/lib/ops-scripts/panel-backup-uploaded.list` 里的包，不碰其他服务器的文件。`ssh-allowlist.sh` 的名单是 `~/.vps-hosts.txt` 里的机器、`ADMIN_IPS`、`ALLOW_EXTRA_IPS`（与 `sync-llm-allowlist` 同一套来源），按 `sshd -T` 的端口加 `ufw allow from <IP> ... comment 'ssh-allowlist'`，加完才删不限来源的 allow / limit 规则；只增删自己打过注释的规则，其他端口不动。在终端里直接运行进菜单：带编号列出名单，选新增（写进 `ADMIN_IPS`）或删除（从 `ADMIN_IPS`、`ALLOW_EXTRA_IPS`、`~/.vps-hosts.txt` 里一并去掉，机群里的机器会提示其他脚本也在用），先看改完的防火墙变化、确认后才写配置并执行，执行后当场问新窗口能不能登录：输 `yes` 保留，输别的或 270 秒内不输就回滚防火墙、这次改的配置也改回（运行菜单的窗口断了时，定时回滚与 `--rollback` 同样连配置一起改回；新窗口能登录就在新窗口里 `--confirm`）；不能删当前会话的来源。命令行等价写法 `--add <IP>` / `--remove <IP>`，没有终端时（或 `--preview`）只预演；`--apply` 前备份 `/etc/ufw/user*.rules` 到 `/root/ops-backups/ufw.<时间>` 并用 `systemd-run` 布置 5 分钟后自动回滚，另开窗口登录成功后 `--confirm` 取消，`--rollback` 立即回滚。当前会话的来源 IP 不在名单里时拒绝执行；有一条放行没加上时不删全开的规则。`panel-backup-create.sh` 由 `install-backup-cron` 排在每周日 UTC 19:30：复制面板「设置 → 备份还原」里最近一次备份的任务配置（备份内容一致）、换新时间戳，前台运行面板自带的 `backup_manager.py backup_data`，出了包再交给 `panel-backup-upload --prune`；本机只清理它自己建的「自动备份-」任务，按时间戳留最近 `PANEL_BACKUP_KEEP` 份（包、工作目录、面板里的任务记录一起删）；面板里手动建的备份一律不动，由人自己处理。出包后把包改成 600（宝塔 13.1 生成的是 644）。已在宝塔 13.1.0 上确认可用。面板里至少要手动建过一次备份，它照那次勾选的内容备份；失败时告警、心跳 `/fail`，本机旧包不动。`cleanup-purge.sh` 默认保留 crontab 正在调用的脚本、`BACKUP_SCRIPTS` 及它们依赖的 `env.conf` 与 `ops-common.sh`，`PURGE_CRON_SCRIPTS=1` 才一并删除。
+`containerize-and-pin.sh` 保留改名前的旧容器以便回滚，并锁定当前镜像 digest，不执行升级。`deploy-litellm.sh` 将容器端口绑定本机；加入模型后 `LITELLM_SALT_KEY` 必须保持不变，丢失该密钥将无法解开已加密的凭据；它随 `backup/litellm-fullbackup` 的加密包备份（包里的 `workdir/.env`）。`panel-backup-upload.sh` 默认用 7z 加密，`--raw` 会上传未加密原包；`--prune N` 只清理本机上传台账 `/var/lib/ops-scripts/panel-backup-uploaded.list` 里的包，不碰其他服务器的文件。`ssh-allowlist.sh` 的名单是 `~/.vps-hosts.txt` 里的机器、`ADMIN_IPS`、`ALLOW_EXTRA_IPS`（与 `sync-llm-allowlist` 同一套来源），按 `sshd -T` 的端口加 `ufw allow from <IP> ... comment 'ssh-allowlist'`，加完才删不限来源的 allow / limit 规则；只增删自己打过注释的规则，其他端口不动。在终端里直接运行进菜单：带编号列出名单，选新增（写进 `ADMIN_IPS`）或删除（从 `ADMIN_IPS`、`ALLOW_EXTRA_IPS`、`~/.vps-hosts.txt` 里一并去掉，机群里的机器会提示其他脚本也在用），先看改完的防火墙变化、确认后才写配置并执行，执行后当场问新窗口能不能登录：输 `yes` 保留，输别的或 270 秒内不输就回滚防火墙、这次改的配置也改回（运行菜单的窗口断了时，定时回滚与 `--rollback` 同样连配置一起改回；新窗口能登录就在新窗口里 `--confirm`）；不能删当前会话的来源。命令行等价写法 `--add <IP>` / `--remove <IP>`，没有终端时（或 `--preview`）只预演；`--apply` 前备份 `/etc/ufw/user*.rules` 到 `/root/ops-backups/ufw.<时间>` 并用 `systemd-run` 布置 5 分钟后自动回滚，另开窗口登录成功后 `--confirm` 取消，`--rollback` 立即回滚。当前会话的来源 IP 不在名单里时拒绝执行；有一条放行没加上时不删全开的规则。`panel-backup-create.sh` 由 `install-backup-cron` 排在每周日 UTC 19:30：复制面板「设置 → 备份还原」里最近一次备份的任务配置（备份内容一致）、换新时间戳，前台运行面板自带的 `backup_manager.py backup_data`，出了包再交给 `panel-backup-upload --prune`；本机只清理它自己建的「自动备份-」任务，按时间戳留最近 `PANEL_BACKUP_KEEP` 份（包、工作目录、面板里的任务记录一起删）；面板里手动建的备份一律不动，由人自己处理。出包后把包改成 600（宝塔 13.1 生成的是 644），旁边写一个 `.sha256`（也是 600，清理时一起删）；上传的加密包同样配 `.sha256`。已在宝塔 13.1.0 上确认可用。面板里至少要手动建过一次备份，它照那次勾选的内容备份；失败时告警、心跳 `/fail`，本机旧包不动。`cleanup-purge.sh` 默认保留 crontab 正在调用的脚本、`BACKUP_SCRIPTS` 及它们依赖的 `env.conf` 与 `ops-common.sh`，`PURGE_CRON_SCRIPTS=1` 才一并删除。
 
 `sync-llm-allowlist.sh` 的 fail2ban/ufw 封禁会影响所有端口，`ignoreip` 需覆盖整组可信机器，并检查 nginx 的 allow/deny 顺序。`upgrade-vaultwarden.sh` 即使回退 compose 配置也未必能回退数据库迁移，升级前须有近期备份。
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/restore-from-backup.sh — 原机已不在时，用每日加密备份包把新机恢复成原样
-# VERSION: 2.0.0
+# VERSION: 2.0.1
+# 2.0.1: 包旁边没有 .sha256 从提示改为告警（所有备份包都配 .sha256，缺了说明下载漏了或包不完整），恢复照常继续，完整性仍有 7z 的 CRC 兜底。从网盘取包时没取到 .sha256 也告警。
 # 2.0.0: 按 2026-10 备份重新规划：前置机用 hk-host 包加 vault 包恢复（两个包不重复：系统、账号、Xboard、Komari 在 hk-host，Vaultwarden 在 vault）。目标 vault / hk-host / all（默认），从 <BACKUP_CLOUD_ROOT>/<包名> 各取最新的一个，连 .sha256 一起下载核对；恢复后装 vault-backup / hk-host-backup 与新的定时任务。正式恢复与演练都把系统时区设成 UTC（文件名、日志、定时任务都按 UTC），设不了就告警。历史表只有结构是设计如此。
 # 1.5.1: --no-egress（一键迁移的演练）时，用原机身份往外上报的宿主机单元（komari-agent）只放文件、不启用：容器外连限制拦不住宿主机进程，启用了新机就在 Komari 里冒充原机上报。隧道等其他单元照常启用（核对要用）；不带 --no-egress 的恢复（切换）照常全部启用。
 # 1.5.0: 真机演练发现：备份依赖原先写在装定时任务的步骤里，--drill / --no-cron 时整段跳过，恢复后 msmtp、rclone 都没有（告警发不出、verify-backup-pass 跑不了）；改为任何模式都装。rclone 不再从 apt 装（Debian 12 源是 1.60，下载 OneDrive 报 unauthenticated），改用 ensure_rclone 装官方版；装依赖时说明 apt 锁被占用最多等 5 分钟，不再静默卡住。
@@ -147,7 +148,7 @@ fetch_latest() {  # fetch_latest <hk-host|vault>：从各远端挑最新的一�
   if [ ! -s "$DR_ROOT/download/$best" ]; then
     log "下载 $from:$dir/$best"
     rclone copy "$from:$dir/$best" "$DR_ROOT/download/" || die "下载失败"
-    rclone copy "$from:$dir/$best.sha256" "$DR_ROOT/download/" 2>/dev/null || log "$from 上没有 $best.sha256，完整性靠 7z 的 CRC 校验"
+    rclone copy "$from:$dir/$best.sha256" "$DR_ROOT/download/" 2>/dev/null || log "$from 上取不到 $best.sha256"
   fi
   FETCHED="$DR_ROOT/download/$best"
 }
@@ -166,7 +167,7 @@ open_pkg() {  # open_pkg <包路径> <解开到的父目录>
     [ "$(cut -d' ' -f1 < "$f.sha256")" = "$sha" ] || die "sha256 与 $f.sha256 不符：包被改过或没传完整"
     ok "sha256 与旁挂的 .sha256 一致"
   else
-    log "没有旁挂的 .sha256（云端只存 .7z），完整性靠下面 7z 的 CRC 校验"
+    warn "$(basename "$f") 旁边没有 .sha256：每个包都配了一个，从网盘下载时要一起下载；这次完整性只靠下面 7z 的 CRC 校验"
   fi
   dir="$2/pkg-${sha:0:12}"
   if [ -f "$dir/.opened" ]; then

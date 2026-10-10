@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/panel-backup-create.sh — 照面板上次的设置生成整机备份，加密上传，本机与云端各留最近几份
-# VERSION: 1.2.0
+# VERSION: 1.3.0
+# 1.3.0: 本机的包旁边也写一个 .sha256（600），清理旧包时一起删。
 # 1.2.0: 出包后把包改成 600、工作目录去掉组和其他人的权限。宝塔 13.1.0 生成的包是 644（之前是 600），包里有数据库与站点配置。
 # 1.1.0: 本机清理只算本脚本建的「自动备份-」任务，留最近 PANEL_BACKUP_KEEP 份；面板里手动建的备份（包、工作目录、任务记录）一律不动，由人自己处理。已在宝塔 13.1.0 上确认 backup_manager.py 的调用方式与任务字段未变。
 # 1.0.0: 首版。复制面板「设置 → 备份还原」里最近一次备份的任务配置（备份内容一致），换新时间戳写回 backup_task.json，前台运行面板自带的 backup_manager.py backup_data 并等它结束；出了包再调用 panel-backup-upload 加密上传、清理云端，本机只留最近 PANEL_BACKUP_KEEP 份（包、工作目录、任务记录一起删）；失败时告警（邮件 → webhook → 落盘）、心跳 /fail，本机旧包不动。
@@ -117,6 +118,9 @@ gzip -t "$PKG" 2>/dev/null || fail_out "生成的包不完整：$PKG"
 # 宝塔 13.1 起包是 644，包里有数据库与站点配置，只留给 root
 chmod 600 "$PKG" || warn "改不了包的权限：$PKG"
 chmod -R go-rwx "$DIR/${TS}_backup" 2>/dev/null || true
+# 本机的包也配 .sha256（所有备份文件都要有）；清理时跟包一起删
+(cd "$DIR" && sha256sum "$(basename "$PKG")" > "$(basename "$PKG").sha256" && chmod 600 "$(basename "$PKG").sha256") \
+  || warn "写不了 $PKG.sha256"
 cnt=$(python3 - "$TASKS" "$TS" <<'PY'
 import json, sys
 t = [x for x in json.load(open(sys.argv[1], encoding='utf-8')) if str(x.get('timestamp')) == sys.argv[2]]
@@ -154,7 +158,7 @@ if [ -z "$old" ]; then
 else
   for t in $old; do
     [[ $t =~ ^[0-9]+$ ]] || continue
-    rm -f -- "$DIR"/*_"$t"_backup.tar.gz && rm -rf -- "${DIR:?}/${t}_backup" && ok "删掉 $t 的包与工作目录"
+    rm -f -- "$DIR"/*_"$t"_backup.tar.gz "$DIR"/*_"$t"_backup.tar.gz.sha256 && rm -rf -- "${DIR:?}/${t}_backup" && ok "删掉 $t 的包与工作目录"
   done
 fi
 

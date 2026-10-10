@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/litellm-drill.sh — 在备用机上演练 LiteLLM 备份包的恢复、核对与清理
-# VERSION: 1.1.0
+# VERSION: 1.1.1
+# 1.1.1: 包旁边没有 .sha256 时告警（原先不出声），完整性只剩 7z 的 CRC。
 # 1.1.0: 从网盘取包改为 <BACKUP_CLOUD_ROOT>/litellm（Backups/litellm，按 2026-10 备份重新规划），不再读 LITELLM_CLOUD_DIR。
 # 1.0.0: 首版。按包里 RESTORE.md 的顺序：先放 .env，只起 postgres，pg_restore --clean --if-exists，再按 digest 起全部并查健康；verify 与线上比行数、列模型、查解密错误；teardown 还原目标机。拒绝 LITELLM_HOST、NEWAPI_HOST 与本机。
 # ENV-REQUIRED: LITELLM_HOST BACKUP_PASS_FILE
@@ -76,6 +77,8 @@ open_package() {  # 取包、解开、核对，结果放 X / PKGNAME / PORT / IM
   if [ -f "$f.sha256" ]; then
     [ "$(cut -d' ' -f1 < "$f.sha256")" = "$(sha256sum "$f" | cut -d' ' -f1)" ] || die "sha256 与 $f.sha256 不符"
     ok "sha256 与旁注一致"
+  else
+    warn "$PKGNAME 旁边没有 .sha256（每个包都配了一个），完整性只靠 7z 的 CRC 校验"
   fi
   # -mhe=on 的包在管道里不喂 stdin 会挂住
   7z x -p"$PASS" -o"$WORK/x" "$f" </dev/null >/dev/null 2>&1 || die "解不开：密码不对或包已损坏"

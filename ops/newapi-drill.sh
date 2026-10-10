@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/newapi-drill.sh — 在备用机演练 new-api 备份的恢复与清理
-# VERSION: 1.1.0
+# VERSION: 1.2.0
+# 1.2.0: 从网盘取包时连 .sha256 一起下载核对，不符就停；没有 .sha256 告警（完整性只剩 7z 的 CRC）。
 # 1.1.0: 从网盘取包改为 <BACKUP_CLOUD_ROOT>/newapi（默认 Backups/newapi，按 2026-10 备份重新规划），不再读 NEWAPI_CLOUD_DIR。
 # 1.0.4: 状态文件的值用 printf %q 写入：它会被 source，而 IMAGE 取自备份包内容。
 # ENV-REQUIRED: NEWAPI_HOST BACKUP_PASS_FILE
@@ -105,6 +106,14 @@ do_restore() {
   rclone copy "${RCLONE_REMOTE}:/${NEWAPI_CLOUD_DIR}/${LATEST}" "$WORK/" \
     || die "从云端下载失败"
   log "已下载到本地临时目录"
+  rclone copy "${RCLONE_REMOTE}:/${NEWAPI_CLOUD_DIR}/${LATEST}.sha256" "$WORK/" >/dev/null 2>&1 || true
+  if [ -s "$WORK/${LATEST}.sha256" ]; then
+    [ "$(cut -d' ' -f1 < "$WORK/${LATEST}.sha256")" = "$(sha256sum "$WORK/$LATEST" | cut -d' ' -f1)" ] \
+      || die "sha256 与 ${LATEST}.sha256 不符：包被改过或没传完整"
+    log "sha256 与 .sha256 一致"
+  else
+    warn "云端没有 ${LATEST}.sha256（每个包都配了一个），完整性只靠 7z 的 CRC 校验"
+  fi
 
   # -mhe=on 的包在管道里不喂 stdin 会挂住
   7z x -p"$PASS" -o"$WORK/x" "$WORK/$LATEST" < /dev/null >/dev/null 2>&1 \

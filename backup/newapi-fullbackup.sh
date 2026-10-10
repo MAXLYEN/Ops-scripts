@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # backup/newapi-fullbackup.sh — 从汇总机拉取 new-api 数据，生成一致性快照并加密上传
-# VERSION: 2.0.0
+# VERSION: 2.0.1
+# 2.0.1: 上传后的校验连 .sha256 一起比（原先只比包），.sha256 没传完整也算这个网盘没成功。
 # 2.0.0: 按 2026-10 备份重新规划：本机目录 <BACKUP_LOCAL_ROOT>/newapi（默认 /box/backup/newapi），网盘 <BACKUP_CLOUD_ROOT>/newapi（默认 Backups/newapi），不再读 NEWAPI_BAK_DIR / NEWAPI_CLOUD_DIR；分级保留改为全留 3 天 → 每天到 30 天 → 每周到 90 天 → 每月（NEWAPI_KEEP_TIERS 可改）；频率改为每 6 小时（UTC 04:30 起，见 install-backup-cron）。
 # 1.4.0: 历史数据只收表结构：one-api.db 的 quota_data 在落地机的快照副本上清空（NEWAPI_HISTORY_TABLES 可改，生产库不动）；调用明细 logs 是计费对账依据，照留。数据目录里的程序日志 logs/ 不进包。
 # 1.3.0: 线路短时抖动时自动重试：SSH 握手超时、传到一半断开（ssh 退出码 255）隔 BACKUP_SSH_RETRY_WAIT 秒（默认 180）重试，最多 BACKUP_SSH_TRIES 次（默认 3），都失败才报失败；落地机上的命令自己报错不重试。落地机上被中断的拉取留下的旧暂存目录（超过 2 小时，里面是整库副本）下次清掉，中断时也尽量当场删掉。起因：前置机到落地机的线路在北京时间晚高峰丢包，2026-10-05 14:05 那轮传到一半断开。
@@ -417,7 +418,7 @@ for R in $RCLONE_REMOTES; do
     # Google Drive 元数据有延迟，立刻 check 会误报
     sleep 10
     if rclone check "$NEWAPI_BAK_DIR" "${R}:${CLOUD_DIR}" \
-         --include "$(basename "$ARCHIVE")" >>"$LOG" 2>&1; then
+         --include "$(basename "$ARCHIVE")" --include "$(basename "$ARCHIVE").sha256" >>"$LOG" 2>&1; then
       log "${R} 校验通过"
       UPLOADED=$((UPLOADED+1))
     else

@@ -6,8 +6,8 @@
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `litellm-fullbackup.sh` | 2.0.0 | 从汇总机拉取 LiteLLM 节点的库导出与工作目录，加密上传 |
-| `newapi-fullbackup.sh` | 2.0.0 | 从汇总机拉取 new-api 数据，生成一致性快照并加密上传 |
+| `litellm-fullbackup.sh` | 2.0.1 | 从汇总机拉取 LiteLLM 节点的库导出与工作目录，加密上传 |
+| `newapi-fullbackup.sh` | 2.0.1 | 从汇总机拉取 new-api 数据，生成一致性快照并加密上传 |
 | `vault-backup.sh` | 1.0.0 | 只备份 Vaultwarden（库、数据目录、配置），每小时一次 |
 | `hk-host-backup.sh` | 1.0.0 | 前置机整机备份：系统、面板、全部 MySQL 账号与业务库（Xboard 等）、Xboard 目录、Komari、SubConverter、站点，每天一次 |
 

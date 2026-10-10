@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/panel-backup-upload.sh — 加密并上传面板生成的整机备份包
-# VERSION: 1.1.0
+# VERSION: 1.2.0
+# 1.2.0: 每个上传的包都配 .sha256：--raw 原样上传时也在包旁边补一个；.sha256 传失败或上传后校验对不上（连 .sha256 一起比）都算这个网盘没传成功。恢复说明加上先核对 sha256。
 # 1.1.0: 网盘目录默认改为 <BACKUP_CLOUD_ROOT>/panel（Backups/panel，按 2026-10 备份重新规划；PANEL_BACKUP_REMOTE_PATH 仍可改）；包旁边配一个 .sha256 一起上传，清理时一起删。台账只记文件名，目录整个搬走后照样认。
 # 1.0.5: --prune 只清理本机上传台账里、校验通过的包，不再按名字删掉整个云端目录里的其他文件。
 # ENV-REQUIRED: RCLONE_REMOTES
@@ -86,9 +87,9 @@ else
   ok "$(basename "$UPFILE")  $(human "$UPFILE")  自检通过"
   NAME=$(basename "$UPFILE"); UPDIR="$WORK"
 fi
-# 校验和旁注：下载回来先核对它，再输密码解开
-if [ "$UPDIR" = "$WORK" ]; then
-  (cd "$WORK" && sha256sum "$NAME" > "$NAME.sha256") || die "写不了 .sha256"
+# 校验和旁注：下载回来先核对它，再输密码解开。--raw 时补在面板的包旁边（panel-backup-create 出包时已写过的照用）
+if [ "$UPDIR" = "$WORK" ] || [ ! -s "$UPFILE.sha256" ]; then
+  (cd "$UPDIR" && sha256sum "$NAME" > "$NAME.sha256" && chmod 600 "$NAME.sha256") || die "写不了 .sha256"
 fi
 
 section "上传"
@@ -96,10 +97,10 @@ for r in $RCLONE_REMOTES; do
   log "→ $r:/$DEST"
   # 退出码不在这里判 —— 下面的 rclone check 做单向校验才是判据
   rclone copy "$UPFILE" "$r:/$DEST" --progress 2>&1 | tail -2 | sed 's/^/    /'
-  [ -f "$UPFILE.sha256" ] && rclone copy "$UPFILE.sha256" "$r:/$DEST" >/dev/null 2>&1
+  rclone copy "$UPFILE.sha256" "$r:/$DEST" >/dev/null 2>&1 || { warn "$r 的 .sha256 没传上去"; continue; }
   # 云盘写入后元数据有延迟，立刻校验会误报，等一下再比
   sleep 10
-  if rclone check "$UPDIR" "$r:/$DEST" --include "$NAME" --one-way >/dev/null 2>&1; then
+  if rclone check "$UPDIR" "$r:/$DEST" --include "$NAME" --include "$NAME.sha256" --one-way >/dev/null 2>&1; then
     ok "$r 校验通过"
     mkdir -p "$(dirname "$UP_LEDGER")"
     grep -qxF "$r"$'\t'"$NAME" "$UP_LEDGER" 2>/dev/null || printf '%s\t%s\n' "$r" "$NAME" >> "$UP_LEDGER"
@@ -137,7 +138,7 @@ done
 cat <<EOF
 
   恢复方式：
-    1. 从网盘下载该包
+    1. 从网盘下载该包和旁边的 .sha256，先核对: sha256sum -c $NAME.sha256
 $([ "$RAW" -eq 1 ] || echo "    2. 解密: 7z x <包名>.7z    （提示输密码，用 $PASSFILE 里的）")
     $([ "$RAW" -eq 1 ] && echo 2 || echo 3). 在目标机的面板里用「备份恢复」功能导入 tar.gz
 
