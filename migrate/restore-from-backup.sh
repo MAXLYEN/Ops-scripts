@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/restore-from-backup.sh — 原机已不在时，用每日加密备份包把新机恢复成原样
-# VERSION: 1.5.1
+# VERSION: 2.0.0
+# 2.0.0: 按 2026-10 备份重新规划：前置机用 hk-host 包加 vault 包恢复（两个包不重复：系统、账号、Xboard、Komari 在 hk-host，Vaultwarden 在 vault）。目标 vault / hk-host / all（默认），从 <BACKUP_CLOUD_ROOT>/<包名> 各取最新的一个，连 .sha256 一起下载核对；恢复后装 vault-backup / hk-host-backup 与新的定时任务。正式恢复与演练都把系统时区设成 UTC（文件名、日志、定时任务都按 UTC），设不了就告警。历史表只有结构是设计如此。
 # 1.5.1: --no-egress（一键迁移的演练）时，用原机身份往外上报的宿主机单元（komari-agent）只放文件、不启用：容器外连限制拦不住宿主机进程，启用了新机就在 Komari 里冒充原机上报。隧道等其他单元照常启用（核对要用）；不带 --no-egress 的恢复（切换）照常全部启用。
 # 1.5.0: 真机演练发现：备份依赖原先写在装定时任务的步骤里，--drill / --no-cron 时整段跳过，恢复后 msmtp、rclone 都没有（告警发不出、verify-backup-pass 跑不了）；改为任何模式都装。rclone 不再从 apt 装（Debian 12 源是 1.60，下载 OneDrive 报 unauthenticated），改用 ensure_rclone 装官方版；装依赖时说明 apt 锁被占用最多等 5 分钟，不再静默卡住。
 # 1.4.0: 新增 --no-egress：正式恢复也在起容器前拦下容器主动外连（一键迁移的演练用：原机还在服务，新机的容器用同一份数据，会重复给用户发提醒邮件、Komari 看到被控端全离线会告警）；之后不带它的正式恢复起容器前自动撤掉。新增 egress on|off 单独加上 / 撤掉（一键迁移回滚时新机加回）。
@@ -14,12 +15,13 @@
 # ENV-REQUIRED: BACKUP_PASS_FILE|VW_PASS_FILE DB_CLIENT_HOST MYSQL_DEFAULTS_FILE PANEL_VHOST_DIR PANEL_CERT_DIR
 # 在 init/ 做完、配好 env.conf / 备份密码文件 / rclone 的新机上运行。原机还在时用 migrate/live-migrate（它在新机上调用本脚本）。
 # 用法：
-#   restore-from-backup.sh check    [vw|xboard|all|包路径...]    解开、校验，列出恢复会做什么；不动本机
-#   restore-from-backup.sh restore  [vw|xboard|all|包路径...] [--force] [--drill] [--no-start] [--no-cron] [--no-egress] [--image 名称=镜像]
+#   restore-from-backup.sh check    [hk-host|vault|all|包路径...]    解开、校验，列出恢复会做什么；不动本机
+#   restore-from-backup.sh restore  [hk-host|vault|all|包路径...] [--force] [--drill] [--no-start] [--no-cron] [--no-egress] [--image 名称=镜像]
 #   restore-from-backup.sh status
 #   restore-from-backup.sh teardown                               只清理 --drill 恢复出来的内容
 #   restore-from-backup.sh egress on|off                          单独加上 / 撤掉容器外连限制（演练机上只能 teardown 时撤）
-# 不给目标等于 all：从 RCLONE_REMOTES 下的 VW_REMOTE_PATH / XBOARD_REMOTE_PATH 各取最新的包。
+# 不给目标等于 all：从 RCLONE_REMOTES 下的 <BACKUP_CLOUD_ROOT>/hk-host 与 /vault 各取最新的包。
+# 整台前置机要两个包一起恢复；机器还在、只回滚 Vaultwarden 时只给 vault 包（加 --force）。
 # --force     本机已有数据或在跑的服务时仍然恢复：原有目录移到 .bak.<时间>，原有库先导出再删
 # --drill     临时机上演练：本机有任何数据就拒绝，不装定时任务、不启用 systemd 单元，容器不许主动连外网，之后可 teardown
 # --no-start  只还原文件、库与定时任务，不拉镜像、不起容器、不重载 nginx（打印这些命令）
@@ -128,15 +130,11 @@ safe_rm() {  # 只删我们建出来的路径；浅层系统目录一律拒绝
 # ── 取包、解开、校验 ────────────────────────────────────────
 P_FILE=() P_SHA=() P_DIR=() P_X=() P_KIND=() P_LAYOUT=() P_TIME=()
 FETCHED=""
-fetch_latest() {  # fetch_latest <vw|xboard>：从各远端挑最新的一个下载，路径放 FETCHED
-  local kind=$1 key pat dir r n best="" from=""
-  case $kind in
-    vw)     key=VW_REMOTE_PATH;     pat='srvbak_*.7z' ;;
-    xboard) key=XBOARD_REMOTE_PATH; pat='xboard_*.7z' ;;
-  esac
-  dir=${!key:-}
-  [ -n "${RCLONE_REMOTES:-}" ] && [ -n "$dir" ] \
-    || die "没给包路径。要从云端取 $kind 包，得在 env.conf 填 RCLONE_REMOTES 和 $key；或者先把包下载到本机，把路径传进来"
+fetch_latest() {  # fetch_latest <hk-host|vault>：从各远端挑最新的一个下载（连 .sha256），路径放 FETCHED
+  local kind=$1 pat dir r n best="" from=""
+  dir=$(bk_cloud_dir "$kind") pat="${kind}_*.7z"
+  [ -n "${RCLONE_REMOTES:-}" ] \
+    || die "没给包路径。要从云端取 $kind 包，得在 env.conf 填 RCLONE_REMOTES；或者先把包下载到本机，把路径传进来"
   ensure_rclone || die "装不上 rclone，没法从云端取包；先手动装官方 rclone，或把包下载到本机再传路径"
   for r in $RCLONE_REMOTES; do
     n=$(rclone lsf "$r:$dir" --include "$pat" 2>/dev/null | sort | tail -1)
@@ -149,6 +147,7 @@ fetch_latest() {  # fetch_latest <vw|xboard>：从各远端挑最新的一个下
   if [ ! -s "$DR_ROOT/download/$best" ]; then
     log "下载 $from:$dir/$best"
     rclone copy "$from:$dir/$best" "$DR_ROOT/download/" || die "下载失败"
+    rclone copy "$from:$dir/$best.sha256" "$DR_ROOT/download/" 2>/dev/null || log "$from 上没有 $best.sha256，完整性靠 7z 的 CRC 校验"
   fi
   FETCHED="$DR_ROOT/download/$best"
 }
@@ -158,8 +157,8 @@ open_pkg() {  # open_pkg <包路径> <解开到的父目录>
   f=$(readlink -f "$1") && [ -f "$f" ] || die "包不存在: $1"
   section "包 $(basename "$f")"
   case "$(basename "$f")" in
-    newapi_*)  die "new-api 包用 ops/newapi-drill 恢复与演练（本脚本只认 vw / xboard 包）" ;;
-    litellm_*) die "LiteLLM 包不归本脚本（只认 vw / xboard 包）：正式恢复照包里的 RESTORE.md 在 LiteLLM 节点上做，备用机演练用 ops/litellm-drill" ;;
+    newapi_*)  die "new-api 包用 ops/newapi-drill 恢复与演练（本脚本只认 hk-host / vault 包）" ;;
+    litellm_*) die "LiteLLM 包不归本脚本（只认 hk-host / vault 包）：正式恢复照包里的 RESTORE.md 在 LiteLLM 节点上做，备用机演练用 ops/litellm-drill" ;;
   esac
   sha=$(sha256sum "$f" | cut -d' ' -f1)
   case "$SHAS" in *" $sha "*) log "和前面的包是同一个，跳过"; return 0 ;; esac
@@ -190,7 +189,11 @@ open_pkg() {  # open_pkg <包路径> <解开到的父目录>
   elif [ -d "$x/vaultwarden" ] || [ -d "$x/system" ]; then layout=vw
   elif [ -f "$x/app/.env" ]; then layout=xboard
   else die "认不出的包布局（没有 restore-manifest.tsv、vaultwarden/、app/.env）：$x"; fi
-  case "$(basename "$f")" in srvbak_*) kind=vw ;; xboard_*) kind=xboard ;; *) kind=$layout ;; esac
+  case "$(basename "$f")" in
+    hk-host_*) kind=hk-host ;; vault_*) kind=vault ;;
+    srvbak_*) kind=vw ;; xboard_*) kind=xboard ;;     # 2026-10 之前的旧包
+    *) kind=$layout ;;
+  esac
   P_FILE[i]=$f P_SHA[i]=$sha P_DIR[i]=$dir P_X[i]=$x P_KIND[i]=$kind P_LAYOUT[i]=$layout
   P_TIME[i]=$(basename "$f" | grep -oE '[0-9]{8}_[0-9]{6}' | head -1)
   SHAS="$SHAS$sha "
@@ -235,8 +238,8 @@ open_targets() {  # open_targets <解开到的父目录>
   local t i
   for t in "${TARGETS[@]}"; do
     case "$t" in
-      all)       fetch_latest vw; open_pkg "$FETCHED" "$1"; fetch_latest xboard; open_pkg "$FETCHED" "$1" ;;
-      vw|xboard) fetch_latest "$t"; open_pkg "$FETCHED" "$1" ;;
+      all)           fetch_latest hk-host; open_pkg "$FETCHED" "$1"; fetch_latest vault; open_pkg "$FETCHED" "$1" ;;
+      hk-host|vault) fetch_latest "$t"; open_pkg "$FETCHED" "$1" ;;
       *)         open_pkg "$t" "$1" ;;
     esac
   done
@@ -449,11 +452,21 @@ items_v2() {  # rootfs/ + restore-manifest.tsv（列：path mode owner kind）
     esac
   done < "$x/restore-manifest.tsv"
   # 备份按设计没收的（解密密码除外，那本来就是引导时自己放好的）
+  local hist="" kinds=" " i p
+  for i in "${!P_KIND[@]}"; do kinds="$kinds${P_KIND[i]} "; done
   while IFS=$'\t' read -r path kind; do
     [ -n "$path" ] || continue
-    case "$kind" in *解密密码*) continue ;; esac
+    case "$kind" in
+      *解密密码*) continue ;;
+      历史数据*) hist="$hist ${path#*:}"; continue ;;   # 表结构在、数据从零开始，是设计如此，不用处理
+      *"在 vault 包里"*|*"在 hk-host 包里"*)
+        p=$(grep -oE '(vault|hk-host) 包' <<<"$kind" | head -1); p=${p% 包}
+        [[ $kinds == *" $p "* ]] && continue
+        manual "这一项在 $p 包里，这次没给：$path" "整台前置机要 hk-host 与 vault 两个包一起恢复" ; continue ;;
+    esac
     manual "备份没收 $path，按原因决定要不要另行处理" "${kind:-备份没收}"
   done < <(cat "$x/system/rootfs-skipped.txt" 2>/dev/null)
+  [ -z "$hist" ] || log "只有表结构的历史表（恢复后是空表，从零开始记）：${hist# }"
   return 0
 }
 
@@ -1119,9 +1132,9 @@ restore_cron() {
   fi
   rm -f "$cur" "$new"
   for n in "${!P_KIND[@]}"; do kinds="$kinds ${P_KIND[n]}"; done
-  for s in vw-fullbackup xboard-fullbackup; do
-    [[ $kinds == *" ${s%%-*}"* ]] || continue
-    install_script "$s" || manual "装不上 $s" "opsget 不可用或拉不到仓库"
+  for s in hk-host:hk-host-backup vault:vault-backup vw:vault-backup xboard:hk-host-backup; do
+    [[ " $kinds " == *" ${s%%:*} "* ]] || continue
+    install_script "${s#*:}" || manual "装不上 ${s#*:}" "opsget 不可用或拉不到仓库"
   done
   if install_script install-backup-cron; then
     "$BIN/install-backup-cron.sh" --apply || warn "定时任务安装器报错"
@@ -1560,7 +1573,7 @@ summary() {
   3. opsget ops/verify-backup-pass          云端的包能用本机密码打开
 EOF
   # 演练、--no-cron 时原机还在用网盘：这台机器上跑备份会把它的包传上去
-  [ "$DRILL" = 1 ] || [ "$NOCRON" = 1 ] || echo "  4. 手动跑一次 /usr/local/bin/vw-fullbackup.sh 与 xboard-fullbackup.sh —— DNS 还没切，失败不影响任何人"
+  [ "$DRILL" = 1 ] || [ "$NOCRON" = 1 ] || echo "  4. 手动跑一次 /usr/local/bin/hk-host-backup.sh 与 vault-backup.sh —— DNS 还没切，失败不影响任何人"
 }
 
 # ── 动作 ────────────────────────────────────────────────────
@@ -1607,6 +1620,20 @@ do_check() {
   finish
 }
 
+# 系统时区设成 UTC：原机的定时任务、备份文件名、日志时间都按 UTC 写，时区不对时定时任务会错开几个小时
+utc_tz() {
+  [ "$(date +%z)" = "+0000" ] && return 0
+  local was; was="$(date +%Z)（$(date +%z)）"
+  if [ "$NOSTART" = 1 ]; then
+    manual "timedatectl set-timezone Etc/UTC && systemctl restart cron" "系统时区是 $was，原机的定时任务按 UTC 写"
+  elif command -v timedatectl >/dev/null 2>&1 && timedatectl set-timezone Etc/UTC 2>/dev/null; then
+    systemctl restart cron 2>/dev/null
+    ok "系统时区改为 UTC（原来是 $was；定时任务按 UTC 写）"
+  else
+    warn "系统时区不是 UTC，也改不了：手动 timedatectl set-timezone Etc/UTC，否则定时任务的执行时刻会错开"
+  fi
+}
+
 do_restore() {
   local m; m=$(st_mode)
   [ "$m" = drill ] && [ "$DRILL" = 0 ] && die "这台机器做过演练恢复，先 teardown 再正式恢复"
@@ -1614,6 +1641,7 @@ do_restore() {
   mysql_ready
   mkdir -p "$DR_ROOT"; chmod 700 "$DR_ROOT"
   prepare "$DR_ROOT"
+  utc_tz
   if [ "$CONFLICTS" -gt 0 ]; then
     [ "$DRILL" = 1 ] && die "演练只在干净的机器上做：这台机器上已经有上面标「冲突」的数据或服务"
     [ "$FORCE" = 1 ] || die "这台机器上已经有数据或在跑的服务（上面标「冲突」的 $CONFLICTS 处）。确认是要覆盖的机器，加 --force：原有目录移到 .bak.$TS，原有库先导出到 $DR_ROOT 再删"

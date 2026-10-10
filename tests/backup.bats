@@ -497,3 +497,80 @@ SH
   grep -q "^sqlite:komari.db.logs"$'\t'"历史数据" "$T/pkg/system/rootfs-skipped.txt"
   none 'no_such_table' "$(cat "$T/pkg/system/rootfs-skipped.txt")"
 }
+
+# ── 2026-10 起的包：名字、目录、档位、上传与清理 ─────────────
+fake_rclone_dirs() {  # rclone：<远端>:<目录> 映射到 $T/cloud/<远端>/<目录>；$T/fail-<远端> 存在时上传失败
+  cat > "$T/rclone" <<'SH'
+#!/bin/bash
+C=/tmp/bk-test/cloud
+loc() { local r=${1%%:*} p=${1#*:}; p=${p#/}; printf '%s/%s/%s' "$C" "$r" "${p%/}"; }
+cmd=$1; shift
+case "$cmd" in
+  copy) [ -e "/tmp/bk-test/fail-${2%%:*}" ] && exit 1; d=$(loc "$2"); mkdir -p "$d"; cp "$1" "$d/" ;;
+  check) src=$1 dst=$(loc "$2"); shift 2; inc=()
+         while [ $# -gt 0 ]; do [ "$1" = --include ] && { inc+=("$2"); shift; }; shift; done
+         for f in "${inc[@]}"; do cmp -s "$src/$f" "$dst/$f" || exit 1; done ;;
+  lsf) d=$(loc "$1"); shift; pat='*'; while [ $# -gt 0 ]; do [ "$1" = --include ] && { pat=$2; shift; }; shift; done
+       for f in "$d"/$pat; do [ -f "$f" ] && echo "${f##*/}"; done ;;
+  deletefile) rm -f "$(loc "$1")" ;;
+esac
+SH
+  chmod 755 "$T/rclone"; PATH="$T:$PATH"
+}
+
+@test "包名与目录：时间戳一律 UTC（系统时区是别的也一样）；本机 <BACKUP_LOCAL_ROOT>/<包名>，网盘 <BACKUP_CLOUD_ROOT>/<包名>" {
+  [ "$(TZ=Asia/Shanghai bash -c '. /src/lib/common.sh; bk_stamp')" = "$(date -u +%Y%m%d_%H%M%S)" ] \
+    || [ "$(TZ=Asia/Shanghai bash -c '. /src/lib/common.sh; bk_stamp')" = "$(date -u +%Y%m%d_%H%M%S)" ]   # 跨秒重试一次
+  [ "$(bk_local_dir vault)" = /box/backup/vault ] && [ "$(bk_cloud_dir hk-host)" = Backups/hk-host ]
+  BACKUP_LOCAL_ROOT=/data/bk BACKUP_CLOUD_ROOT=Bk
+  [ "$(bk_local_dir newapi)" = /data/bk/newapi ] && [ "$(bk_cloud_dir litellm)" = Bk/litellm ]
+}
+
+@test "档位：vault / newapi 全留 3 天，hk-host 每天一份起，litellm 每周一份起；<包名>_KEEP_TIERS 可改" {
+  [ "$(bk_tiers vault)" = "3 30 90" ] && [ "$(bk_tiers newapi)" = "3 30 90" ]
+  [ "$(bk_tiers hk-host)" = "1 30 90" ] && [ "$(bk_tiers litellm)" = "1 1 90" ]
+  HK_HOST_KEEP_TIERS="2 60 120"
+  [ "$(bk_tiers hk-host)" = "2 60 120" ]
+  # 每天一次的 hk-host：30 天内每天一份；每周一次的 litellm：90 天内每周一份（按 ISO 周、UTC）
+  local n del
+  n=$(for d in $(seq 1 40); do TZ=UTC date -d "@$((NOW - d * 86400 - 3600))" '+hk-host_%Y%m%d_%H%M%S.7z'; done)
+  del=$(bk_gfs_select "$NOW" 1 30 90 180 <<<"$n")
+  [ "$(grep -c . <<<"$del")" -ge 5 ] && [ "$(grep -c . <<<"$del")" -le 9 ]   # 30 天后每周一份
+  n=$(for w in $(seq 1 20); do TZ=UTC date -d "@$((NOW - w * 7 * 86400))" '+litellm_%Y%m%d_%H%M%S.7z'; done)
+  del=$(bk_gfs_select "$NOW" 1 1 90 400 <<<"$n")
+  [ "$(grep -c . <<<"$del")" -ge 3 ] && [ "$(grep -c . <<<"$del")" -le 6 ]   # 90 天后每月一份
+}
+
+@test "上传：包和 .sha256 都传到每个网盘并校验；有网盘失败就返回失败个数" {
+  fake_rclone_dirs
+  RCLONE_REMOTES="onedrive gdrive" BK_UPLOAD_SETTLE=0
+  mkdir -p "$T/out"; echo pkg > "$T/out/vault_20261010_011500.7z"
+  (cd "$T/out" && sha256sum vault_20261010_011500.7z > vault_20261010_011500.7z.sha256)
+  bk_upload "$T/out/vault_20261010_011500.7z" Backups/vault
+  for r in onedrive gdrive; do
+    cmp "$T/out/vault_20261010_011500.7z" "$T/cloud/$r/Backups/vault/vault_20261010_011500.7z"
+    [ -f "$T/cloud/$r/Backups/vault/vault_20261010_011500.7z.sha256" ]
+  done
+  touch "$T/fail-gdrive"
+  run bk_upload "$T/out/vault_20261010_011500.7z" Backups/vault
+  [ "$status" -eq 1 ]
+  grep -q 'gdrive:Backups/vault 上传失败' "$WARN_LOG"
+}
+
+@test "清理：bk_prune_all 按包的档位清本机与每个网盘，本机上限 180 天、网盘 400 天" {
+  fake_rclone_dirs
+  RCLONE_REMOTES="onedrive" BACKUP_LOCAL_ROOT="$T/local"
+  local d n
+  NOW=$(date +%s)   # 清理按真实的当前时间算
+  mkdir -p "$T/local/hk-host" "$T/cloud/onedrive/Backups/hk-host"
+  for d in $(seq 1 300); do
+    n=$(TZ=UTC date -d "@$((NOW - d * 86400))" '+hk-host_%Y%m%d_200000.7z')
+    : > "$T/local/hk-host/$n"; : > "$T/cloud/onedrive/Backups/hk-host/$n"
+  done
+  bk_prune_all hk-host
+  # 本机：180 天以前一个不留；网盘：300 天的还在（每月一份）
+  [ -z "$(ls "$T/local/hk-host" | awk -v c="$(TZ=UTC date -d "@$(( $(date +%s) - 181 * 86400 ))" +%Y%m%d)" -F_ '$2 < c')" ]
+  [ -n "$(ls "$T/cloud/onedrive/Backups/hk-host" | awk -v c="$(TZ=UTC date -d "@$(( $(date +%s) - 181 * 86400 ))" +%Y%m%d)" -F_ '$2 < c')" ]
+  # 30 天内每天一份全在
+  [ "$(ls "$T/local/hk-host" | awk -v c="$(TZ=UTC date -d "@$(( $(date +%s) - 29 * 86400 ))" +%Y%m%d)" -F_ '$2 >= c' | wc -l)" -ge 28 ]
+}

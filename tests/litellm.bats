@@ -48,7 +48,7 @@ EOF
 
 env_conf() {  # env_conf [额外行...]
   mkdir -p /etc/ops-scripts
-  printf '%s\n' 'LITELLM_HOST="198.51.100.7"' "LITELLM_WORKDIR=\"$W\"" "LITELLM_BACKUP_DIR=\"$L/out\"" \
+  printf '%s\n' 'LITELLM_HOST="198.51.100.7"' "LITELLM_WORKDIR=\"$W\"" "BACKUP_LOCAL_ROOT=\"$L/out\"" \
     "BACKUP_PASS_FILE=\"$PASSF\"" 'RCLONE_REMOTES="onedrive gdrive"' 'MAIL_TO="ops@example.com"' \
     'LITELLM_HEARTBEAT_URL="https://hc.example/ping/ll"' "LITELLM_BACKUP_LOG=\"$L/backup.log\"" \
     "ALERT_FALLBACK_FILE=\"$L/alerts.log\"" 'NEWAPI_HOST="198.51.100.8"' "$@" > /etc/ops-scripts/env.conf
@@ -175,7 +175,8 @@ EOF
 }
 
 backup() { run bash /src/backup/litellm-fullbackup.sh; }
-pkg() { ls "$L"/out/litellm_*.7z 2>/dev/null | tail -1; }
+O="$L/out/litellm"   # 本机包目录 <BACKUP_LOCAL_ROOT>/litellm
+pkg() { ls "$O"/litellm_*.7z 2>/dev/null | tail -1; }
 unpack() { rm -rf "$L/x"; 7z x -p"$(head -1 "$PASSF")" -o"$L/x" "$1" </dev/null >/dev/null; }
 none() {  # none <正则> <文本>：文本里不能有匹配的行
   grep -qE -- "$1" <<<"$2" || return 0
@@ -221,10 +222,10 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   none 'salt-0123456789abcdef0123|sk-master' "$(cat "$L/backup.log")"
   # 两个网盘都有包和旁注；本地暂存区不留
   for r in onedrive gdrive; do
-    cmp "$P" "$L/cloud/$r/Backup-LiteLLM/$(basename "$P")"
-    [ -f "$L/cloud/$r/Backup-LiteLLM/$(basename "$P").sha256" ]
+    cmp "$P" "$L/cloud/$r/Backups/litellm/$(basename "$P")"
+    [ -f "$L/cloud/$r/Backups/litellm/$(basename "$P").sha256" ]
   done
-  [ -z "$(ls -A "$L/out" | grep staging)" ]
+  [ -z "$(ls -A "$O" | grep staging)" ]
   # 心跳：先 /start，最后报成功
   [ "$(head -1 "$L/curl.log")" = "curl -fsS -m 10 --retry 2 https://hc.example/ping/ll/start" ]
   [ "$(tail -1 "$L/curl.log")" = "curl -fsS -m 10 --retry 2 https://hc.example/ping/ll" ]
@@ -287,7 +288,7 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   [ -z "$(ls "$L/cloud")" ]
   [ "$(tail -1 "$L/curl.log")" = "curl -fsS -m 10 --retry 2 https://hc.example/ping/ll/fail" ]
   grep -q '\[FAIL\] LiteLLM backup' "$L/alerts.log"
-  [ -z "$(ls -A "$L/out")" ]
+  [ -z "$(ls -A "$O")" ]
 }
 
 @test "备份：导出为空、.env 没有盐值、postgres 没在跑，都失败且不出包" {
@@ -307,38 +308,39 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   # 60 天、每 6 小时一份；错开半小时，年龄不落在整天的档位边界上
   for ((h = 60 * 24; h >= 6; h -= 6)); do
     n=$(TZ=UTC date -d "@$((now - h * 3600 - 1800))" '+litellm_%Y%m%d_%H%M%S.7z')
-    for d in "$L/out" "$L/cloud/onedrive/Backup-LiteLLM" "$L/cloud/gdrive/Backup-LiteLLM"; do mkdir -p "$d"; : > "$d/$n"; done
+    for d in "$O" "$L/cloud/onedrive/Backups/litellm" "$L/cloud/gdrive/Backups/litellm"; do mkdir -p "$d"; : > "$d/$n"; done
   done
-  ls "$L/out" > "$L/old"
+  ls "$O" > "$L/old"
   touch "$L/rclone-fail-gdrive"
   backup
   [ "$status" -eq 0 ]
   [[ "$output" == *"跳过清理"* ]]
   [ "$(tail -1 "$L/curl.log")" = "curl -fsS -m 10 --retry 2 https://hc.example/ping/ll/fail" ]
   for n in $(cat "$L/old"); do
-    [ -e "$L/out/$n" ] || { echo "本地删了 $n"; false; }
-    [ -e "$L/cloud/onedrive/Backup-LiteLLM/$n" ] || { echo "onedrive 删了 $n"; false; }
+    [ -e "$O/$n" ] || { echo "本地删了 $n"; false; }
+    [ -e "$L/cloud/onedrive/Backups/litellm/$n" ] || { echo "onedrive 删了 $n"; false; }
   done
   rm -f "$L/rclone-fail-gdrive" "$L/curl.log"
   # 清理前用公共库独立算一遍应删的名单（本地上限 180 天、云端 400 天，60 天的数据两边一样）。
   # 这次新出的包最新、在全留档里，不影响其余包的分档
-  ls "$L/out" > "$L/all"
-  del=$(bash -c '. /src/lib/common.sh; bk_gfs_select "$(date +%s)" 7 30 90 180' < "$L/all")
+  ls "$O" > "$L/all"
+  # litellm 每周一次：全留 1 天、每天档 1 天、每周档到 90 天（bk_tiers litellm）
+  del=$(bash -c '. /src/lib/common.sh; bk_gfs_select "$(date +%s)" 1 1 90 180' < "$L/all")
   [ "$(wc -l <<<"$del")" -gt 100 ]
   backup
   [ "$status" -eq 0 ]
   [[ "$output" == *"结束：正常"* ]]
   for n in $del; do
-    [ ! -e "$L/out/$n" ] || { echo "本地没删 $n"; false; }
-    [ ! -e "$L/cloud/onedrive/Backup-LiteLLM/$n" ] || { echo "onedrive 没删 $n"; false; }
-    [ ! -e "$L/cloud/gdrive/Backup-LiteLLM/$n" ] || { echo "gdrive 没删 $n"; false; }
+    [ ! -e "$O/$n" ] || { echo "本地没删 $n"; false; }
+    [ ! -e "$L/cloud/onedrive/Backups/litellm/$n" ] || { echo "onedrive 没删 $n"; false; }
+    [ ! -e "$L/cloud/gdrive/Backups/litellm/$n" ] || { echo "gdrive 没删 $n"; false; }
   done
   for n in $(grep -vxF -f <(printf '%s\n' "$del") "$L/all"); do
-    [ -e "$L/out/$n" ] || { echo "本地多删了 $n"; false; }
-    [ -e "$L/cloud/onedrive/Backup-LiteLLM/$n" ] || { echo "onedrive 多删了 $n"; false; }
+    [ -e "$O/$n" ] || { echo "本地多删了 $n"; false; }
+    [ -e "$L/cloud/onedrive/Backups/litellm/$n" ] || { echo "onedrive 多删了 $n"; false; }
   done
   # 新包在（两次可能在同一秒内跑完、同名，所以至少一份）
-  [ "$(ls "$L"/out/litellm_*.7z.sha256 | wc -l)" -ge 1 ]
+  [ "$(ls "$O"/litellm_*.7z.sha256 | wc -l)" -ge 1 ]
 }
 
 @test "备份：上一轮还在跑（锁被占）时直接跳过，不报心跳" {
@@ -365,28 +367,30 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
 }
 
 @test "备份：缺必填配置时失败并说出缺哪个" {
-  sed -i '/^LITELLM_BACKUP_DIR=/d' /etc/ops-scripts/env.conf
+  sed -i '/^LITELLM_WORKDIR=/d' /etc/ops-scripts/env.conf
   backup
   [ "$status" -eq 1 ]
-  [[ "$output" == *"env.conf 缺少必填项 LITELLM_BACKUP_DIR"* ]]
+  [[ "$output" == *"env.conf 缺少必填项 LITELLM_WORKDIR"* ]]
   [ ! -e "$L/ssh.log" ]
 }
 
 # ── 云端校验 ────────────────────────────────────────────────
-@test "校验：装了 litellm-fullbackup、RCLONE_PATHS 没列 Backup-LiteLLM 时自动并入并能解开" {
+@test "校验：装了 litellm-fullbackup 就校验 Backups/litellm（不用填 RCLONE_PATHS），能解开；RCLONE_PATHS 重复列的不重复校验" {
   backup; [ "$status" -eq 0 ]
   printf '#!/bin/sh\n' > /usr/local/bin/litellm-fullbackup.sh; chmod 755 /usr/local/bin/litellm-fullbackup.sh
-  env_conf "BACKUP_PASS_FILES=\"$PASSF\"" 'RCLONE_PATHS="Backup-Server"'
+  env_conf "BACKUP_PASS_FILES=\"$PASSF\""
   run bash /src/ops/verify-backup-pass.sh
   echo "$output"
-  [[ "$output" == *"litellm-fullbackup 的云端目录 Backup-LiteLLM 不在 RCLONE_PATHS 里"* ]]
-  [[ "$output" == *"✓ onedrive:/Backup-LiteLLM litellm_"*"可解开"* ]]
-  [[ "$output" == *"✓ gdrive:/Backup-LiteLLM litellm_"*"可解开"* ]]
-  # 已经列了的不重复校验
-  env_conf "BACKUP_PASS_FILES=\"$PASSF\"" 'RCLONE_PATHS="Backup-Server /Backup-LiteLLM/"'
+  [[ "$output" == *"litellm-fullbackup → Backups/litellm"* ]]
+  [[ "$output" == *"✓ onedrive:/Backups/litellm litellm_"*"可解开"* ]]
+  [[ "$output" == *"✓ gdrive:/Backups/litellm litellm_"*"可解开"* ]]
+  env_conf "BACKUP_PASS_FILES=\"$PASSF\"" 'RCLONE_PATHS="/Backups/litellm/"'
   run bash /src/ops/verify-backup-pass.sh
-  [[ "$output" == *"litellm-fullbackup → Backup-LiteLLM"* ]]
-  [ "$(grep -c '^===== onedrive:/Backup-LiteLLM' <<<"$output")" -eq 1 ]
+  [ "$(grep -c '^===== onedrive:/Backups/litellm' <<<"$output")" -eq 1 ]
+  # litellm 每周一次：包 3 天前也不算过期（其余包 2 天就算）
+  for r in onedrive gdrive; do touch -d '3 days ago' "$L"/cloud/$r/Backups/litellm/*.7z; done
+  run bash /src/ops/verify-backup-pass.sh
+  none '已停止上传' "$output"
 }
 
 # ── 演练 ────────────────────────────────────────────────────

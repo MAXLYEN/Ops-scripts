@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/live-migrate.sh — 原机还在时的一键迁移（在旧机上运行）：预检 → 演练 → 停写切换 → DNS
-# VERSION: 1.1.1
+# VERSION: 2.0.0
+# 2.0.0: 按 2026-10 备份重新规划：现做的包是 hk-host 与 vault（hk-host-backup / vault-backup 的 --local-only），新机用这两个包恢复；旧的 vw-fullbackup / xboard-fullbackup 不再认。切换时暂停的备份定时任务也认 vault-backup、hk-host-backup、panel-backup-create（原先只认 *-fullbackup，新脚本会漏停）。
 # 1.1.1: standby（演练结束、回滚时新机退回待命）除了停容器，还停用并取消自启用原机身份上报的 komari-agent（回滚时它在新机上跑着，会和恢复服务的原机一起上报）；隧道单元不动。
 # 1.1.0: 演练时新机恢复带 --no-egress：容器不许主动连外网（原机还在服务，新机上的 Xboard 会重复给用户发提醒邮件，Komari 看到被控端全离线会告警）；切换那次恢复不带它，起容器前撤掉；回滚时新机先加回限制再停容器。「DNS 已经改好」的确认改用公共库的 is_yes（前后空格、大小写、全角字符不再让 yes 被当成否）。
 # 1.0.0: 首版。预检两台机器；演练时本机照常服务，用备份脚本 --local-only 现做加密包经 SSH 直传新机，restore-from-backup --no-cron 恢复、check 比对、08 验收、经 --resolve 逐站对比后停掉新机的容器；切换时暂停本机备份定时任务、停容器、再做一次包、restore --force 并启动；DNS 保持人工，确认后经公共 DNS 复核；DNS 切换前随时可回滚。SSH 只用密钥、复用一条连接；恢复后新机临时放行本机 IP，落地机等机器的放行名单同步加上新机。
@@ -173,7 +174,7 @@ lm_probe() {  # lm_probe [必填键...]：这台机器的状况，每行一个 �
   printf 'ipv6=%s\n' "$(ip -6 -o addr show scope global 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4; exit }')"
   printf 'egress=%s\n' "$(curl -4 -fsS -m 5 https://ifconfig.me 2>/dev/null | grep -E '^[0-9.]+$')"
   a="" v=""
-  for d in vw-fullbackup xboard-fullbackup; do
+  for d in hk-host-backup vault-backup; do
     [ -x "/usr/local/bin/$d.sh" ] || continue
     if grep -q -- '--local-only' "/usr/local/bin/$d.sh"; then a="$a $d"; else v="$v $d"; fi
   done
@@ -190,8 +191,8 @@ lm_svc() {  # lm_svc stop|start <容器名...>
   return "$rc"
 }
 
-lm_cron_re() {  # 调用备份脚本的 cron 行：<名字>-fullbackup，加上 env.conf 的 BACKUP_SCRIPTS
-  local n alt='[A-Za-z0-9_-]+-fullbackup'
+lm_cron_re() {  # 调用备份脚本的 cron 行：<名字>-fullbackup、vault-backup、hk-host-backup、面板整机备份，加上 env.conf 的 BACKUP_SCRIPTS
+  local n alt='[A-Za-z0-9_-]+-fullbackup|vault-backup|hk-host-backup|panel-backup-create'
   for n in ${BACKUP_SCRIPTS:-}; do
     n=${n##*/}; n=${n%.sh}
     [[ $n =~ ^[A-Za-z0-9_.-]+$ ]] && alt="$alt|${n//./[.]}"
@@ -457,8 +458,8 @@ preflight() {
     fi
   fi
   read -r -a BK_USE <<<"${O[local_only]}"
-  [ -z "${O[no_local_only]}" ] || R+=("本机的 ${O[no_local_only]} 太旧，不支持 --local-only：opsget -i backup/<名字> 更新（vw 2.6.0、xboard 2.5.0 起）")
-  [ ${#BK_USE[@]} -gt 0 ] || R+=("本机没装 vw-fullbackup / xboard-fullbackup：迁移靠它们现做包")
+  [ -z "${O[no_local_only]}" ] || R+=("本机的 ${O[no_local_only]} 太旧，不支持 --local-only：opsget -i backup/<名字> 更新（hk-host-backup、vault-backup 1.0.0 起都支持）")
+  [ ${#BK_USE[@]} -gt 0 ] || R+=("本机没装 hk-host-backup / vault-backup：迁移靠它们现做包（opsget -i backup/hk-host-backup、backup/vault-backup）")
 
   echo
   row 项目 "本机（旧机）" 新机
@@ -606,7 +607,7 @@ build_pkgs() {  # build_pkgs rehearsal|cutover：本机装好的备份脚本只�
   PKGDIR="$WORK/pkgs/$1-$TS"
   mkdir -p "$PKGDIR" && chmod 700 "$PKGDIR"
   for s in "${BK_USE[@]}"; do
-    case "$s" in vw-fullbackup) pre=srvbak ;; xboard-fullbackup) pre=xboard ;; *) continue ;; esac
+    case "$s" in hk-host-backup) pre=hk-host ;; vault-backup) pre=vault ;; *) continue ;; esac
     log="$WORK/logs/$1-$s-$TS.log"
     log "$BIN/$s.sh --local-only $PKGDIR"
     "$BIN/$s.sh" --local-only "$PKGDIR" > "$log" 2>&1; rc=$?

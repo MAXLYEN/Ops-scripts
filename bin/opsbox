@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # bin/opsbox — ops-scripts 中文菜单：按场景挑功能，常用组合自动串联
-# VERSION: 1.5.2
+# VERSION: 1.6.0
+# 1.6.0: 按 2026-10 备份重新规划：「立即备份」「备份时间表」「Vaultwarden 升级前备份」改用 vault-backup / hk-host-backup（旧的 vw / xboard 不再列出）；从备份恢复默认取 hk-host 与 vault 两个包；比对备份包默认看 /box/backup/hk-host。
 # 1.5.2: 登记表注明 ops/ssh-allowlist 不进菜单（要两个窗口配合确认）；菜单行为不变。
 # 1.5.1: 登记表注明 ops/panel-backup-create 不进菜单（每周定时任务调用）；菜单行为不变。
 # 1.5.0: 整机迁移新增「一键迁移（原机还在）」：预检、演练、完整迁移、只切换、DNS 复核、进度、回滚；完整迁移、切换、回滚要输主机名。原来的分步向导改名「分步迁移向导（旧流程）」。
@@ -59,11 +60,11 @@ check|panelcron|ops/panel-cron-inspect|只读|面板计划任务|面板里的计
 check|inventory|ops/script-inventory|只读|本机脚本盘点|想知道本机哪些脚本来自仓库、哪些是手工放的|列出本机脚本的来源与版本号（不比新旧；要看落后的用「工具箱设置 → 更新已装脚本」）
 check|locate|ops/panel-data-locate|只读|定位面板数据|想找某个站点或配置的数据到底存在哪个目录、哪张表|按你给的特征串（如域名）在面板目录和数据库里搜索
 backup|health|-|联动|备份体检|每周一次，或担心备份没在跑、云端的包坏了|先跑备份前置检查，再下载云端最新包验证能否解开；校验没通过时自动接着诊断告警邮件
-backup|now|backup/vw-fullbackup backup/xboard-fullbackup backup/newapi-fullbackup backup/litellm-fullbackup|需确认|立即备份|升级、迁移或大改之前，先手动备份一次|运行本机已装的备份脚本，和定时任务用同一把锁，不会撞车；不经网络拉取
+backup|now|backup/vault-backup backup/hk-host-backup backup/newapi-fullbackup backup/litellm-fullbackup|需确认|立即备份|升级、迁移或大改之前，先手动备份一次|运行本机已装的备份脚本，和定时任务用同一把锁，不会撞车；不经网络拉取
 backup|verify|ops/verify-backup-pass|只读|云端备份包校验|想确认云端的包能用本地密码解开，且最新的包没有过期|每个网盘取最新包下载并解开验证；手动运行不发告警
 backup|compare|ops/compare-backup-content|只读|比对最近两个备份包|改了备份脚本后，确认新包内容和旧包一致|解开同一目录下最新的两个包，比较文件清单
 backup|panelup|ops/panel-backup-upload|需确认|上传面板整机备份|在面板里手动生成整机备份后，想把它加密传到网盘|先列出本地和云端已有的包，确认后加密上传；可选只保留本机最近上传的几份
-backup|dr|migrate/restore-from-backup|高危|从备份包恢复整机|原机已经没了、只剩云端的每日备份包；或每季度在临时机上做恢复演练|可先只校验并列出恢复计划；恢复时自动建库导入、放回数据与站点配置、按锁定的镜像版本起容器、装定时任务，最后列出剩下的手动步骤；演练结束可一键清理
+backup|dr|migrate/restore-from-backup|高危|从备份包恢复整机|原机已经没了、只剩云端的备份包（hk-host 加 vault 两个包一起恢复）；或在临时机上做恢复演练|可先只校验并列出恢复计划；恢复时自动建库导入、放回数据与站点配置、按锁定的镜像版本起容器、装定时任务，最后列出剩下的手动步骤；演练结束可一键清理
 security|savefw|ops/save-fw|只读|防火墙快照|手动改 ufw 或 iptables 之前|把当前防火墙规则存到 /root/fwstate_<时间>，并附恢复命令；不改动防火墙
 security|llm|ops/check-llm-security ops/sync-llm-allowlist|联动|LLM 访问控制|LLM 站被扫、要加白名单 IP，或改了 ALLOW_EXTRA_IPS 之后|先只读盘点；确认后自动存防火墙快照，同步白名单与 fail2ban，再盘点一次对比
 security|bind|ops/bind-localhost|联动|容器端口收回本机|docker ps 看到容器端口是 0.0.0.0:端口、直接暴露在公网时|先生成重建命令给你看；确认后存防火墙快照、重建容器，可选跑端到端验收
@@ -555,7 +556,7 @@ do_health() {
 
 do_now() {
   local opts=() n i
-  for n in vw-fullbackup xboard-fullbackup newapi-fullbackup litellm-fullbackup; do
+  for n in vault-backup hk-host-backup newapi-fullbackup litellm-fullbackup; do
     [ -x "$BIN_DIR/$n.sh" ] && opts+=("$n")
   done
   [ ${#opts[@]} -gt 0 ] || { note "本机没装任何备份脚本（opsget -i backup/<名字>）"; return 1; }
@@ -576,7 +577,9 @@ do_now() {
 }
 
 do_compare() {
-  ask "备份目录（取其中最新的两个包比对）" "$(env_get VW_BACKUP_DIR)"
+  ask "备份目录（取其中最新的两个包比对）" "$(env_get BACKUP_LOCAL_ROOT)"
+  [ -n "$ANS" ] || ANS=/box/backup
+  case "$ANS" in */hk-host|*/vault|*/newapi|*/litellm) ;; *) ANS="${ANS%/}/hk-host" ;; esac
   [ -d "$ANS" ] || { note "目录不存在：$ANS"; return 1; }
   run_ops ops/compare-backup-content "$ANS"
 }
@@ -606,7 +609,7 @@ do_dr() {
   c=$ANS
   case "$c" in
     1|2|3)
-      ask "包路径（多个用空格；回车＝从网盘取 vw 和 xboard 的最新包）"
+      ask "包路径（多个用空格；回车＝从网盘取 hk-host 和 vault 的最新包）"
       read -r -a tgt <<<"$ANS"
       [ ${#tgt[@]} -gt 0 ] || tgt=(all) ;;
   esac
@@ -708,12 +711,11 @@ do_tidy() {
   confirm "按上面的预演执行清理？" && run_ops ops/cleanup-tidy --apply
 }
 
-vw_backup_age() {  # 本机最新 Vaultwarden 备份包距今几小时；没有则无输出
+vw_backup_age() {  # 本机最新 vault 包距今几小时；没有则无输出
   local d f
-  d=$(env_get VW_BACKUP_DIR)
-  [ -n "$d" ] || return 0
+  d=$(env_get BACKUP_LOCAL_ROOT); d="${d:-/box/backup}/vault"
   # shellcheck disable=SC2012  # 文件名由备份脚本生成，不含换行
-  f=$(ls -t "$d"/srvbak_*.7z 2>/dev/null | head -1)
+  f=$(ls -t "$d"/vault_*.7z 2>/dev/null | head -1)
   [ -n "$f" ] && echo $(( ($(date +%s) - $(stat -c %Y "$f")) / 3600 ))
 }
 
@@ -730,7 +732,7 @@ do_vwup() {
   else note "  本机没找到备份包"; fi
   # 升级前一定先备份：数据库迁移没法随 compose 回滚，这一步不做成可选项
   echo "  升级前先做一次新备份…"
-  if ! step "升级前备份" backup_run vw-fullbackup; then
+  if ! step "升级前备份" backup_run vault-backup; then
     confirm "备份没成功，仍然升级？" || { flow_rec 未执行 升级 -; flow_end; return 1; }
   fi
   step "升级" run_ops ops/upgrade-vaultwarden -y
@@ -1184,9 +1186,9 @@ do_crontab() {
   fi
   # 统一时间表：本机装了哪个备份脚本就排哪个；已有的行会被替换，不会重复
   local n has=""
-  for n in vw-fullbackup xboard-fullbackup newapi-fullbackup litellm-fullbackup; do [ -x "$BIN_DIR/$n.sh" ] && has="$has $n"; done
+  for n in vault-backup hk-host-backup newapi-fullbackup litellm-fullbackup panel-backup-create; do [ -x "$BIN_DIR/$n.sh" ] && has="$has $n"; done
   [ -n "$has" ] || return 0
-  printf '\n  本机装了备份脚本:%s\n  统一时间表：vw / xboard / litellm 每 6 小时（:00 / :20 / :40），newapi 每小时（:05）\n' "$has"
+  printf '\n  本机装了备份脚本:%s\n  统一时间表（UTC）：vault 每小时 :15，hk-host 每天 20:00，newapi 每 6 小时（04:30 起），litellm 与面板整机每周日（20:40 / 19:30）\n' "$has"
   run_ops ops/install-backup-cron || return
   confirm "按上面的预演改写 crontab？" && run_ops ops/install-backup-cron --apply
 }

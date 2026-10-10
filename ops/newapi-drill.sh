@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ops/newapi-drill.sh — 在备用机演练 new-api 备份的恢复与清理
-# VERSION: 1.0.4
+# VERSION: 1.1.0
+# 1.1.0: 从网盘取包改为 <BACKUP_CLOUD_ROOT>/newapi（默认 Backups/newapi，按 2026-10 备份重新规划），不再读 NEWAPI_CLOUD_DIR。
 # 1.0.4: 状态文件的值用 printf %q 写入：它会被 source，而 IMAGE 取自备份包内容。
-# ENV-REQUIRED: NEWAPI_HOST BACKUP_PASS_FILE NEWAPI_CLOUD_DIR
+# ENV-REQUIRED: NEWAPI_HOST BACKUP_PASS_FILE
 # 在备用机运行；禁止指向生产落地机。
 # 用法：
 #   newapi-drill.sh restore <目标IP>
@@ -23,6 +24,7 @@ DRILL_DATA="/opt/new-api-drill/data"
 DRILL_PORT=3000
 STATE_FILE="/var/lib/ops-scripts/newapi-drill-${TARGET}.state"
 RCLONE_REMOTE="${NEWAPI_DRILL_REMOTE:-onedrive}"
+NEWAPI_CLOUD_DIR="${BACKUP_CLOUD_ROOT:-Backups}/newapi"   # 与公共库 bk_cloud_dir 一致
 
 log()  { printf '%s [INFO] %s\n' "$(date -u '+%F %T')" "$*"; }
 warn() { printf '%s [WARN] %s\n' "$(date -u '+%F %T')" "$*"; }

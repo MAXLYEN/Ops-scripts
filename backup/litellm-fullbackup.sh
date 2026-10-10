@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # backup/litellm-fullbackup.sh — 从汇总机拉取 LiteLLM 节点的库导出与工作目录，加密上传
-# VERSION: 1.2.0
+# VERSION: 2.0.0
+# 2.0.0: 按 2026-10 备份重新规划：本机目录 <BACKUP_LOCAL_ROOT>/litellm（默认 /box/backup/litellm），网盘 <BACKUP_CLOUD_ROOT>/litellm（默认 Backups/litellm），不再读 LITELLM_BACKUP_DIR / LITELLM_CLOUD_DIR；频率改为每周（UTC 周日 20:40，见 install-backup-cron），分级保留改为每周一份到 90 天 → 每月（LITELLM_KEEP_TIERS 可改）。
 # 1.2.0: 历史数据只收表结构：pg_dump --exclude-table-data 排除花费明细 SpendLogs、按天用量 Daily*Spend、健康检查、错误与审计日志（LITELLM_HISTORY_TABLES 可改）；key / user / team 的累计花费照导，预算照常生效。
 # 1.1.0: 线路短时抖动时自动重试：SSH 握手超时、传到一半断开（ssh 退出码 255）隔 BACKUP_SSH_RETRY_WAIT 秒（默认 180）重试，最多 BACKUP_SSH_TRIES 次（默认 3），都失败才报失败；节点上的命令自己报错不重试。节点上被中断的拉取留下的旧暂存目录（超过 2 小时）下次清掉。起因：前置机到节点的线路在北京时间晚高峰丢包，2026-10-03、10-05 两次 12:40 那轮失败。
 # 1.0.0: 首版。远端 pg_dump -Fc 一致性导出并用容器自己的 pg_restore --list 校验；工作目录（.env 等，不含 pgdata 与日志）；三个容器的镜像 digest 与 inspect；GFS 分级保留，防重入锁，心跳。
-# ENV-REQUIRED: LITELLM_HOST LITELLM_WORKDIR LITELLM_BACKUP_DIR BACKUP_PASS_FILE RCLONE_REMOTES MAIL_TO
+# ENV-REQUIRED: LITELLM_HOST LITELLM_WORKDIR BACKUP_PASS_FILE RCLONE_REMOTES MAIL_TO
 # 定时任务调用已安装的本地脚本（ops/install-backup-cron，每 6 小时 :40）。Redis 只是缓存，不备份（见 RESTORE.md）。
 
 set -o pipefail
@@ -24,12 +25,13 @@ ENV_FILE=/etc/ops-scripts/env.conf
 TS="$(date -u +%Y%m%d_%H%M%S)"
 LOG="${LITELLM_BACKUP_LOG:-/var/log/litellm-fullbackup.log}"
 # 每 6 小时一次，档位与 vw / xboard 共用
-KEEP_ALL_DAYS="${BACKUP_KEEP_ALL_DAYS:-7}"
-KEEP_DAILY_DAYS="${BACKUP_KEEP_DAILY_DAYS:-30}"
-KEEP_WEEKLY_DAYS="${BACKUP_KEEP_WEEKLY_DAYS:-90}"
+# 本机 <BACKUP_LOCAL_ROOT>/litellm、网盘 <BACKUP_CLOUD_ROOT>/litellm（与公共库 bk_local_dir / bk_cloud_dir 一致）
+LITELLM_BACKUP_DIR="${BACKUP_LOCAL_ROOT:-/box/backup}/litellm"
+CLOUD_DIR="${BACKUP_CLOUD_ROOT:-Backups}/litellm"
+# 分级保留：每周一次，「全留 1 天、每天档 1 天」即每次都直接进每周档；90 天后每月一份
+read -r KEEP_ALL_DAYS KEEP_DAILY_DAYS KEEP_WEEKLY_DAYS <<< "${LITELLM_KEEP_TIERS:-1 1 90}"
 LOCAL_KEEP_DAYS="${BACKUP_KEEP_LOCAL_DAYS:-180}"
 CLOUD_KEEP_DAYS="${BACKUP_KEEP_CLOUD_DAYS:-400}"
-CLOUD_DIR="${LITELLM_CLOUD_DIR:-Backup-LiteLLM}"
 ALERT_FALLBACK_FILE="${ALERT_FALLBACK_FILE:-/var/log/backup-alerts.log}"
 # 容器名与 ops/deploy-litellm 写进 compose 的一致
 PG_CONTAINER=litellm-postgres
@@ -117,7 +119,7 @@ log "===== LiteLLM 备份开始 $TS ====="
 [ "$LIB_OK" -eq 1 ] && declare -F bk_gfs_select >/dev/null && declare -F vps_host_port >/dev/null \
   || { fail "公共库缺失或版本过旧（需要 1.2.3 起），先运行 opsget -u"; finish 1; }
 
-require_env LITELLM_HOST LITELLM_WORKDIR LITELLM_BACKUP_DIR BACKUP_PASS_FILE RCLONE_REMOTES MAIL_TO
+require_env LITELLM_HOST LITELLM_WORKDIR BACKUP_PASS_FILE RCLONE_REMOTES MAIL_TO
 
 for c in 7z rclone ssh tar sha256sum flock; do
   command -v "$c" >/dev/null 2>&1 || { fail "本机缺少命令：$c"; finish 1; }
@@ -452,12 +454,12 @@ log "已生成 .sha256 旁注文件"
 
 UPLOADED=0
 for R in $RCLONE_REMOTES; do
-  log "上传到 ${R}:/${CLOUD_DIR}"
-  if rclone copy "$ARCHIVE" "${R}:/${CLOUD_DIR}/" >>"$LOG" 2>&1 \
-     && rclone copy "${ARCHIVE}.sha256" "${R}:/${CLOUD_DIR}/" >>"$LOG" 2>&1; then
+  log "上传到 ${R}:${CLOUD_DIR}"
+  if rclone copy "$ARCHIVE" "${R}:${CLOUD_DIR}/" >>"$LOG" 2>&1 \
+     && rclone copy "${ARCHIVE}.sha256" "${R}:${CLOUD_DIR}/" >>"$LOG" 2>&1; then
     # Google Drive 元数据有延迟，立刻 check 会误报
     sleep 10
-    if rclone check "$LITELLM_BACKUP_DIR" "${R}:/${CLOUD_DIR}" \
+    if rclone check "$LITELLM_BACKUP_DIR" "${R}:${CLOUD_DIR}" \
          --include "$(basename "$ARCHIVE")" >>"$LOG" 2>&1; then
       log "${R} 校验通过"
       UPLOADED=$((UPLOADED+1))
@@ -480,7 +482,7 @@ else
   log "分级保留：全留 ${KEEP_ALL_DAYS} 天，每天一份至 ${KEEP_DAILY_DAYS} 天，每周一份至 ${KEEP_WEEKLY_DAYS} 天，每月一份至上限"
   bk_prune_local "$LITELLM_BACKUP_DIR" litellm "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$LOCAL_KEEP_DAYS"
   for R in $RCLONE_REMOTES; do
-    bk_prune_remote "${R}:/${CLOUD_DIR}" litellm "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$CLOUD_KEEP_DAYS"
+    bk_prune_remote "${R}:${CLOUD_DIR}" litellm "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$CLOUD_KEEP_DAYS"
   done
 fi
 

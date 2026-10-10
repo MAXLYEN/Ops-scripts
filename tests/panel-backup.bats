@@ -102,7 +102,7 @@ EOF
 }
 
 create() { run bash "$SRC/ops/panel-backup-create.sh" "$@"; }
-cloud() { ls "$L/cloud/$1/BTBackup-AllServer" 2>/dev/null; }
+cloud() { ls "$L/cloud/$1/Backups/panel" 2>/dev/null | grep ".7z$"; }   # 网盘目录 Backups/panel，只数包（旁边还有 .sha256）
 newest() { python3 -c "import json;t=json.load(open('$BR/backup_task.json'));print(max(int(x['timestamp']) for x in t))"; }
 
 @test "照面板最近一次的设置建新任务、前台跑面板的备份程序，出包后加密传到两个网盘，心跳 /start 与成功" {
@@ -125,7 +125,8 @@ PY
   has "成功/失败项：13/0"
   for r in onedrive gdrive; do
     f=$(cloud "$r"); [[ $f == *_"$ts"_backup.7z ]]
-    7z t -p"$(head -1 "$PASSF")" "$L/cloud/$r/BTBackup-AllServer/$f" </dev/null >/dev/null
+    7z t -p"$(head -1 "$PASSF")" "$L/cloud/$r/Backups/panel/$f" </dev/null >/dev/null
+    [ -f "$L/cloud/$r/Backups/panel/$f.sha256" ]
   done
   grep -qx 'curl -fsS -m 10 --retry 2 https://hc.example/ping/pb/start' "$L/curl.log"
   grep -qx 'curl -fsS -m 10 --retry 2 https://hc.example/ping/pb' "$L/curl.log"

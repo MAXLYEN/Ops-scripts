@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/panel-backup-upload.sh — 加密并上传面板生成的整机备份包
-# VERSION: 1.0.5
+# VERSION: 1.1.0
+# 1.1.0: 网盘目录默认改为 <BACKUP_CLOUD_ROOT>/panel（Backups/panel，按 2026-10 备份重新规划；PANEL_BACKUP_REMOTE_PATH 仍可改）；包旁边配一个 .sha256 一起上传，清理时一起删。台账只记文件名，目录整个搬走后照样认。
 # 1.0.5: --prune 只清理本机上传台账里、校验通过的包，不再按名字删掉整个云端目录里的其他文件。
 # ENV-REQUIRED: RCLONE_REMOTES
 
@@ -11,7 +12,7 @@ require_env RCLONE_REMOTES
 require_cmd rclone
 
 SRCDIR="${PANEL_BACKUP_DIR:-/www/backup/backup_restore}"
-DEST="${PANEL_BACKUP_REMOTE_PATH:-BTBackup-AllServer}"
+DEST="${PANEL_BACKUP_REMOTE_PATH:-$(bk_cloud_dir panel)}"
 MODE=upload; RAW=0; PRUNE=0; FILE=""
 # 本机上传且校验通过的包，一行「远端<TAB>文件名」，按上传先后排列。
 # --prune 只按它删：云端目录（默认名就叫 AllServer）可能是多台机器共用的，
@@ -85,12 +86,17 @@ else
   ok "$(basename "$UPFILE")  $(human "$UPFILE")  自检通过"
   NAME=$(basename "$UPFILE"); UPDIR="$WORK"
 fi
+# 校验和旁注：下载回来先核对它，再输密码解开
+if [ "$UPDIR" = "$WORK" ]; then
+  (cd "$WORK" && sha256sum "$NAME" > "$NAME.sha256") || die "写不了 .sha256"
+fi
 
 section "上传"
 for r in $RCLONE_REMOTES; do
   log "→ $r:/$DEST"
   # 退出码不在这里判 —— 下面的 rclone check 做单向校验才是判据
   rclone copy "$UPFILE" "$r:/$DEST" --progress 2>&1 | tail -2 | sed 's/^/    /'
+  [ -f "$UPFILE.sha256" ] && rclone copy "$UPFILE.sha256" "$r:/$DEST" >/dev/null 2>&1
   # 云盘写入后元数据有延迟，立刻校验会误报，等一下再比
   sleep 10
   if rclone check "$UPDIR" "$r:/$DEST" --include "$NAME" --one-way >/dev/null 2>&1; then
@@ -111,6 +117,7 @@ if [ "$PRUNE" -gt 0 ]; then
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       if rclone deletefile "$r:/$DEST/$f" >/dev/null 2>&1; then
+        rclone deletefile "$r:/$DEST/$f.sha256" >/dev/null 2>&1   # 旁注可能没有（旧版上传的）
         echo "  $r 已删 $f"
         awk -F'\t' -v r="$r" -v f="$f" '!($1==r && $2==f)' "$UP_LEDGER" > "$UP_LEDGER.tmp" \
           && mv "$UP_LEDGER.tmp" "$UP_LEDGER"

@@ -2,6 +2,18 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-10-10：备份重新规划（四类包、UTC、去重）
+
+用户 2026-10-10 确认的备份重新规划：OneDrive（5GB）快满，查下来 Server 包和 Xboard 包都是整台前置机、内容重复。按轻重缓急重排频率、重新拆包和命名，时间一律 UTC，旧包在新方案观察 24 小时通过后全部删除。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `vault-backup.sh` | 新增 → 1.0.0 | 只收 Vaultwarden（库、`data/`、`vaultwarden.env`、compose），每小时 :15。包名 `vault_YYYYMMDD_HHMMSS.7z`（UTC），本机 `/box/backup/vault`，网盘 `Backups/vault`，配 `.sha256`；全留 3 天 → 每天到 30 天 → 每周到 90 天 → 每月 |
+| `hk-host-backup.sh` | 新增 → 1.0.0 | 前置机整机：系统（`bk_system`）、面板、nginx 与证书、ufw、全部账号与业务库（Xboard 等，Vaultwarden 的库除外）、Xboard 目录、Komari、SubConverter、站点，每天 20:00。由 vw 包与 xboard 包合并去重；不再带旧布局副本。每天 1 份到 30 天 → 每周到 90 天 → 每月 |
+| `newapi-fullbackup.sh` | 1.4.0 → 2.0.0 | 目录改为 `/box/backup/newapi`、`Backups/newapi`（不再读 `NEWAPI_BAK_DIR` / `NEWAPI_CLOUD_DIR`）；每 6 小时（04:30 起）；全留 3 天；历史表清单加上 `audit_logs`、`perf_metrics` |
+| `litellm-fullbackup.sh` | 1.2.0 → 2.0.0 | 目录改为 `/box/backup/litellm`、`Backups/litellm`（不再读 `LITELLM_BACKUP_DIR` / `LITELLM_CLOUD_DIR`）；每周日 20:40；每周 1 份到 90 天 → 每月 |
+| `vw-fullbackup.sh`、`xboard-fullbackup.sh` | 删除 | 由上面两个取代。回滚用 `opsget --pin v2026.10.10`，那个 tag 里还有它们 |
+
 ## 2026-10-10：历史数据只收表结构
 
 起因：用户 2026-10-10 决定备份包只留核心资料和配置，日志、统计这类历史数据一律不要（OneDrive 只有 5GB）。表结构照留，恢复后应用照常启动，只是这些记录从零开始。订单、支付、佣金和 new-api 的调用明细 logs 和钱有关，不算历史，照留（logs 由用户确认保留）。

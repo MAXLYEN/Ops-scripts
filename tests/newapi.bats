@@ -18,7 +18,7 @@ setup() {
   printf 'correct-horse-battery-staple-03\n' > "$PASSF"; chmod 600 "$PASSF"
   mkdir -p /etc/ops-scripts
   printf '%s\n' 'NEWAPI_HOST="198.51.100.8"' 'NEWAPI_SSH_PORT="41452"' "NEWAPI_DATA_DIR=\"$DATA\"" \
-    "NEWAPI_BAK_DIR=\"$L/out\"" "BACKUP_PASS_FILE=\"$PASSF\"" 'MAIL_TO="ops@example.com"' \
+    "BACKUP_LOCAL_ROOT=\"$L/out\"" "BACKUP_PASS_FILE=\"$PASSF\"" 'MAIL_TO="ops@example.com"' \
     'NEWAPI_HEARTBEAT_URL="https://hc.example/ping/na"' "NEWAPI_BACKUP_LOG=\"$L/backup.log\"" \
     "ALERT_FALLBACK_FILE=\"$L/alerts.log\"" > /etc/ops-scripts/env.conf
   chmod 600 /etc/ops-scripts/env.conf
@@ -79,7 +79,7 @@ EOF
 }
 
 backup() { run bash /src/backup/newapi-fullbackup.sh; }
-pkg() { ls "$L"/out/newapi_*.7z 2>/dev/null | tail -1; }
+pkg() { ls "$L"/out/newapi/newapi_*.7z 2>/dev/null | tail -1; }
 none() {  # none <正则> <文本>：文本里不能有匹配的行
   grep -qE -- "$1" <<<"$2" || return 0
   printf '不该出现: %s\n%s\n' "$1" "$2" >&2
@@ -96,7 +96,7 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   rm -rf "$L/x"; 7z x -p"$(head -1 "$PASSF")" -o"$L/x" "$P" </dev/null >/dev/null
   [ "$(sqlite3 "$L/x/one-api.db" 'SELECT count(*) FROM options')" = 2 ]
   [ ! -e "$L/x/data-rest/logs" ]
-  [ -f "$L/cloud/onedrive/Backup-NewAPI/$(basename "$P")" ] && [ -f "$L/cloud/gdrive/Backup-NewAPI/$(basename "$P")" ]
+  [ -f "$L/cloud/onedrive/Backups/newapi/$(basename "$P")" ] && [ -f "$L/cloud/gdrive/Backups/newapi/$(basename "$P")" ]
   [ "$(tail -1 "$L/curl.log")" = "curl -fsS -m 10 --retry 2 https://hc.example/ping/na" ]
   [ -z "$(ls -d /tmp/newapi-snap-* 2>/dev/null)" ]
 }

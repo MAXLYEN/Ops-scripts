@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # ops/verify-backup-pass.sh — 验证本地密码能否解开云端备份包
-# VERSION: 2.2.0
+# VERSION: 3.0.0
+# 3.0.0: 按 2026-10 备份重新规划：装了哪个备份脚本就校验它的 <BACKUP_CLOUD_ROOT>/<包名>（vault、hk-host、newapi、litellm），RCLONE_PATHS 改为可选（额外要校验的目录）。「最新包过旧」按包算：litellm 每周一次，超过 8 天才算；其余超过 VERIFY_MAX_AGE_DAYS（默认 2 天）。
 # 2.2.0: 本机装了哪个备份脚本，就把它的云端目录并入校验（不在 RCLONE_PATHS 里时自动加上并提示补配置），LiteLLM 包不会漏校验。
 # 2.1.0: 新增 --cron（失败告警 + 心跳）；检查最新包的时效，过旧即告警；按修改时间取最新包；超大包跳过。
-# ENV-REQUIRED: BACKUP_PASS_FILES RCLONE_PATHS RCLONE_REMOTES
+# ENV-REQUIRED: BACKUP_PASS_FILES RCLONE_REMOTES
 # 定时用法见 ops/README.md：每周一次，把「包能解开」从假设变成定期验证过的事实。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
 load_env
-require_env RCLONE_REMOTES RCLONE_PATHS BACKUP_PASS_FILES
+require_env RCLONE_REMOTES BACKUP_PASS_FILES
 require_cmd rclone 7z
 
 CRON=0; [ "${1:-}" = "--cron" ] && CRON=1
@@ -55,28 +56,28 @@ for f in $BACKUP_PASS_FILES; do
   fi
 done
 
-# 装了哪个备份脚本，它的云端目录就要校验。RCLONE_PATHS 是手填的，新增备份脚本时
-# 容易忘了补（LiteLLM 就是这样）：漏掉的目录不报错，只是永远没人校验。并进来并提示补配置
+# 装了哪个备份脚本，就校验它的云端目录 <BACKUP_CLOUD_ROOT>/<包名>（不用手填，新增脚本不会漏）。
+# RCLONE_PATHS 可选：另外要校验的目录（例如别的机器传上来的包）
 section "校验范围"
 PATHS=""
-for p in $RCLONE_PATHS; do p=${p#/}; p=${p%/}; [ -n "$p" ] && PATHS="$PATHS $p"; done
-while read -r s k def; do
+declare -A MAXH=()
+while read -r s pkg days; do
   [ -x "${OPS_BIN_DIR:-/usr/local/bin}/$s.sh" ] || continue
-  d=${!k:-}; [ -n "$d" ] || d=$def
-  d=${d#/}; d=${d%/}
-  [ -n "$d" ] && [ "$d" != - ] || { log "$s 已安装，但没配 $k，不知道它的云端目录"; continue; }
-  case " $PATHS " in
-    *" $d "*) echo "  $s → $d" ;;
-    *) PATHS="$PATHS $d"
-       log "$s 的云端目录 $d 不在 RCLONE_PATHS 里，本次一并校验；请把它加进 env.conf 的 RCLONE_PATHS"
-       note "- $d 不在 RCLONE_PATHS（$s），已自动并入校验" ;;
-  esac
+  d=$(bk_cloud_dir "$pkg")
+  PATHS="$PATHS $d"; MAXH[$d]=$(( ${days:-0} * 24 ))
+  echo "  $s → $d"
 done <<'EOF'
-vw-fullbackup VW_REMOTE_PATH -
-xboard-fullbackup XBOARD_REMOTE_PATH -
-newapi-fullbackup NEWAPI_CLOUD_DIR Backup-NewAPI
-litellm-fullbackup LITELLM_CLOUD_DIR Backup-LiteLLM
+vault-backup vault
+hk-host-backup hk-host
+newapi-fullbackup newapi
+litellm-fullbackup litellm 8
 EOF
+for p in ${RCLONE_PATHS:-}; do
+  p=${p#/}; p=${p%/}
+  [ -n "$p" ] || continue
+  case " $PATHS " in *" $p "*) ;; *) PATHS="$PATHS $p"; echo "  RCLONE_PATHS → $p" ;; esac
+done
+[ -n "${PATHS// /}" ] || { warn "本机一个备份脚本都没装，RCLONE_PATHS 也没填，没有可校验的目录"; finish; exit $?; }
 
 # 逐个远端目录取最新的包，逐个密码试
 for r in $RCLONE_REMOTES; do
@@ -90,7 +91,8 @@ for r in $RCLONE_REMOTES; do
     AGE_H=$(( ($(date +%s) - $(date -d "$MT" +%s 2>/dev/null || date +%s)) / 3600 ))
     echo "  最新包: $NEWEST（$MT，$((AGE_H / 24)) 天 $((AGE_H % 24)) 小时前，$((SIZE / 1048576))MB）"
     STALE=""
-    if [ "$AGE_H" -gt "$MAX_AGE_H" ]; then
+    lim=${MAXH[$p]:-0}; [ "$lim" -gt 0 ] || lim=$MAX_AGE_H
+    if [ "$AGE_H" -gt "$lim" ]; then
       warn "最新包已是 $((AGE_H / 24)) 天前 —— 备份可能已停止上传"
       STALE="，但已 $((AGE_H / 24)) 天没有新包"
     fi

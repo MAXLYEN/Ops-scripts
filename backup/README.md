@@ -6,52 +6,64 @@
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `litellm-fullbackup.sh` | 1.2.0 | 从汇总机拉取 LiteLLM 节点的库导出与工作目录，加密上传 |
-| `newapi-fullbackup.sh` | 1.4.0 | 从汇总机拉取 new-api 数据，生成一致性快照并加密上传 |
-| `vw-fullbackup.sh` | 2.7.0 | 备份 Vaultwarden、Komari、SubConverter 与系统配置 |
-| `xboard-fullbackup.sh` | 2.6.0 | 生成 Xboard 加密备份包并上传云端 |
+| `litellm-fullbackup.sh` | 2.0.0 | 从汇总机拉取 LiteLLM 节点的库导出与工作目录，加密上传 |
+| `newapi-fullbackup.sh` | 2.0.0 | 从汇总机拉取 new-api 数据，生成一致性快照并加密上传 |
+| `vault-backup.sh` | 1.0.0 | 只备份 Vaultwarden（库、数据目录、配置），每小时一次 |
+| `hk-host-backup.sh` | 1.0.0 | 前置机整机备份：系统、面板、全部 MySQL 账号与业务库（Xboard 等）、Xboard 目录、Komari、SubConverter、站点，每天一次 |
 
 ## 运行与更新
 
 定时任务调用**已安装在本机的脚本**，避免备份启动依赖 GitHub。先用 `opsget -i backup/<脚本名>` 安装新版，再手动运行并检查产物；确认正常后，现有 cron 下一次会使用本地新版。不要让 cron 直接调用 `opsget`。
 
-- `vw-fullbackup.sh` 与 `xboard-fullbackup.sh` 使用 `BACKUP_PASS_FILE`，兼容旧的 `VW_PASS_FILE`；两者都是密码文件路径。
+- 四类包（2026-10 起）：`vault`（只有 Vaultwarden）、`hk-host`（前置机整机，不含 Vaultwarden）、`newapi`、`litellm`。**恢复前置机要 hk-host 与 vault 两个包一起**（`migrate/restore-from-backup`）；系统部分只在 hk-host 包里，不重复。
+- 包名 `<包名>_YYYYMMDD_HHMMSS.7z`，时间一律 UTC（不看系统时区）；旁边配 `.sha256`，两个都上传。本机放 `<BACKUP_LOCAL_ROOT>/<包名>/`（默认 `/box/backup`），每个网盘放 `<BACKUP_CLOUD_ROOT>/<包名>/`（默认 `Backups`）。
+- 加密都用 `BACKUP_PASS_FILE`（兼容旧的 `VW_PASS_FILE`），是密码文件路径。
+- 日志和历史数据只收表结构、不收数据（恢复后应用照常启动，这些记录从零开始）：Xboard 的日志与统计、机器负载曲线、管理审计、流量重置记录、失败队列，vaultwarden 的 `event`，Komari 的 `logs`、`task_results`，new-api 的 `quota_data`、`audit_logs`、`perf_metrics` 与程序日志目录，LiteLLM 的花费明细与按天用量、健康检查、错误与审计日志。订单、支付、佣金、new-api 的调用明细 `logs` 照收。清单可用 `BACKUP_HISTORY_TABLES`、`NEWAPI_HISTORY_TABLES`、`LITELLM_HISTORY_TABLES` 改。
+- `hk-host-backup.sh` 用 `MYSQL_DEFAULTS_FILE` 导出全部账号与业务库（Vaultwarden 的库在 vault 包，指标库只留本地），整个 Xboard 目录原样收进 rootfs（框架日志除外），Komari 用 `.backup` 取一致性副本；面板程序配置、nginx 依赖、GeoLite2-City、ufw 国家屏蔽规则照收，恢复时少下载。
 - `newapi-fullbackup.sh` 从落地机拉取数据；SQLite 用在线备份 API 生成一致性快照，避免直接复制运行中的 WAL 数据库。
 - `litellm-fullbackup.sh` 从 LiteLLM 节点拉取数据：在节点上 `docker exec litellm-postgres pg_dump -U litellm -Fc litellm`（事务快照，一致且不停服；**绝不复制运行中的 `pgdata/`**），并用容器自己的 `pg_restore --list` 读一遍，读不开就整轮失败；工作目录 `LITELLM_WORKDIR` 除 `pgdata/` 与日志外全收（`.env`、`config.yaml`、`docker-compose.yml`）。SSH 端口取 `LITELLM_SSH_PORT`，没有就取 `~/.vps-hosts.txt`，再没有用 22。
 - **LiteLLM 的 Redis 不备份**：`ops/deploy-litellm` 起的 Redis 只作响应缓存（`config.yaml` 的 `cache_params`），compose 里就关了持久化（`--save "" --appendonly no`），重启本来就是空的，里面没有要留的状态。
 - **`LITELLM_SALT_KEY` 在 LiteLLM 包的 `workdir/.env` 里**：面板里加的模型和上游 Key 在 Postgres 里用它加密，恢复时必须用原来那一个，换了就永远解不开。包里 `RESTORE.md` 开头就讲这一点，并附盐值的指纹（sha256 前 12 位）供核对。
 - 备份是否可解开，另用 `ops/verify-backup-pass.sh` 检查；完整恢复能力仍需演练。
 
-- 各脚本都依赖公共库 `lib/common.sh` 1.2.0 起的 `bk_*` 函数（`litellm-fullbackup` 要 1.2.3 起：`bk_images` 只列指定容器、`vps_host_port`）；`opsget -i` 会一并同步，库缺失或过旧时脚本报失败并告警。
+- 各脚本都依赖公共库 `lib/common.sh` 的 `bk_*` 函数（`vault-backup`、`hk-host-backup` 要 1.4.0 起）；`opsget -i` 会一并同步，库缺失或过旧时脚本报失败并告警。
 - 各脚本各自持有 `/run/lock/<脚本名>.lock`，上一轮没结束时新一轮直接退出、不报心跳。
-- `vw-fullbackup.sh` 与 `xboard-fullbackup.sh` 支持 `--local-only <目录>`：包（连同 `.sha256`）只写进这个目录，不上传、不做分级保留清理、不报心跳、不发告警邮件；上一轮还在跑时等它结束（最多 2 小时）而不是跳过。给 `migrate/live-migrate` 在旧机上现做包、经 SSH 直传新机用；这份包不是例行备份，不该挤掉网盘上的旧包，也不该让心跳监控以为例行备份已上云。
+- `vault-backup.sh` 与 `hk-host-backup.sh` 支持 `--local-only <目录>`：包（连同 `.sha256`）只写进这个目录，不上传、不做分级保留清理、不报心跳、不发告警邮件；上一轮还在跑时等它结束（最多 2 小时）而不是跳过。给 `migrate/live-migrate` 在旧机上现做包、经 SSH 直传新机用；这份包不是例行备份，不该挤掉网盘上的旧包，也不该让心跳监控以为例行备份已上云。
 
 各脚本在头部声明 `ENV-REQUIRED`。版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 频率与分级保留
 
-目标频率：`vw-fullbackup`、`xboard-fullbackup`、`litellm-fullbackup` 每 6 小时一次，`newapi-fullbackup` 每小时一次。cron 由 `ops/install-backup-cron.sh` 安装（不在本目录）；改频率后，外部心跳监控的周期也要同步改。
+频率（UTC，由 `ops/install-backup-cron.sh` 安装，不在本目录；改频率后外部心跳监控的周期也要同步改）：
 
-清理按包文件名里的时间戳（`<前缀>_YYYYMMDD_HHMMSS.7z`，按 UTC 解释）分档，本地和每个 rclone 远端各自执行：
-
-| 档位 | vw / xboard / litellm | new-api | 保留 |
+| 包 | 脚本 | 频率 | 心跳周期 |
 | --- | --- | --- | --- |
-| 全留 | 7 天内 | 2 天内 | 全部 |
-| 按天 | 30 天内 | 30 天内 | 每天最早的一份 |
-| 按周 | 90 天内 | 90 天内 | 每个 ISO 周最早的一份 |
-| 按月 | 本地 180 / 云端 400 天内 | 同左 | 每月最早的一份 |
+| vault | `vault-backup` | 每小时 :15 | 1 小时 |
+| hk-host | `hk-host-backup` | 每天 20:00 | 1 天 |
+| newapi | `newapi-fullbackup` | 每 6 小时：04:30、10:30、16:30、22:30 | 6 小时 |
+| litellm | `litellm-fullbackup` | 每周日 20:40 | 1 周 |
+| panel | `ops/panel-backup-create` | 每周日 19:30 | 1 周 |
+
+清理按包文件名里的时间戳（按 UTC 解释）分档，本地和每个 rclone 远端各自执行（档位见公共库 `bk_tiers`，`<包名>_KEEP_TIERS` 可改）：
+
+| 档位 | vault / newapi | hk-host（每天一次） | litellm（每周一次） | 保留 |
+| --- | --- | --- | --- | --- |
+| 全留 | 3 天内 | — | — | 全部 |
+| 按天 | 30 天内 | 30 天内 | — | 每天最早的一份 |
+| 按周 | 90 天内 | 90 天内 | 90 天内 | 每个 ISO 周最早的一份 |
+| 按月 | 本地 180 / 云端 400 天内 | 同左 | 同左 | 每月最早的一份 |
 
 - 每档留**最早**的一份：它正是上一档留下来的那份，档位边界移动时不会今天留 A、明天换 B。
 - 最新的一份无论多旧都保留；同名 `.sha256` 旁注跟随它的包；不符合命名规则的文件不动。
 - 本次运行有失败（致命错误、任一远端上传或校验失败）时整轮不清理。
 - 档位不合法（非整数、逐级递减）或包名日期无法解析时不清理，并记一条告警。
 - 远端逐个 `rclone deletefile`，不用带过滤器的 `rclone delete`，名单外的文件碰不到。
-- 档位配置见 `config/env.example.conf` 的 `BACKUP_KEEP_*` 与 `NEWAPI_KEEP_ALL_DAYS`、`NEWAPI_*_KEEP_DAYS`。
+- 档位配置见 `config/env.example.conf` 的 `<包名>_KEEP_TIERS`、`BACKUP_KEEP_LOCAL_DAYS`、`BACKUP_KEEP_CLOUD_DAYS`。
 - 从旧的「按天数」清理切换过来后，第一次运行会一次删掉大量按天保留的旧包（例如 400 份每日包删到约 50 份），属预期。
 
 ## 包结构
 
-vw 与 xboard 的 7z 里是 `payload.tar.gz`（保留属主与权限，7z 不记属主）以及外层各一份 `MANIFEST.txt` / `manifest.txt` 和 `RESTORE.md`。解开 `payload.tar.gz` 后，旧版的目录（`db/`、`vaultwarden/`、`komari/`、`app/`、`nginx/`、`system/` 等）原样都在，另有：
+hk-host 与 vault 的 7z 里是 `payload.tar.gz`（保留属主与权限，7z 不记属主）以及外层各一份 `manifest.txt` 和 `RESTORE.md`。解开 `payload.tar.gz` 后（2026-10 起不再带旧布局的 `app/`、`nginx/`、`system/` 副本，恢复只认 rootfs）：
 
 | 路径 | 内容 |
 | --- | --- |
@@ -61,7 +73,7 @@ vw 与 xboard 的 7z 里是 `payload.tar.gz`（保留属主与权限，7z 不记
 | `db/mysql-users.sql` | 全部 MySQL 账号：`CREATE USER IF NOT EXISTS …` 与 `ALTER USER …`（带 `AS '<哈希>'`）、`GRANT …;`、结尾 `FLUSH PRIVILEGES;` |
 | `db/<库名>.sql.gz` | 其余业务库的单库 dump（不含 `CREATE DATABASE` / `USE`）；各库字符集见 `db/databases.tsv` |
 | `system/crontab.txt` | root 的 `crontab -l` |
-| `system/rootfs-skipped.txt` | 没进包的路径与原因（解密密码、超过 5MB 的二进制等） |
+| `system/rootfs-skipped.txt` | 没进包的路径与原因（解密密码、超过 5MB 的二进制、日志；`mysql:<库>.<表>` / `sqlite:<库文件>.<表>` 是只收表结构的历史表；hk-host 包里还记着「在 vault 包里」的 Vaultwarden） |
 | `system/ref/` | 只作参考、不自动放回：fstab、hostname、hosts、apt 源与手动安装的包、已启用的单元、被 mask 的单元、IP |
 
 `kind` 与各列含义（`mode` / `owner` 为 `-` 表示沿用归档里的值）：
@@ -94,7 +106,7 @@ LiteLLM 包（`litellm_YYYYMMDD_HHMMSS.7z`，不套 `payload.tar.gz`）也没有
 
 目标是换一台新机能还原成与原机一致；日志不收。
 
-**进包（vw 与 xboard 共用，`bk_system`）**
+**进包（hk-host 包，`bk_system`；vault 包只有 Vaultwarden 的库、`data/`、`vaultwarden.env`、`compose.yaml`）**
 
 | 类别 | 内容 | 说明 |
 | --- | --- | --- |
@@ -112,25 +124,26 @@ LiteLLM 包（`litellm_YYYYMMDD_HHMMSS.7z`，不套 `payload.tar.gz`）也没有
 
 **各脚本自己的业务数据**
 
-- vw：vaultwarden 库（自己的账号导出）、Vaultwarden `data/`（不含 icon_cache）、`vaultwarden.env`、compose；komari.db（`.backup`）、plugin、plugin-data、auto-discovery.json、compose；SubConverter 整个目录；new-api 隧道单元（旧位置 `system/systemd/`）。
-- xboard：xboard 库；**整个 Xboard 目录**（含 git 检出、`.env`、compose、`.docker/.data`、主题、插件，不含 `storage/logs`），不用再 `git clone` 一个可能更新的版本；`/root/deploy`、`/etc/xboard-toolkit.conf`。
+- vault：vaultwarden 库（用它自己的账号导出，`event` 只导结构）、Vaultwarden `data/`（不含 icon_cache、日志）、`vaultwarden.env`、compose。账号由 hk-host 包建。
+- hk-host：**整个 Xboard 目录**（含 git 检出、`.env`、compose、`.docker/.data`、主题、插件，不含 `storage/logs`），不用再 `git clone` 一个可能更新的版本；Xboard 的库随全部业务库导出；`/root/deploy`、`/etc/xboard-toolkit.conf`；komari.db（`.backup`，`logs`、`task_results` 清空）、plugin、plugin-data、auto-discovery.json、compose；SubConverter 整个目录；隧道单元随 `/etc/systemd/system` 的自定义单元进包。
 
 **不在包里，以及原因**
 
 | 内容 | 原因 |
 | --- | --- |
 | 备份解密密码（`BACKUP_PASS_FILE`、`VW_PASS_FILE`、`BACKUP_PASS_FILES` 列出的文件） | 拿到包的人同时拿到钥匙，加密就白做了。另行保管 |
-| 日志（`*.log`、`*.log.N`、`/var/log`、Xboard `storage/logs`） | 按要求不收 |
+| 日志（`*.log`、`*.log.N`、`/var/log`、Xboard `storage/logs`、new-api 的 `logs/`） | 按要求不收 |
+| 历史数据的**内容**（日志、统计、监控曲线、花费明细类的表，清单见上文「运行与更新」） | 按要求只收表结构：恢复后应用照常启动，这些记录从零开始 |
 | 备份自己的落盘目录（`*_BACKUP_DIR`、`BACKUP_DIRS`、`SNAPSHOT_ROOT` 等） | 包里套包，越滚越大 |
 | metrics 库（`METRICS_DB_NAME`） | 体积大，按方案由面板在本地 dump、不上云；还原后监控历史从零开始 |
 | Redis（Xboard 的、LiteLLM 的） | 纯缓存；LiteLLM 的 Redis 连持久化都关了 |
 | Docker 镜像本体 | 按 `images.tsv` 的 digest 拉回，与原来逐字节一致 |
-| Komari 主题 | 可在面板里重新下载，清单在 `komari/theme-list.txt` |
-| 超过 5MB 的 `/usr/local/bin` 二进制 | 静态二进制（rclone 等），重装即可；每 6 小时一份时不值得反复上传 |
+| Komari 主题 | 可在面板里重新下载，清单记在 `system/rootfs-skipped.txt` |
+| 超过 5MB 的 `/usr/local/bin` 二进制 | 静态二进制（rclone 等），重装即可，不值得每天反复上传 |
 | fstab、hostname、hosts、网卡与 IP、apt 源 | 带原机磁盘 UUID 或 IP，原样放回会弄坏新机；只放 `system/ref/` 作参考，挂载参数（hidepid）由 init/02 重建 |
-| 时区、swap | 由 init/ 按 `TZ_EXPECTED` 与内存重建 |
+| 时区、swap | 由 init/ 按 `TZ_EXPECTED` 与内存重建；`restore-from-backup` 恢复时把时区设成 UTC（定时任务按 UTC 写） |
 | **new-api 落地机、LiteLLM 节点的系统配置**（sshd、ufw、fail2ban、docker 设置等） | `newapi-fullbackup`、`litellm-fullbackup` 只从汇总机拉各自服务的数据。系统配置尚未覆盖，换机时按 `init/` 重建 |
-| 非 compose 起的容器 | 还原脚本无法自动启动；启动参数见 vw 包的 `system/docker/run-commands.sh`，建议用 `ops/containerize-and-pin` 转成 compose。每次备份会告警 |
+| 非 compose 起的容器 | 还原脚本无法自动启动，建议用 `ops/containerize-and-pin` 转成 compose。每次备份会告警 |
 | 数据没进包的 compose 项目 | 只收 compose 文件，不记 `compose-project`，并告警；需要的话把数据目录加进 `EXTRA_SNAPSHOT_PATHS`，确实无状态的写进 `BACKUP_IGNORE_CONTAINERS` |
 
 **已知限制**

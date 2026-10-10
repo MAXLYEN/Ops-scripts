@@ -94,10 +94,10 @@ opsget init/run 03       # 执行指定阶段
 
 ```
 # 对
-30 3 * * * flock -w 3600 /var/lock/fullbackup.lock /usr/local/bin/vw-fullbackup.sh >> /var/log/vw-fullbackup-cron.log 2>&1
+15 * * * * /usr/bin/flock -n /var/lock/vault-backup-cron.lock /usr/local/bin/vault-backup.sh >> /var/log/vault-backup-cron.log 2>&1
 
 # 错
-30 3 * * * opsget backup/vw-fullbackup
+15 * * * * opsget backup/vault-backup
 ```
 
 三个理由：

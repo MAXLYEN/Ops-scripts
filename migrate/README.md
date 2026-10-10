@@ -14,8 +14,8 @@ new-api 落地机不走这里：演练与恢复见 `ops/newapi-drill`，换落�
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `live-migrate.sh` | 1.1.1 | 原机还在：一键迁移，在旧机上运行（预检 → 演练 → 停写切换 → DNS，DNS 前可回滚） |
-| `restore-from-backup.sh` | 1.5.1 | 原机已不在时，用每日加密备份包把新机恢复成原样；也是一键迁移在新机上调用的恢复步骤 |
+| `live-migrate.sh` | 2.0.0 | 原机还在：一键迁移，在旧机上运行（预检 → 演练 → 停写切换 → DNS，DNS 前可回滚） |
+| `restore-from-backup.sh` | 2.0.0 | 原机已不在时，用 hk-host 与 vault 两个加密备份包把新机恢复成原样；也是一键迁移在新机上调用的恢复步骤 |
 | `01-inventory.sh` | 2.0.1 | 旧流程：在新旧机器采集迁移前环境清单 |
 | `02-nat-probe.sh` | 2.0.2 | 旧流程：从外部验证迁入机的端口入站可达性 |
 | `03-pre-migrate.sh` | 2.0.4 | 旧流程：在迁出机停服并制作完整冷快照 |
@@ -64,7 +64,7 @@ opsget migrate/live-migrate rollback                                 # DNS 切�
 
 **演练**（旧机照常服务，不停任何东西、不动定时任务、不上传）：
 
-1. 旧机用装好的 `vw-fullbackup` / `xboard-fullbackup --local-only` 现做加密包到 `/root/live-migrate/pkgs`（不上传、不清理、不报心跳）
+1. 旧机用装好的 `hk-host-backup` / `vault-backup --local-only` 现做加密包到 `/root/live-migrate/pkgs`（不上传、不清理、不报心跳）
 2. 经 SSH 直传新机 `/root/live-migrate-in`，新机上再算一遍 sha256 核对
 3. 新机 `restore-from-backup restore <包> --no-cron --no-egress`：正式恢复并起服务，但**不装定时任务**（旧机还在服务，新机不能往网盘传包、按保留期删云端的包），**容器不许主动连外网**（新机的容器用的是同一份数据：Xboard 的定时任务会重复给用户发提醒邮件，Komari 看到被控端全都离线——它们还在向旧机上报——会往告警渠道发通知；做法同 `--drill`，见下面「季度演练」）。新机上已有本次迁移上次恢复出来的数据时带 `--force`
 4. 核对：新机 `restore-from-backup check` 逐项比对（恢复计划里还标着放置、冲突的就是没对上的）；新机 `08-post-start-check`；旧机经 `--resolve` 分别访问旧机（127.0.0.1）和新机 IP 上的每个站点，对比状态码；配了 `NEWAPI_TUNNEL_UNIT` 的，检查新机到落地机的隧道和 `NEWAPI_LOCAL_URL`
@@ -108,7 +108,7 @@ opsget migrate/live-migrate rollback                                 # DNS 切�
 新机已经接了写入，旧机的数据停在切换那一刻，直接把 DNS 改回去会丢掉这之间的数据，`rollback` 也会拒绝。要反过来再迁一次（新机 → 旧机）；旧机上有数据，一键迁移的预检会拒绝，所以手动做：
 
 1. 新机：crontab 里调用备份脚本的行加 `#MIGRATE-PAUSED ` 前缀，`docker stop` 全部容器
-2. 新机：`/usr/local/bin/vw-fullbackup.sh --local-only /root/back` 与 `/usr/local/bin/xboard-fullbackup.sh --local-only /root/back`
+2. 新机：`/usr/local/bin/hk-host-backup.sh --local-only /root/back` 与 `/usr/local/bin/vault-backup.sh --local-only /root/back`
 3. 把 `/root/back` 里的包传到旧机，旧机上 `opsget migrate/restore-from-backup restore <包…> --force`（旧机原有的目录留 `.bak.<时间>`，原有的库先导出再删）。它会重新排好备份定时任务，旧机上原来 `#MIGRATE-PAUSED ` 开头的行删掉即可
 4. 把 DNS 改回旧机，确认公共 DNS 生效
 5. 迁移完成时如果删掉了落地机等机器上旧机的放行，重新加上
@@ -119,12 +119,13 @@ opsget migrate/live-migrate rollback                                 # DNS 切�
 
 ## 原机已不在：从备份包恢复
 
-`01`–`09` 依赖迁出机还活着（`03` 的冷快照、`06` 的镜像导出）。原机已经没了，就只剩 `backup/` 每天上传的加密包，用 `restore-from-backup.sh`。前提：新机跑完 `init/`，填好 `env.conf`、放好备份密码文件、配好 rclone，装好 MySQL（版本照包里 manifest）与宝塔 / nginx。
+`01`–`09` 依赖迁出机还活着（`03` 的冷快照、`06` 的镜像导出）。原机已经没了，就只剩 `backup/` 上传的加密包，用 `restore-from-backup.sh`：前置机要 **hk-host 包（整机，每天）加 vault 包（Vaultwarden，每小时）** 一起恢复。前提：新机跑完 `init/`，填好 `env.conf`、放好备份密码文件、配好 rclone，装好 MySQL（版本照包里 manifest）与宝塔 / nginx。
 
 ```bash
-opsget migrate/restore-from-backup check              # 从网盘取 vw 与 xboard 的最新包，解开、校验，列出恢复计划；不动本机
+opsget migrate/restore-from-backup check              # 从网盘的 Backups/hk-host 与 Backups/vault 各取最新的包，解开、校验，列出恢复计划；不动本机
 opsget migrate/restore-from-backup restore            # 正式恢复
-opsget migrate/restore-from-backup restore /root/srvbak_x.7z /root/xboard_y.7z   # 用本地包
+opsget migrate/restore-from-backup restore /root/hk-host_x.7z /root/vault_y.7z   # 用本地包
+opsget migrate/restore-from-backup restore /root/vault_y.7z --force              # 机器还在、只回滚 Vaultwarden
 ```
 
 一条 `restore` 依次做完：解密并核对 sha256 / 清单校验和 / dump 完整性 → 本机 `env.conf` 空着的键用包里原机的 `env.conf` 补上（本机填过的不动）→ 建库、导入、建账号 → 放回数据目录、compose 文件、站点配置与证书、部署元数据 → SQLite 做 `integrity_check` → 并入原机的定时任务，再由 `ops/install-backup-cron` 按统一时间表重排备份 → 按锁定的版本拉镜像、起容器，做 Xboard 的 Redis 属主修复与 `config:cache` → 启用 systemd 单元 → `nginx -t` 通过才重载 → 用 `--resolve` 预演访问每个站点 → 列出剩下的手动步骤和原因。

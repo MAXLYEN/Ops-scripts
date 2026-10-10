@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/preflight-backup.sh — 检查备份脚本运行前的依赖与配置
-# VERSION: 2.1.0
+# VERSION: 2.2.0
+# 2.2.0: 云端现状列的是新目录 <BACKUP_CLOUD_ROOT>/<包名>（vault、hk-host、newapi、litellm），RCLONE_PATHS 只作额外目录。
 # 2.1.0: rclone 改用 ensure_rclone 装官方版（缺失或低于 1.75.0 都会装；Debian 源的 1.60 下载 OneDrive 报 unauthenticated），不再从 apt 装；apt 安装前说明锁被占用时最多等 5 分钟，并保留 apt 的报错输出（真机演练里它静默等锁，看起来像卡死）。
 # 2.0.2: 整理注释并补充目录文档，执行逻辑未变。
 # ENV-REQUIRED: BACKUP_DIRS BACKUP_SCRIPTS
@@ -79,7 +80,7 @@ fi
 
 section "5. 云端现状（跑之前的基线）"
 for r in $RCLONE_REMOTES; do
-  for p in $RCLONE_PATHS; do
+  for p in $(for k in $BK_PKGS; do bk_cloud_dir "$k"; echo; done) ${RCLONE_PATHS:-}; do
     n=$(rclone lsf "$r:/$p" 2>/dev/null | wc -l)
     printf '  %-10s %-18s %s 个文件\n' "$r" "$p" "$n"
   done

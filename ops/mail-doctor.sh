@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/mail-doctor.sh — 诊断告警邮件的配置与发送链路
-# VERSION: 1.0.3
+# VERSION: 1.0.4
+# 1.0.4: 第 7 步改看新备份脚本的日志（vault-backup、hk-host-backup、newapi、litellm 与它们的 -cron.log）。
 # 1.0.3: msmtp 的 TLS 参数改用数组传递。
 
 . /usr/local/lib/ops-common.sh 2>/dev/null || . "$(dirname "$0")/../lib/common.sh"
@@ -85,7 +86,8 @@ else
 fi
 
 section "7. 备份脚本日志里的告警"
-for f in "${VW_LOG_FILE:-/var/log/vw-fullbackup.log}" /var/log/vw-fullbackup-cron.log \
+for f in /var/log/vault-backup.log /var/log/hk-host-backup.log /var/log/newapi-fullbackup.log /var/log/litellm-fullbackup.log \
+         /var/log/vault-backup-cron.log /var/log/hk-host-backup-cron.log \
          "${ALERT_FALLBACK_FILE:-/var/log/backup-alerts.log}"; do
   [ -f "$f" ] || continue
   hits=$(grep -iE '告警邮件|未送达|msmtp' "$f" | tail -5)

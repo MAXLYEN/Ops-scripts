@@ -180,30 +180,30 @@ exit 0
 
 @test "Vaultwarden 升级：先做新备份，再升级" {
   stub ops/upgrade-vaultwarden 0
-  local_stub vw-fullbackup
+  local_stub vault-backup
   drive opsbox 5 2 "" y "" 0 q
-  calls_are "ops/upgrade-vaultwarden" "local/vw-fullbackup" "ops/upgrade-vaultwarden -y"
+  calls_are "ops/upgrade-vaultwarden" "local/vault-backup" "ops/upgrade-vaultwarden -y"
 }
 
 @test "Vaultwarden 升级：备份失败且不坚持，就不升级" {
   stub ops/upgrade-vaultwarden 0
-  local_stub vw-fullbackup 1
+  local_stub vault-backup 1
   drive opsbox 5 2 "" y n "" 0 q
-  calls_are "ops/upgrade-vaultwarden" "local/vw-fullbackup"
+  calls_are "ops/upgrade-vaultwarden" "local/vault-backup"
 }
 
 # ── 本地备份与锁 ────────────────────────────────────────────
 @test "立即备份：跑本地脚本，用 crontab 里的同一把锁" {
-  local_stub vw-fullbackup
-  echo '30 3 * * * flock -w 3600 /tmp/fb.lock /usr/local/bin/vw-fullbackup.sh >> /dev/null 2>&1' | crontab -
+  local_stub vault-backup
+  echo '30 3 * * * flock -w 3600 /tmp/fb.lock /usr/local/bin/vault-backup.sh >> /dev/null 2>&1' | crontab -
   drive opsbox 2 2 "" y "" 0 q
-  has "flock -n /tmp/fb.lock /usr/local/bin/vw-fullbackup.sh"
-  calls_are "local/vw-fullbackup"
+  has "flock -n /tmp/fb.lock /usr/local/bin/vault-backup.sh"
+  calls_are "local/vault-backup"
 }
 
 @test "立即备份：锁被占用时不跑并提示" {
-  local_stub vw-fullbackup
-  echo '30 3 * * * flock /tmp/fb.lock /usr/local/bin/vw-fullbackup.sh' | crontab -
+  local_stub vault-backup
+  echo '30 3 * * * flock /tmp/fb.lock /usr/local/bin/vault-backup.sh' | crontab -
   flock /tmp/fb.lock sleep 60 &
   local holder=$!
   sleep 0.3
@@ -793,10 +793,10 @@ no_toolbox_left() {
 
 # ── 定时任务：按统一时间表排备份 ────────────────────────────────
 @test "定时任务：装了备份脚本时先预演，确认后才 --apply" {
-  local_stub vw-fullbackup
+  local_stub vault-backup
   stub ops/install-backup-cron 0
   drive opsbox 9 5 "" y "" 0 q
-  has "本机装了备份脚本: vw-fullbackup"
+  has "本机装了备份脚本: vault-backup"
   calls_are "ops/install-backup-cron" "ops/install-backup-cron --apply"
 }
 
@@ -805,12 +805,12 @@ no_toolbox_left() {
   stub ops/install-backup-cron 0
   drive opsbox 9 5 "" y "" 0 q
   has "本机装了备份脚本: litellm-fullbackup"
-  has "litellm 每 6 小时"
+  has "litellm 与面板整机每周日"
   calls_are "ops/install-backup-cron" "ops/install-backup-cron --apply"
 }
 
 @test "定时任务：不确认就只预演" {
-  local_stub vw-fullbackup
+  local_stub vault-backup
   stub ops/install-backup-cron 0
   drive opsbox 9 5 "" n "" 0 q
   calls_are "ops/install-backup-cron"

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # backup/newapi-fullbackup.sh — 从汇总机拉取 new-api 数据，生成一致性快照并加密上传
-# VERSION: 1.4.0
+# VERSION: 2.0.0
+# 2.0.0: 按 2026-10 备份重新规划：本机目录 <BACKUP_LOCAL_ROOT>/newapi（默认 /box/backup/newapi），网盘 <BACKUP_CLOUD_ROOT>/newapi（默认 Backups/newapi），不再读 NEWAPI_BAK_DIR / NEWAPI_CLOUD_DIR；分级保留改为全留 3 天 → 每天到 30 天 → 每周到 90 天 → 每月（NEWAPI_KEEP_TIERS 可改）；频率改为每 6 小时（UTC 04:30 起，见 install-backup-cron）。
 # 1.4.0: 历史数据只收表结构：one-api.db 的 quota_data 在落地机的快照副本上清空（NEWAPI_HISTORY_TABLES 可改，生产库不动）；调用明细 logs 是计费对账依据，照留。数据目录里的程序日志 logs/ 不进包。
 # 1.3.0: 线路短时抖动时自动重试：SSH 握手超时、传到一半断开（ssh 退出码 255）隔 BACKUP_SSH_RETRY_WAIT 秒（默认 180）重试，最多 BACKUP_SSH_TRIES 次（默认 3），都失败才报失败；落地机上的命令自己报错不重试。落地机上被中断的拉取留下的旧暂存目录（超过 2 小时，里面是整库副本）下次清掉，中断时也尽量当场删掉。起因：前置机到落地机的线路在北京时间晚高峰丢包，2026-10-05 14:05 那轮传到一半断开。
 # 1.2.0: 包里 RESTORE.md 的起容器改为从 container-inspect.json 生成命令（原先手写示例漏了原机另加的环境变量，如 STREAMING_TIMEOUT；真机演练发现），并写明后台要用正式域名登录、渠道测试失败怎么分辨。
 # 1.1.0: 改为 GFS 分级保留（每小时一次时全留 2 天），防重入锁，包内新增 images.tsv（镜像 digest）。
-# ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_BAK_DIR BACKUP_PASS_FILE MAIL_TO
+# ENV-REQUIRED: NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR BACKUP_PASS_FILE MAIL_TO
 # 定时任务调用已安装的本地脚本；SQLite 使用在线备份生成一致性快照。
 
 set -o pipefail
@@ -26,16 +27,17 @@ ENV_FILE=/etc/ops-scripts/env.conf
 TS="$(date -u +%Y%m%d_%H%M%S)"
 LOG="${NEWAPI_BACKUP_LOG:-/var/log/newapi-fullbackup.log}"
 # 分级保留：每小时一次，全留期短一些；日 / 周档与 vw、xboard 共用
-KEEP_ALL_DAYS="${NEWAPI_KEEP_ALL_DAYS:-2}"
-KEEP_DAILY_DAYS="${BACKUP_KEEP_DAILY_DAYS:-30}"
-KEEP_WEEKLY_DAYS="${BACKUP_KEEP_WEEKLY_DAYS:-90}"
-LOCAL_KEEP_DAYS="${NEWAPI_LOCAL_KEEP_DAYS:-180}"
-CLOUD_KEEP_DAYS="${NEWAPI_CLOUD_KEEP_DAYS:-400}"
-CLOUD_DIR="${NEWAPI_CLOUD_DIR:-Backup-NewAPI}"
+# 本机 <BACKUP_LOCAL_ROOT>/newapi、网盘 <BACKUP_CLOUD_ROOT>/newapi（与公共库 bk_local_dir / bk_cloud_dir 一致）
+NEWAPI_BAK_DIR="${BACKUP_LOCAL_ROOT:-/box/backup}/newapi"
+CLOUD_DIR="${BACKUP_CLOUD_ROOT:-Backups}/newapi"
+# 分级保留：全留 / 每天一份 / 每周一份（天），之后每月一份到本机、网盘各自的上限
+read -r KEEP_ALL_DAYS KEEP_DAILY_DAYS KEEP_WEEKLY_DAYS <<< "${NEWAPI_KEEP_TIERS:-3 30 90}"
+LOCAL_KEEP_DAYS="${BACKUP_KEEP_LOCAL_DAYS:-180}"
+CLOUD_KEEP_DAYS="${BACKUP_KEEP_CLOUD_DAYS:-400}"
 RCLONE_REMOTES="${NEWAPI_RCLONE_REMOTES:-onedrive gdrive}"
 CONTAINER="${NEWAPI_CONTAINER:-new-api}"
 # one-api.db 里只收表结构、不收数据的历史表（空格分隔；写成空就全收）。logs 是计费对账依据，默认不在里面
-NEWAPI_HIST="${NEWAPI_HISTORY_TABLES-quota_data}"
+NEWAPI_HIST="${NEWAPI_HISTORY_TABLES-quota_data audit_logs perf_metrics}"
 NEWAPI_HIST_SQL="''"; for t in $NEWAPI_HIST; do
   [[ $t =~ ^[A-Za-z0-9_]+$ ]] && NEWAPI_HIST_SQL="$NEWAPI_HIST_SQL,'$t'"
 done
@@ -122,7 +124,7 @@ log "===== new-api 备份开始 $TS ====="
 [ "$LIB_OK" -eq 1 ] && declare -F bk_gfs_select >/dev/null \
   || { fail "公共库缺失或版本过旧（需要 1.2.0 起，含 bk_* 函数），先运行 opsget -u"; finish 1; }
 
-require_env NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR NEWAPI_BAK_DIR BACKUP_PASS_FILE MAIL_TO
+require_env NEWAPI_HOST NEWAPI_SSH_PORT NEWAPI_DATA_DIR BACKUP_PASS_FILE MAIL_TO
 
 # 预检
 for c in 7z rclone ssh tar sha256sum; do
@@ -409,12 +411,12 @@ log "已生成 .sha256 旁注文件"
 # 上传
 UPLOADED=0
 for R in $RCLONE_REMOTES; do
-  log "上传到 ${R}:/${CLOUD_DIR}"
-  if rclone copy "$ARCHIVE" "${R}:/${CLOUD_DIR}/" >>"$LOG" 2>&1 \
-     && rclone copy "${ARCHIVE}.sha256" "${R}:/${CLOUD_DIR}/" >>"$LOG" 2>&1; then
+  log "上传到 ${R}:${CLOUD_DIR}"
+  if rclone copy "$ARCHIVE" "${R}:${CLOUD_DIR}/" >>"$LOG" 2>&1 \
+     && rclone copy "${ARCHIVE}.sha256" "${R}:${CLOUD_DIR}/" >>"$LOG" 2>&1; then
     # Google Drive 元数据有延迟，立刻 check 会误报
     sleep 10
-    if rclone check "$NEWAPI_BAK_DIR" "${R}:/${CLOUD_DIR}" \
+    if rclone check "$NEWAPI_BAK_DIR" "${R}:${CLOUD_DIR}" \
          --include "$(basename "$ARCHIVE")" >>"$LOG" 2>&1; then
       log "${R} 校验通过"
       UPLOADED=$((UPLOADED+1))
@@ -437,7 +439,7 @@ else
   log "分级保留：全留 ${KEEP_ALL_DAYS} 天，每天一份至 ${KEEP_DAILY_DAYS} 天，每周一份至 ${KEEP_WEEKLY_DAYS} 天，每月一份至上限"
   bk_prune_local "$NEWAPI_BAK_DIR" newapi "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$LOCAL_KEEP_DAYS"
   for R in $RCLONE_REMOTES; do
-    bk_prune_remote "${R}:/${CLOUD_DIR}" newapi "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$CLOUD_KEEP_DAYS"
+    bk_prune_remote "${R}:${CLOUD_DIR}" newapi "$KEEP_ALL_DAYS" "$KEEP_DAILY_DAYS" "$KEEP_WEEKLY_DAYS" "$CLOUD_KEEP_DAYS"
   done
 fi
 

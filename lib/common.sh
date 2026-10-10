@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.3.0
+# VERSION: 1.4.0
+# 1.4.0: 按 2026-10 备份重新规划：新增 BK_PKGS、bk_local_dir / bk_cloud_dir（本机 <BACKUP_LOCAL_ROOT>/<包名>、网盘 <BACKUP_CLOUD_ROOT>/<包名>）、bk_stamp（UTC 时间戳，不看系统时区）、bk_tiers（按包的分级档位）、bk_upload（包与 .sha256 传到每个网盘并校验）、bk_prune_all（本机与每个网盘按档位清理）；bk_init 把 BACKUP_LOCAL_ROOT 当落盘目录排除，结尾显式 return 0（只配了一个不存在的落盘目录时原先返回失败）。
 # 1.3.0: 历史数据只收表结构：bk_mysql_dbs 对清单里的历史表（Xboard 的日志、统计、机器负载曲线、管理审计、流量重置记录、失败队列，vaultwarden 的 event）只导结构不导数据，记进 rootfs-skipped；清单由 bk_history_default 给出，BACKUP_HISTORY_TABLES 可整个改写。新增 bk_history_want / bk_history_pick / bk_history_tables，以及 bk_sqlite_strip（在包里的 SQLite 副本上清空历史表）。订单、支付、佣金照导。
 # 1.2.9: 面板 data/ 不收入侵检测（HIDS）事件日志 hids_data/log/（含 high/）：宝塔 13.1.0 起每天新增一个约 250MB 的 json，vw 与 xboard 包各带一份，两个包每天各涨约 9.5MB，5GB 的 OneDrive 几天就满；恢复不需要，hids_data 下的配置照收。
 # 1.2.8: warn 记下每条告警原文，finish 在「完成（N 条告警）」下面再列一遍（只累加了 OPS_WARNINGS、没走 warn 的，另起一行说明条数）。真机演练的 teardown 报了 1 条告警，原文滚出了屏幕，事后查不到是哪条。
@@ -16,7 +17,7 @@ set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 # shellcheck disable=SC2034  # 供调用方查询公共库版本
-OPS_COMMON_VERSION="1.3.0"
+OPS_COMMON_VERSION="1.4.0"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
@@ -303,6 +304,31 @@ ops_base() {
   printf '%s/%s' "${OPS_REPO:-https://raw.githubusercontent.com/MAXLYEN/ops-scripts}" "${ref:-main}"
 }
 
+# ── 备份包：名字、目录、时间 ────────────────────────────────
+# 四类包：vault（只有 Vaultwarden）、hk-host（前置机整机）、newapi、litellm。宝塔整机备份另算（panel）。
+# 本机放 <BACKUP_LOCAL_ROOT>/<包名>/，每个网盘放 <BACKUP_CLOUD_ROOT>/<包名>/，文件名 <包名>_YYYYMMDD_HHMMSS.7z。
+# 时间一律 UTC，不看系统时区（新机出厂可能是 Asia/Shanghai）
+# shellcheck disable=SC2034  # 供调用方遍历四类包
+BK_PKGS="vault hk-host newapi litellm"
+bk_local_dir() { printf '%s/%s' "${BACKUP_LOCAL_ROOT:-/box/backup}" "$1"; }
+bk_cloud_dir() { printf '%s/%s' "${BACKUP_CLOUD_ROOT:-Backups}" "$1"; }
+bk_stamp() { date -u +%Y%m%d_%H%M%S; }
+# bk_tiers <包名>：分级保留的「全留 每天档 每周档」天数。
+#   vault、newapi：全留 3 天 → 每天 1 份到 30 天 → 每周 1 份到 90 天 → 之后每月 1 份
+#   hk-host（每天一次）：每天 1 份到 30 天 → …；litellm（每周一次）：每周 1 份到 90 天 → …
+# 「全留 1 天」配合各自的频率，就是「每次都留到下一档」。<包名大写>_KEEP_TIERS 可改，如 VAULT_KEEP_TIERS="3 30 90"
+bk_tiers() {
+  local k v
+  k="$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')_KEEP_TIERS"
+  v=${!k:-}
+  [ -n "$v" ] && { printf '%s' "$v"; return; }
+  case "$1" in
+    hk-host) printf '1 30 90' ;;
+    litellm) printf '1 1 90' ;;
+    *)       printf '3 30 90' ;;
+  esac
+}
+
 # ── 备份包：rootfs 与还原清单 ───────────────────────────────
 # backup/ 下的脚本用它们把系统状态收进包，约定见 backup/README.md「包结构」：
 #   rootfs/<绝对路径>       原样可放回新机的文件与目录
@@ -335,13 +361,15 @@ bk_init() {  # bk_init <包根目录>
   done
   # 备份自己的落盘目录不收，否则包里套包、越滚越大
   BK_OUTDIRS=()
-  for f in ${VW_BACKUP_DIR:-} ${XBOARD_BACKUP_DIR:-} ${NEWAPI_BAK_DIR:-} ${LITELLM_BACKUP_DIR:-} ${BACKUP_DIRS:-} \
+  for f in "${BACKUP_LOCAL_ROOT:-/box/backup}" \
+           ${VW_BACKUP_DIR:-} ${XBOARD_BACKUP_DIR:-} ${NEWAPI_BAK_DIR:-} ${LITELLM_BACKUP_DIR:-} ${BACKUP_DIRS:-} \
            ${SNAPSHOT_ROOT:-} ${PANEL_DB_BACKUP_DIR:-} ${PANEL_BACKUP_DIR:-} \
            ${RESTORE_STAGE:-} ${IMAGE_EXPORT_DIR:-}; do
     [ -n "$f" ] || continue
     BK_OUTDIRS+=("${f%/}")
     [ -e "$f" ] && BK_OUTDIRS+=("$(realpath "$f")")
   done
+  return 0
 }
 
 bk_skip() { printf '%s\t%s\n' "$1" "$2" >> "$BK_SKIPPED"; }  # bk_skip <路径> <原因>
@@ -918,6 +946,39 @@ bk_prune_remote() {
   done <<< "$del"
   [ "$bad" -eq 0 ] || warn "${rem} 有 ${bad} 个过期文件删除失败"
   log "  ✓ ${rem} 按分级保留清理 ${n} 个文件（每月一份保留至 $4 天）"
+}
+
+# bk_upload <包路径> <网盘子目录>：包和旁边的 .sha256 传到 RCLONE_REMOTES 的每个网盘并按大小校验。
+# 返回失败的网盘个数（0 = 全部成功）。云盘写入后元数据有延迟，校验前等 BK_UPLOAD_SETTLE 秒（默认 10）
+bk_upload() {
+  local f=$1 sub=${2%/} r fail=0
+  for r in ${RCLONE_REMOTES:-}; do
+    log "上传到 ${r}:${sub}"
+    if rclone copy "$f" "${r}:${sub}/" --retries 3 --low-level-retries 10 >/dev/null 2>&1 \
+       && rclone copy "$f.sha256" "${r}:${sub}/" --retries 3 >/dev/null 2>&1; then
+      sleep "${BK_UPLOAD_SETTLE:-10}"
+      if rclone check "$(dirname "$f")" "${r}:${sub}/" --one-way --size-only \
+           --include "$(basename "$f")" --include "$(basename "$f").sha256" >/dev/null 2>&1; then
+        log "  ✓ ${r} 上传并校验通过"
+      else
+        warn "${r}:${sub} 上传后校验未通过"; fail=$((fail + 1))
+      fi
+    else
+      warn "${r}:${sub} 上传失败"; fail=$((fail + 1))
+    fi
+  done
+  return "$fail"
+}
+
+# bk_prune_all <包名>：本机目录与每个网盘按 bk_tiers 分级清理（本机上限 BACKUP_KEEP_LOCAL_DAYS，网盘 BACKUP_KEEP_CLOUD_DAYS）
+bk_prune_all() {
+  local p=$1 t r
+  read -r -a t <<< "$(bk_tiers "$p")"
+  log "分级保留（$p）：全留 ${t[0]} 天，每天一份至 ${t[1]} 天，每周一份至 ${t[2]} 天，之后每月一份"
+  bk_prune_local "$(bk_local_dir "$p")" "$p" "${t[@]}" "${BACKUP_KEEP_LOCAL_DAYS:-180}"
+  for r in ${RCLONE_REMOTES:-}; do
+    bk_prune_remote "${r}:$(bk_cloud_dir "$p")" "$p" "${t[@]}" "${BACKUP_KEEP_CLOUD_DAYS:-400}"
+  done
 }
 
 # ── 主机清单 ────────────────────────────────────────────────

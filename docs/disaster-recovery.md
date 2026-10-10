@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 什么时候用 | 原机已经没了 | 原机还能登录，计划内换机 |
 | 数据从哪来 | 网盘上最近一次的备份包 | 迁移时从原机现做一份，直接传到新机 |
-| 会丢什么 | 最近一次备份之后的改动（vw、xboard、LiteLLM 最多 6 小时，new-api 最多 1 小时） | 不丢 |
+| 会丢什么 | 最近一次备份之后的改动（Vaultwarden 最多 1 小时，前置机其余部分含 Xboard 最多 1 天，new-api 最多 6 小时，LiteLLM 最多 1 周） | 不丢 |
 
 本文放在公开仓库里，**不写任何真实的密码、IP、域名**。
 
@@ -26,8 +26,11 @@
 ## 1. 恢复靠什么
 
 ```
-网盘（OneDrive、Google Drive 各一份）
+网盘（OneDrive、Google Drive 各一份，都在 Backups/ 下）
   └─ 加密备份包 ── 用「备份解密密码」解开（第 2 节，唯一手动保存的东西）
+       ├─ hk-host（前置机整机，每天）＋ vault（Vaultwarden，每小时）：一起恢复前置机
+       ├─ newapi（每 6 小时）、litellm（每周）：各自的节点
+       └─ panel（宝塔整机备份，每周）：兜底
        └─ 包里的一切：env.conf、rclone 网盘授权、告警邮件配置、SSH 密钥（含登录落地机的私钥）、
                       MySQL 全部账号、证书、Nginx、面板数据、各服务数据、定时任务、服务器清单
 
@@ -43,7 +46,7 @@
 
 ## 2. 唯一需要手动保存的：备份解密密码
 
-所有备份包（vw、xboard、new-api、LiteLLM）**都用同一个密码加密**。它存在前置机的 `/root/.vw_backup_pass` 里，也就是 `env.conf` 中 `BACKUP_PASS_FILE` 指向的文件。
+所有备份包（vault、hk-host、newapi、litellm、宝塔整机备份）**都用同一个密码加密**。它存在前置机的 `/root/.vw_backup_pass` 里，也就是 `env.conf` 中 `BACKUP_PASS_FILE` 指向的文件。
 
 **这个文件不会进任何备份包**（否则拿到包的人就同时拿到了钥匙），所以它**必须手动保存**。在前置机上查看：
 
@@ -67,9 +70,9 @@ cat "$(. /etc/ops-scripts/env.conf; echo "${BACKUP_PASS_FILE:-$VW_PASS_FILE}")"
 
 **用手机或者另一台电脑做：**
 
-1. 登录 OneDrive 网页版，打开 `Backup-Server` 目录，下载最新的 `srvbak_*.7z`；
+1. 登录 OneDrive 网页版，打开 `Backups/vault` 目录，下载最新的 `vault_*.7z`（一两 MB，手机上也方便）；
 2. 用 7-Zip（手机上用 ZArchiver 之类的软件）打开，输入**手动保存的备份解密密码**；
-3. 能看到 `RESTORE.md`、`manifest.txt`、`payload.tar.gz` 三个文件，就算通过。打开 `manifest.txt` 看一眼备份时间，应该是最近几个小时内的；
+3. 能看到 `RESTORE.md`、`manifest.txt`、`payload.tar.gz` 三个文件，就算通过。打开 `manifest.txt` 看一眼备份时间（UTC），应该是一两个小时内的；
 4. 删掉下载的文件。
 
 **打不开的话，当天就处理**：先去前置机上重新确认密码。
@@ -108,23 +111,25 @@ cat "$(. /etc/ops-scripts/env.conf; echo "${BACKUP_PASS_FILE:-$VW_PASS_FILE}")"
 
 ### 4.2 下载备份包，读出服务器清单
 
-登录 OneDrive 网页版（进不去就换 Google Drive），从四个目录里各下载**最新**的一份（LiteLLM 节点还活着的话，`Backup-LiteLLM` 可以不下）：
+登录 OneDrive 网页版（进不去就换 Google Drive），从 `Backups/` 下的四个目录里各下载**最新**的一份，旁边的 `.sha256` 一起下载（文件名里的时间是 UTC；LiteLLM 节点还活着的话，`litellm` 可以不下）：
 
-| 目录 | 文件 |
-| --- | --- |
-| `Backup-Server` | `srvbak_YYYYMMDD_HHMMSS.7z` |
-| `Backup-Xboard` | `xboard_YYYYMMDD_HHMMSS.7z` |
-| `Backup-NewAPI` | `newapi_YYYYMMDD_HHMMSS.7z`，旁边的 `.sha256` 也一起下载 |
-| `Backup-LiteLLM` | `litellm_YYYYMMDD_HHMMSS.7z`，旁边的 `.sha256` 也一起下载 |
+| 目录 | 文件 | 内容 |
+| --- | --- | --- |
+| `Backups/hk-host` | `hk-host_YYYYMMDD_HHMMSS.7z` | 前置机整机：系统、面板、nginx 与证书、全部账号与业务库（Xboard 等）、Xboard、Komari、站点（每天一份） |
+| `Backups/vault` | `vault_YYYYMMDD_HHMMSS.7z` | Vaultwarden（每小时一份） |
+| `Backups/newapi` | `newapi_YYYYMMDD_HHMMSS.7z` | new-api 落地机 |
+| `Backups/litellm` | `litellm_YYYYMMDD_HHMMSS.7z` | LiteLLM 节点 |
 
-用 7-Zip 打开 `srvbak_*.7z`，再打开里面的 `payload.tar.gz`。**恢复需要的信息都在这里：**
+日志和历史数据（Xboard 的日志与统计、Komari 的事件、LiteLLM 的花费明细等）只有表结构，恢复后从零开始记，这是设计如此。
+
+用 7-Zip 打开 `hk-host_*.7z`，再打开里面的 `payload.tar.gz`。**恢复需要的信息都在这里：**
 
 | 文件 | 看什么 |
 | --- | --- |
 | `manifest.txt` | 原机的 **MySQL、Nginx 版本**，有哪些站点，有哪些容器 |
 | `rootfs/etc/ops-scripts/env.conf` | 落地机的 IP 和 SSH 端口（`NEWAPI_HOST`、`NEWAPI_SSH_PORT`）、LiteLLM 节点的 IP（`LITELLM_HOST`）、网盘目录名等 |
 | `rootfs/root/.vps-hosts.txt` | 其他机器的清单 |
-| `system/nginx/` | 所有站点的域名（每个 `.conf` 文件对应一个站点），切 DNS 时要用 |
+| `rootfs/www/server/panel/vhost/nginx/` | 所有站点的域名（每个 `.conf` 文件对应一个站点），切 DNS 时要用 |
 
 ### 4.3 开新机器
 
@@ -209,7 +214,7 @@ ssh root@新机器IP "mkdir -p /root/pkgs"
 ```
 
 ```bash
-scp srvbak_*.7z xboard_*.7z root@新机器IP:/root/pkgs/
+scp hk-host_YYYYMMDD_HHMMSS.7z hk-host_YYYYMMDD_HHMMSS.7z.sha256 vault_YYYYMMDD_HHMMSS.7z vault_YYYYMMDD_HHMMSS.7z.sha256 root@新机器IP:/root/pkgs/
 ```
 
 在**新机器**上安装恢复脚本，先检查：
@@ -219,16 +224,18 @@ opsget -i migrate/restore-from-backup
 ```
 
 ```bash
-restore-from-backup.sh check /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7z
+restore-from-backup.sh check /root/pkgs/hk-host_*.7z /root/pkgs/vault_*.7z
 ```
 
 `check` 只解包、校验，列出恢复时会做什么，不改动本机。看一下没有报错，然后正式恢复：
 
 ```bash
-restore-from-backup.sh restore /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7z
+restore-from-backup.sh restore /root/pkgs/hk-host_*.7z /root/pkgs/vault_*.7z
 ```
 
-恢复会自动完成：文件（权限、属主跟原机一致）、数据库和全部账号、各服务数据、按原版本拉镜像并启动容器、systemd 单元（包括连落地机的隧道）、Nginx、定时任务（按新频率）。最后 MySQL 的 root 密码也会改成原机的。
+（新机已经配好 rclone 和 `env.conf` 的话，也可以不传包，直接 `restore-from-backup.sh restore`，它会从网盘的 `Backups/hk-host` 和 `Backups/vault` 各取最新的一个。）
+
+恢复会自动完成：文件（权限、属主跟原机一致）、数据库和全部账号、各服务数据、按原版本拉镜像并启动容器、systemd 单元（包括连落地机的隧道）、Nginx、定时任务（按新频率）。最后 MySQL 的 root 密码也会改成原机的；系统时区不是 UTC 的话改成 UTC（定时任务按 UTC 写）。
 
 恢复放回的是原机的面板配置，面板一重启就换到**原机的面板端口**（之前经 SSH 通道开面板的，通道要改转新端口）；反代到面板的那个站点在面板换端口之前是 404。
 
@@ -267,7 +274,7 @@ opsget migrate/08-post-start-check
 
 ### 4.7 切换 DNS
 
-登录 Cloudflare（密码在 Vaultwarden 客户端的缓存里；找不到就走 Cloudflare 的找回密码），把 `system/nginx/` 里列出的**所有域名**的 A 记录都改成新机器的 IP。代理状态（灰色还是橙色云朵）保持原样。
+登录 Cloudflare（密码在 Vaultwarden 客户端的缓存里；找不到就走 Cloudflare 的找回密码），把 `rootfs/www/server/panel/vhost/nginx/` 里列出的**所有域名**的 A 记录都改成新机器的 IP。代理状态（灰色还是橙色云朵）保持原样。
 
 **临时备用通道**：落地机上装了 `cloudflared`，平时没有 Public Hostname，不对外服务。前置机挂了、落地机还活着的时候，可以先在 Cloudflare 的 Zero Trust → Tunnels 里，给 new-api 的域名加一个 Public Hostname，服务填 `http://localhost:3000`，几分钟就能让 new-api 先恢复使用。**加之前要先删掉这个域名原来的 A 记录。**正式恢复完成后，删掉这个 Public Hostname，再把 A 记录加回来。
 
@@ -366,7 +373,7 @@ litellm-fullbackup.sh
    curl -fsSL https://get.docker.com | sh
    ```
 
-3. 从网盘 `Backup-LiteLLM` 下载最新的 `litellm_*.7z`，传到新机器，用 7-Zip 解开，**严格按包里的 `RESTORE.md` 做**，顺序不能乱：
+3. 从网盘 `Backups/litellm` 下载最新的 `litellm_*.7z`，传到新机器，用 7-Zip 解开，**严格按包里的 `RESTORE.md` 做**，顺序不能乱：
    - 先把 `workdir/` 放回 `/opt/litellm`，`.env` 设成 600，compose 换成包里锁了 digest 的 `system/docker-compose.pinned.yml`；
    - 只起数据库：`docker compose up -d postgres`（服务名是 `postgres`，容器名才是 `litellm-postgres`）；
    - 用 `pg_restore --clean --if-exists` 导入 `db/litellm.dump`；
@@ -401,11 +408,11 @@ litellm-fullbackup.sh
 3. **每个备份脚本手动跑一次**，看有没有告警：
 
    ```bash
-   vw-fullbackup.sh
+   vault-backup.sh
    ```
 
    ```bash
-   xboard-fullbackup.sh
+   hk-host-backup.sh
    ```
 
    ```bash
@@ -464,7 +471,7 @@ litellm-fullbackup.sh
 演练恢复的命令：
 
 ```bash
-time restore-from-backup.sh restore /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7z --drill 2>&1 | tee /root/drill-restore.log
+time restore-from-backup.sh restore /root/pkgs/hk-host_*.7z /root/pkgs/vault_*.7z --drill 2>&1 | tee /root/drill-restore.log
 ```
 
 演练里的每个脚本都用 `2>&1 | tee /root/drill-<步骤>.log` 留一份完整输出。告警原文会在收尾的「完成（N 条告警）」下面再列一遍（公共库 1.2.8 起），但前面的明细只在日志里；终端往回翻不到，机器一销毁就没了（2026-09-30 的演练里 teardown 报了 1 条告警，事后查不到是哪条）。

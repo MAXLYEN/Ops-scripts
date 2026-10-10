@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ops/upgrade-vaultwarden.sh — 检查并升级 Vaultwarden，锁定镜像 digest
-# VERSION: 1.2.1
+# VERSION: 1.3.0
+# 1.3.0: 升级前要求的近期备份改看 vault 包（<BACKUP_LOCAL_ROOT>/vault/vault_*.7z，每小时一次，由 vault-backup 产出），不再读 VW_BACKUP_DIR / srvbak_*；时间戳用 UTC。
 # 1.2.1: 整理注释与帮助输出，并补充目录文档。
-# ENV-REQUIRED: SVC_VW_DIR VW_BACKUP_DIR
+# ENV-REQUIRED: SVC_VW_DIR
 # 默认只检查版本，-y 或指定版本才执行升级。
 # 升级前确认近期备份；数据库迁移可能无法随 compose 回滚。
 
@@ -12,13 +13,10 @@ GH_REPO="dani-garcia/vaultwarden"
 IMAGE_REPO="vaultwarden/server"
 ENV_FILE=/etc/ops-scripts/env.conf
 [ -r "$ENV_FILE" ] && . "$ENV_FILE"
-for k in SVC_VW_DIR VW_BACKUP_DIR; do
-  eval "v=\${$k:-}"
-  [ -z "$v" ] && { echo "env.conf 缺少必填项 $k"; exit 1; }
-done
+[ -n "${SVC_VW_DIR:-}" ] || { echo "env.conf 缺少必填项 SVC_VW_DIR"; exit 1; }
 COMPOSE="${SVC_VW_DIR}/compose.yaml"
-BACKUP_GLOB="${VW_BACKUP_DIR}/srvbak_*.7z"
-TS=$(date +%Y%m%d%H%M%S)
+BACKUP_GLOB="${BACKUP_LOCAL_ROOT:-/box/backup}/vault/vault_*.7z"
+TS=$(date -u +%Y%m%d%H%M%S)
 BAK="/root/vw-upgrade-bak/${TS}"
 
 log()  { printf '%s [INFO] %s\n' "$(date -u '+%F %T')" "$*"; }
@@ -104,7 +102,7 @@ LATEST_BAK=$(ls -t $BACKUP_GLOB 2>/dev/null | head -1)
 [ -n "$LATEST_BAK" ] || die "找不到任何备份包，中止"
 BAK_AGE=$(( ($(date +%s) - $(stat -c %Y "$LATEST_BAK")) / 3600 ))
 echo "  最新备份：$(basename "$LATEST_BAK")  $(du -h "$LATEST_BAK" | cut -f1)  ${BAK_AGE} 小时前"
-[ "$BAK_AGE" -le 24 ] || die "最新备份已超过 24 小时，先跑 vw-fullbackup.sh 再升级"
+[ "$BAK_AGE" -le 24 ] || die "最新备份已超过 24 小时，先跑 vault-backup.sh 再升级"
 echo "  当前版本：${OLD_VER}"
 echo "  目标版本：${TARGET_TAG}"
 [ "$OLD_VER" = "$TARGET_TAG" ] && { log "已是目标版本，无需升级"; exit 0; }

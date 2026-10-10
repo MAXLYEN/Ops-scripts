@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # tests/live-migrate.bats — 真跑 migrate/live-migrate 与备份脚本的 --local-only。
-# 「旧机」是这台容器：crontab 是真的，vw-fullbackup 真跑出加密包；docker / mysql / rclone / ufw 换成记录调用的假实现。
+# 「旧机」是这台容器：crontab 是真的，vault-backup 真跑出加密包；docker / mysql / rclone / ufw 换成记录调用的假实现。
 # 「新机」也在这台容器里，由假 ssh 扮演：代理的只读动作（probe / prep / sha）和改防火墙的动作（allow-me、peer-*）真跑，
 # probe 的结果再按 $NH/facts 改写成新机的样子；会动服务、库、定时任务的动作（restore / check / verify / standby / tunnel）
 # 只记进 $RCALLS，按 $NH/rc.<动作>、$NH/out.<动作> 回话 —— 在同一台机器上真跑会动到「旧机」自己。传文件的命令真跑。
@@ -24,14 +24,15 @@ setup() {
   rm -rf "$L" "$NH" "$RCALLS" /tmp/ssh.log /tmp/docker.log /tmp/fakedocker /tmp/ufw.log /tmp/ufw.numbered \
          /tmp/rclone.log /tmp/out /root/live-migrate /root/live-migrate-in /root/ops-backups /etc/ufw \
          /etc/ssh/sshd_config /root/.vps-hosts.txt /root/.my.cnf
-  mkdir -p "$L/opt/vaultwarden/data" "$L/vhost" "$L/cert/a.example.com" "$L/vwbak" "$NH" /tmp/fakedocker
+  mkdir -p "$L/opt/vaultwarden/data" "$L/vhost" "$L/cert/a.example.com" "$L/bk" "$NH" /tmp/fakedocker
   grep -q 'ifconfig.me' /etc/hosts || echo '127.0.0.1 ifconfig.me' >> /etc/hosts   # 查出口 IP 不出网
   printf 'correct-horse-battery-staple-01\n' > "$PASSF"; chmod 600 "$PASSF"
   printf '[client]\n' > /root/.my.cnf; chmod 600 /root/.my.cnf
   env_conf
   echo v2099.01.01 > /etc/ops-scripts/ref
   cp "$SRC/lib/common.sh" /usr/local/lib/ops-common.sh
-  install -m 755 "$SRC/backup/vw-fullbackup.sh" /usr/local/bin/vw-fullbackup.sh
+  rm -f /usr/local/bin/hk-host-backup.sh
+  install -m 755 "$SRC/backup/vault-backup.sh" /usr/local/bin/vault-backup.sh
   fakes
   # Vaultwarden：数据、配置、库
   echo KEY > "$L/opt/vaultwarden/data/rsa_key.pem"
@@ -41,7 +42,7 @@ setup() {
   echo CERT > "$L/cert/a.example.com/fullchain.pem"
   echo running > /tmp/fakedocker/vaultwarden; echo running > /tmp/fakedocker/komari
   printf '%s\n' \
-    '0 */6 * * * /usr/bin/flock -n /var/lock/vw-fullbackup-cron.lock /usr/local/bin/vw-fullbackup.sh >> /var/log/vw-fullbackup-cron.log 2>&1' \
+    '15 * * * * /usr/bin/flock -n /var/lock/vault-backup-cron.lock /usr/local/bin/vault-backup.sh >> /var/log/vault-backup-cron.log 2>&1' \
     '5 * * * * /usr/bin/flock -n /var/lock/newapi-fullbackup-cron.lock /usr/local/bin/newapi-fullbackup.sh >> /var/log/newapi-fullbackup-cron.log 2>&1' \
     '*/5 * * * * /usr/local/bin/newapi-linkcheck.sh --cron >> /var/log/newapi-fullbackup.log 2>&1' | crontab -
   crontab -l > /tmp/cron.before
@@ -54,8 +55,8 @@ env_conf() {  # env_conf [追加的 键=值...]
   mkdir -p /etc/ops-scripts
   printf '%s\n' "BACKUP_PASS_FILE=$PASSF" MYSQL_DEFAULTS_FILE=/root/.my.cnf \
     "PANEL_VHOST_DIR=$L/vhost" "PANEL_CERT_DIR=$L/cert" "DB_CLIENT_HOST='172.%'" DOCKER_CIDR=172.16.0.0/12 \
-    "SVC_VW_DIR=$L/opt/vaultwarden" "VW_BACKUP_DIR=$L/vwbak" VW_REMOTE_PATH=vw RCLONE_REMOTES=r1 \
-    "VW_LOG_FILE=$L/vw.log" "VW_HEARTBEAT_URL=http://127.0.0.1:$PORT/hb-vw" "$@" > /etc/ops-scripts/env.conf
+    "SVC_VW_DIR=$L/opt/vaultwarden" "BACKUP_LOCAL_ROOT=$L/bk" RCLONE_REMOTES=r1 \
+    "VAULT_LOG_FILE=$L/vw.log" "VW_HEARTBEAT_URL=http://127.0.0.1:$PORT/hb-vw" "$@" > /etc/ops-scripts/env.conf
   chmod 600 /etc/ops-scripts/env.conf
 }
 
@@ -151,50 +152,54 @@ none() {  # none <正则> <文本>
 }
 
 # ── 备份脚本的 --local-only ─────────────────────────────────
-@test "vw --local-only：包只落在给定目录，不上传、不清理、不报心跳" {
-  mkdir -p /tmp/out; touch /tmp/out/srvbak_20200101_000000.7z     # 很旧的包：正常模式下会被分级保留删掉
+@test "vault --local-only：包只落在给定目录，不上传、不清理、不报心跳" {
+  mkdir -p /tmp/out; touch /tmp/out/vault_20200101_000000.7z     # 很旧的包：正常模式下会被分级保留删掉
   : > /tmp/http.log.mark; wc -l < /tmp/http.log > /tmp/http.log.mark
-  run /usr/local/bin/vw-fullbackup.sh --local-only /tmp/out
+  run /usr/local/bin/vault-backup.sh --local-only /tmp/out
   [ "$status" -eq 0 ]
   has "不上传、不清理"
-  f=$(ls /tmp/out/srvbak_2*.7z | grep -v 20200101)
+  f=$(ls /tmp/out/vault_2*.7z | grep -v 20200101)
   [ -f "$f.sha256" ]
   7z t -p"$(head -1 "$PASSF")" "$f" </dev/null >/dev/null
-  [ -f /tmp/out/srvbak_20200101_000000.7z ]
-  [ -z "$(ls "$L"/vwbak/*.7z 2>/dev/null)" ]
+  [ -f /tmp/out/vault_20200101_000000.7z ]
+  [ -z "$(ls "$L"/bk/vault/*.7z 2>/dev/null)" ]
   [ ! -s /tmp/rclone.log ]
   none 'hb-vw' "$(tail -n +"$(( $(cat /tmp/http.log.mark) + 1 ))" /tmp/http.log)"
 }
 
-@test "vw --local-only：参数写错就停，不出包" {
-  run /usr/local/bin/vw-fullbackup.sh --local-only
+@test "vault --local-only：参数写错就停，不出包" {
+  run /usr/local/bin/vault-backup.sh --local-only
   [ "$status" -ne 0 ]
-  run /usr/local/bin/vw-fullbackup.sh --upload-later
+  run /usr/local/bin/vault-backup.sh --upload-later
   [ "$status" -ne 0 ]
   has "未知参数"
-  [ -z "$(ls "$L"/vwbak/*.7z 2>/dev/null)" ]
+  [ -z "$(ls "$L"/bk/vault/*.7z 2>/dev/null)" ]
 }
 
-@test "xboard --local-only：包只落在给定目录，不上传、不清理、不报心跳" {
-  install -m 755 "$SRC/backup/xboard-fullbackup.sh" /usr/local/bin/xboard-fullbackup.sh
-  mkdir -p "$L/opt/xboard/storage" "$L/www" "$L/xbbak" /tmp/out
+@test "hk-host --local-only：包只落在给定目录，不上传、不清理、不报心跳；Vaultwarden 不在包里" {
+  install -m 755 "$SRC/backup/hk-host-backup.sh" /usr/local/bin/hk-host-backup.sh
+  mkdir -p "$L/opt/xboard/storage/logs" /tmp/out
   printf '%s\n' 'APP_KEY=base64:abc' 'DB_DATABASE=xboard' > "$L/opt/xboard/.env"
   printf 'services:\n  xboard:\n    image: ghcr.io/cedar2025/xboard:1.0\n' > "$L/opt/xboard/compose.yaml"
-  echo 'xb pass' > "$L/xbpass"
-  touch /tmp/out/xboard_20200101_000000.7z
-  env_conf "SVC_XBOARD_DIR=$L/opt/xboard" XBOARD_DB_NAME=xboard XBOARD_DB_USER=xboard "XBOARD_DB_PASS_FILE=$L/xbpass" \
-    "XBOARD_BACKUP_DIR=$L/xbbak" XBOARD_REMOTE_PATH=xb "WWWROOT=$L/www" "XBOARD_HEARTBEAT_URL=http://127.0.0.1:$PORT/hb-xb"
+  echo noise > "$L/opt/xboard/storage/logs/laravel.log"
+  touch /tmp/out/hk-host_20200101_000000.7z
+  env_conf "SVC_XBOARD_DIR=$L/opt/xboard" "HKHOST_HEARTBEAT_URL=http://127.0.0.1:$PORT/hb-hk" "HKHOST_LOG_FILE=$L/hk.log"
   wc -l < /tmp/http.log > /tmp/http.log.mark
-  run /usr/local/bin/xboard-fullbackup.sh --local-only /tmp/out
+  run /usr/local/bin/hk-host-backup.sh --local-only /tmp/out
   has "不上传、不清理"
-  f=$(ls /tmp/out/xboard_2*.7z | grep -v 20200101)
+  f=$(ls /tmp/out/hk-host_2*.7z | grep -v 20200101)
   [ -f "$f.sha256" ]
-  7z t -p"$(head -1 "$PASSF")" "$f" </dev/null >/dev/null
-  [ -f /tmp/out/xboard_20200101_000000.7z ]
-  [ -z "$(ls "$L"/xbbak/*.7z 2>/dev/null)" ]
+  rm -rf /tmp/hkx; mkdir /tmp/hkx
+  7z x -p"$(head -1 "$PASSF")" -o/tmp/hkx "$f" </dev/null >/dev/null
+  tar --same-owner -xzf /tmp/hkx/payload.tar.gz -C /tmp/hkx
+  [ -f "/tmp/hkx/rootfs$L/opt/xboard/.env" ] && [ ! -e "/tmp/hkx/rootfs$L/opt/xboard/storage/logs/laravel.log" ]
+  [ ! -e "/tmp/hkx/rootfs$L/opt/vaultwarden" ]
+  grep -q "^$L/opt/vaultwarden"$'\t'"Vaultwarden 在 vault 包里" /tmp/hkx/system/rootfs-skipped.txt
+  [ -f /tmp/out/hk-host_20200101_000000.7z ]
+  [ -z "$(ls "$L"/bk/hk-host/*.7z 2>/dev/null)" ]
   [ ! -s /tmp/rclone.log ]
   lacks "分级保留"
-  none 'hb-xb' "$(tail -n +"$(( $(cat /tmp/http.log.mark) + 1 ))" /tmp/http.log)"
+  none 'hb-hk' "$(tail -n +"$(( $(cat /tmp/http.log.mark) + 1 ))" /tmp/http.log)"
 }
 
 # ── 预检 ────────────────────────────────────────────────────
@@ -225,10 +230,10 @@ none() {  # none <正则> <文本>
 }
 
 @test "预检：本机的备份脚本太旧（不支持 --local-only）就拒绝" {
-  printf '#!/bin/sh\n# VERSION: 2.5.0\nexit 0\n' > /usr/local/bin/vw-fullbackup.sh
+  printf '#!/bin/sh\n# VERSION: 0.9.0\nexit 0\n' > /usr/local/bin/vault-backup.sh
   lm "$NEW" --check
   [ "$status" -ne 0 ]
-  has "vw-fullbackup 太旧"
+  has "vault-backup 太旧"
 }
 
 @test "预检：新机上别的迁移留下的数据拒绝；本次迁移自己演练出来的接受，并带 --force 重跑" {
@@ -282,10 +287,10 @@ none() {  # none <正则> <文本>
   crontab -l | diff /tmp/cron.before -
   [ ! -s /tmp/rclone.log ]
   [ "$(acts)" = "restore check verify standby" ]
-  grep -qE "^$NEW restore - /root/live-migrate-in/rehearsal-[0-9]+/srvbak_[0-9_]+\.7z --no-cron --no-egress$" "$RCALLS"
+  grep -qE "^$NEW restore - /root/live-migrate-in/rehearsal-[0-9]+/vault_[0-9_]+\.7z --no-cron --no-egress$" "$RCALLS"
   # 包现做现传：新机上的与本机的逐字节一致，旁挂的 .sha256 也传了
-  f=$(ls /root/live-migrate/pkgs/rehearsal-*/srvbak_*.7z)
-  g=$(ls /root/live-migrate-in/rehearsal-*/srvbak_*.7z)
+  f=$(ls /root/live-migrate/pkgs/rehearsal-*/vault_*.7z)
+  g=$(ls /root/live-migrate-in/rehearsal-*/vault_*.7z)
   cmp "$f" "$g" && [ -f "$g.sha256" ]
   has "新机上的 sha256 一致"
   # 恢复后新机临时放行本机连 SSH
@@ -320,19 +325,19 @@ none() {  # none <正则> <文本>
   OPS_YES=1 lm "$NEW"
   [ "$status" -eq 0 ]
   [ "$(acts)" = "restore check verify standby restore verify" ]
-  grep -qE "^$NEW restore - /root/live-migrate-in/cutover-[0-9]+/srvbak_[0-9_]+\.7z --force$" "$RCALLS"
+  grep -qE "^$NEW restore - /root/live-migrate-in/cutover-[0-9]+/vault_[0-9_]+\.7z --force$" "$RCALLS"
   # 演练那次恢复时本机照常；切换那次恢复时本机已停写、备份任务已暂停
   grep -qx running "$NH/at-restore.1" && none '#MIGRATE-PAUSED' "$(cat "$NH/at-restore.1")"
-  grep -qx exited "$NH/at-restore.2" && grep -q '^#MIGRATE-PAUSED .*vw-fullbackup.sh' "$NH/at-restore.2"
+  grep -qx exited "$NH/at-restore.2" && grep -q '^#MIGRATE-PAUSED .*vault-backup.sh' "$NH/at-restore.2"
   # 只暂停调用备份脚本的行；日志文件名里带 fullbackup 的别的任务不动
-  crontab -l | grep -qx '#MIGRATE-PAUSED 0 \*/6 \* \* \* /usr/bin/flock -n /var/lock/vw-fullbackup-cron.lock /usr/local/bin/vw-fullbackup.sh >> /var/log/vw-fullbackup-cron.log 2>&1'
+  crontab -l | grep -qx '#MIGRATE-PAUSED 15 \* \* \* \* /usr/bin/flock -n /var/lock/vault-backup-cron.lock /usr/local/bin/vault-backup.sh >> /var/log/vault-backup-cron.log 2>&1'
   crontab -l | grep -q '^#MIGRATE-PAUSED 5 \* \* \* \* .*newapi-fullbackup.sh'
   crontab -l | grep -qx '\*/5 \* \* \* \* /usr/local/bin/newapi-linkcheck.sh --cron >> /var/log/newapi-fullbackup.log 2>&1'
   [ "$(running)" = "exited exited" ]
   [ -x /root/live-migrate/rollback.sh ] && grep -q '^RUN=(.*vaultwarden' /root/live-migrate/rollback.sh
   # 切换后演练的包两边都清掉，最终的包留着
   [ -z "$(ls -d /root/live-migrate/pkgs/rehearsal-* /root/live-migrate-in/rehearsal-* 2>/dev/null)" ]
-  ls /root/live-migrate/pkgs/cutover-*/srvbak_*.7z /root/live-migrate-in/cutover-*/srvbak_*.7z >/dev/null
+  ls /root/live-migrate/pkgs/cutover-*/vault_*.7z /root/live-migrate-in/cutover-*/vault_*.7z >/dev/null
   has "DNS：要在 DNS 服务商那里改的记录"
   has "改好后运行：live-migrate.sh $NEW"
   [ "$(phase)" = cutover-done ]
@@ -479,54 +484,40 @@ SH
   rm -f /usr/local/bin/systemctl /tmp/systemctl.log /tmp/units.on
 }
 
-@test "xboard 备份：自己的库里历史表（日志、统计、负载曲线）只导结构，订单与用户照导；跳过清单记了它们" {
-  install -m 755 "$SRC/backup/xboard-fullbackup.sh" /usr/local/bin/xboard-fullbackup.sh
-  mkdir -p "$L/opt/xboard/storage" "$L/www" "$L/xbbak" /tmp/out
-  printf '%s\n' 'APP_KEY=base64:abc' 'DB_DATABASE=xboard' > "$L/opt/xboard/.env"
-  printf 'services:\n  xboard:\n    image: ghcr.io/cedar2025/xboard:1.0\n' > "$L/opt/xboard/compose.yaml"
-  echo 'xb pass' > "$L/xbpass"
-  env_conf "SVC_XBOARD_DIR=$L/opt/xboard" XBOARD_DB_NAME=xboard XBOARD_DB_USER=xboard "XBOARD_DB_PASS_FILE=$L/xbpass" \
-    "XBOARD_BACKUP_DIR=$L/xbbak" XBOARD_REMOTE_PATH=xb "WWWROOT=$L/www"
-  # 假 mysql 多回答一句：xboard 库有哪些表；假 mysqldump 记下参数
-  sed -i 's/^  \*GROUP_CONCAT\*) echo NULL ;;/  *"table_schema='"'"'xboard'"'"'"*) printf "%s\n" v2_user v2_order v2_log v2_stat_user v2_server_machine_load_history migrations ;;\n&/' /usr/local/bin/mysql
+@test "vault 备份：vaultwarden 的 event 只导结构，不带系统部分与 Komari" {
+  mkdir -p /tmp/out
+  sed -i 's/^  \*GROUP_CONCAT\*) echo NULL ;;/  *"table_schema='"'"'vaultwarden'"'"'"*) printf "%s\\n" users ciphers event ;;\n&/' /usr/local/bin/mysql
   sed -i '2i echo "$*" >> /tmp/mysqldump.args' /usr/local/bin/mysqldump
   rm -f /tmp/mysqldump.args
-  run /usr/local/bin/xboard-fullbackup.sh --local-only /tmp/out
-  has "历史表只导结构：v2_log v2_stat_user v2_server_machine_load_history"
-  d=$(cat /tmp/mysqldump.args)
-  grep -E ' xboard$' <<<"$d" | grep -q -- '--ignore-table=xboard.v2_log'
-  grep -E ' xboard$' <<<"$d" | grep -q -- '--ignore-table=xboard.v2_server_machine_load_history'
-  none 'ignore-table=xboard.v2_(user|order)|ignore-table=xboard.migrations' "$d"
-  grep -q -- '--no-data xboard v2_log v2_stat_user v2_server_machine_load_history$' <<<"$d"
-  f=$(ls /tmp/out/xboard_2*.7z); rm -rf /tmp/xbx; mkdir /tmp/xbx
-  7z x -p"$(head -1 "$PASSF")" -o/tmp/xbx "$f" </dev/null >/dev/null
-  t=$(ls /tmp/xbx/*.tar* 2>/dev/null | head -1)
-  if [ -n "$t" ]; then tar xf "$t" -C /tmp/xbx; fi
-  grep -rq "^mysql:xboard.v2_log"$'\t'"历史数据" /tmp/xbx --include=rootfs-skipped.txt
-}
-
-@test "vw 备份：vaultwarden 的 event 只导结构；komari.db 的事件日志与任务结果在包里的副本上清空，原库不动" {
-  mkdir -p "$L/opt/komari/data" /tmp/out
-  sqlite3 "$L/opt/komari/data/komari.db" "CREATE TABLE clients(id); INSERT INTO clients VALUES (1);
-    CREATE TABLE logs(id); INSERT INTO logs VALUES (1),(2); CREATE TABLE task_results(id); INSERT INTO task_results VALUES (1);"
-  env_conf "SVC_KOMARI_DATA=$L/opt/komari/data"
-  sed -i 's/^  \*GROUP_CONCAT\*) echo NULL ;;/  *"table_schema='"'"'vaultwarden'"'"'"*) printf "%s\n" users ciphers event ;;\n&/' /usr/local/bin/mysql
-  sed -i '2i echo "$*" >> /tmp/mysqldump.args' /usr/local/bin/mysqldump
-  rm -f /tmp/mysqldump.args
-  run /usr/local/bin/vw-fullbackup.sh --local-only /tmp/out
+  run /usr/local/bin/vault-backup.sh --local-only /tmp/out
   [ "$status" -eq 0 ]
   d=$(cat /tmp/mysqldump.args)
   grep -E ' vaultwarden$' <<<"$d" | grep -q -- '--ignore-table=vaultwarden.event'
   grep -q -- '--no-data --default-character-set=utf8mb4 vaultwarden event$' <<<"$d"
-  f=$(ls /tmp/out/srvbak_2*.7z); rm -rf /tmp/vwx; mkdir /tmp/vwx
+  f=$(ls /tmp/out/vault_2*.7z); rm -rf /tmp/vwx; mkdir /tmp/vwx
   7z x -p"$(head -1 "$PASSF")" -o/tmp/vwx "$f" </dev/null >/dev/null
-  t=$(ls /tmp/vwx/*.tar* 2>/dev/null | head -1); [ -z "$t" ] || tar xf "$t" -C /tmp/vwx
-  k=$(find /tmp/vwx -path '*komari/komari.db' | head -1); [ -n "$k" ]
+  tar --same-owner -xzf /tmp/vwx/payload.tar.gz -C /tmp/vwx
+  grep -q "^mysql:vaultwarden.event"$'\t' /tmp/vwx/system/rootfs-skipped.txt
+  [ -f "/tmp/vwx/rootfs$L/opt/vaultwarden/data/rsa_key.pem" ]
+  # 只有 Vaultwarden：没有 SSH、面板、账号这些系统部分
+  [ ! -e /tmp/vwx/rootfs/etc ] && [ ! -e /tmp/vwx/rootfs/root ] && [ ! -e /tmp/vwx/db/mysql-users.sql ]
+  [ "$(cut -f4 /tmp/vwx/restore-manifest.tsv | grep -v '^#' | sort -u | tr '\n' ' ')" = "compose-project dir file mysql-db " ]
+}
+
+@test "hk-host 备份：komari.db 的事件日志与任务结果在包里的副本上清空，原库不动" {
+  install -m 755 "$SRC/backup/hk-host-backup.sh" /usr/local/bin/hk-host-backup.sh
+  mkdir -p "$L/opt/komari/data" /tmp/out
+  sqlite3 "$L/opt/komari/data/komari.db" "CREATE TABLE clients(id); INSERT INTO clients VALUES (1);
+    CREATE TABLE logs(id); INSERT INTO logs VALUES (1),(2); CREATE TABLE task_results(id); INSERT INTO task_results VALUES (1);"
+  env_conf "SVC_KOMARI_DATA=$L/opt/komari/data" "HKHOST_LOG_FILE=$L/hk.log"
+  run /usr/local/bin/hk-host-backup.sh --local-only /tmp/out
+  f=$(ls /tmp/out/hk-host_2*.7z); rm -rf /tmp/hkx; mkdir /tmp/hkx
+  7z x -p"$(head -1 "$PASSF")" -o/tmp/hkx "$f" </dev/null >/dev/null
+  tar --same-owner -xzf /tmp/hkx/payload.tar.gz -C /tmp/hkx
+  k="/tmp/hkx/rootfs$L/opt/komari/data/komari.db"
   [ "$(sqlite3 "$k" 'SELECT count(*) FROM logs')" = 0 ]
   [ "$(sqlite3 "$k" 'SELECT count(*) FROM task_results')" = 0 ]
   [ "$(sqlite3 "$k" 'SELECT count(*) FROM clients')" = 1 ]
   [ "$(sqlite3 "$L/opt/komari/data/komari.db" 'SELECT count(*) FROM logs')" = 2 ]
-  s=$(find /tmp/vwx -name rootfs-skipped.txt | head -1)
-  grep -q "^mysql:vaultwarden.event"$'\t' "$s"
-  grep -q "^sqlite:komari.db.logs"$'\t' "$s"
+  grep -q "^sqlite:komari.db.logs"$'\t' /tmp/hkx/system/rootfs-skipped.txt
 }

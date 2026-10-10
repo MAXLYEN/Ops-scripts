@@ -2,6 +2,15 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-10-10：恢复与迁移改用 hk-host + vault 两个包
+
+用户 2026-10-10 确认的备份重新规划：OneDrive（5GB）快满，查下来 Server 包和 Xboard 包都是整台前置机、内容重复。按轻重缓急重排频率、重新拆包和命名，时间一律 UTC，旧包在新方案观察 24 小时通过后全部删除。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `restore-from-backup.sh` | 1.5.1 → 2.0.0 | 目标 `hk-host` / `vault` / `all`（默认），从 `Backups/<包名>` 各取最新的一个并核对 `.sha256`；跳过清单里的历史表汇总成一行说明，「在 vault 包里」的条目在 vault 包也给了时不再列成手动步骤；恢复后装 `vault-backup` / `hk-host-backup` 与新时间表；系统时区不是 UTC 时改成 UTC（`--no-start` 时列进手动步骤） |
+| `live-migrate.sh` | 1.1.1 → 2.0.0 | 现做的包改为 hk-host 与 vault；切换时暂停的备份定时任务也认 `vault-backup`、`hk-host-backup`、`panel-backup-create`（原先只认 `*-fullbackup`，新脚本会漏停） |
+
 ## 2026-10-02：一键迁移演练时新机不冒充原机上报监控
 
 读代码发现：一键迁移的演练在新机上用 `--no-cron --no-egress` 恢复（不是 `--drill`），只有 `--drill` 才跳过 systemd 单元，所以新机会启用原机的全部单元，其中 `komari-agent` 用原机的凭据连 Komari，新机就在监控里冒充原机上报。`--no-egress` 只拦容器（DOCKER-USER），拦不住宿主机进程；演练收尾的 standby 只停容器、暂停定时任务，它会一直跑着。

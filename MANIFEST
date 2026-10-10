@@ -23,8 +23,8 @@ migrate/restore-from-backup     原机已不在：用每日备份包恢复整机
 migrate/live-migrate            原机还在：一键迁移，在旧机上运行（预检 → 演练 → 停写切换 → DNS，DNS 前可回滚）
 
 # ── backup/ 生产备份（cron 调用本地路径，不要写 opsget）─────
-backup/vw-fullbackup            全服务备份：密码库+监控+订阅转换+系统配置
-backup/xboard-fullbackup        Xboard 单包备份
+backup/vault-backup             密码库备份：只有 Vaultwarden（每小时）
+backup/hk-host-backup           前置机整机备份：系统、面板、全部库与账号、Xboard、Komari、站点（每天）
 backup/newapi-fullbackup        new-api 中转平台备份（从汇总机拉取落地机数据）
 backup/litellm-fullbackup       LiteLLM 节点备份（从汇总机拉取 Postgres 导出、.env 与 compose）
 

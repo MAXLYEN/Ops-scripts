@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/decommission-archive.sh — 在机器退役前归档最终状态与数据
-# VERSION: 2.0.1
+# VERSION: 2.0.2
+# 2.0.2: 本地备份包清单默认看 /box/backup 下的各包目录（2026-10 起的布局），旧目录还在的话照样列出。
 # 2.0.1: 整理注释并补充目录文档，执行逻辑未变。
 # 自包含运行；无 env.conf 时自动探测可用数据。
 
@@ -145,7 +146,7 @@ else
 fi
 
 sec "7. 本地备份包清单（不打进归档，太大）"
-for d in ${BACKUP_DIRS:-/box/vaul_bak /box/xboard_bak} ${SNAPSHOT_ROOT:-/box}; do
+for d in ${BACKUP_DIRS:-/box/backup/vault /box/backup/hk-host /box/backup/newapi /box/backup/litellm /box/vaul_bak /box/xboard_bak} ${SNAPSHOT_ROOT:-/box}; do
   [ -d "$d" ] || continue
   echo "  --- $d ($(hum "$d")) ---"
   ls -lht "$d" 2>/dev/null | head -6 | sed 's/^/    /'

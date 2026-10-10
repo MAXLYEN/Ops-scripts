@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/litellm-drill.sh — 在备用机上演练 LiteLLM 备份包的恢复、核对与清理
-# VERSION: 1.0.0
+# VERSION: 1.1.0
+# 1.1.0: 从网盘取包改为 <BACKUP_CLOUD_ROOT>/litellm（Backups/litellm，按 2026-10 备份重新规划），不再读 LITELLM_CLOUD_DIR。
 # 1.0.0: 首版。按包里 RESTORE.md 的顺序：先放 .env，只起 postgres，pg_restore --clean --if-exists，再按 digest 起全部并查健康；verify 与线上比行数、列模型、查解密错误；teardown 还原目标机。拒绝 LITELLM_HOST、NEWAPI_HOST 与本机。
 # ENV-REQUIRED: LITELLM_HOST BACKUP_PASS_FILE
 # 在汇总机运行，目标是一台备用机（SSH 端口从 ~/.vps-hosts.txt 取）；禁止指向生产节点。
@@ -63,7 +64,7 @@ open_package() {  # 取包、解开、核对，结果放 X / PKGNAME / PORT / IM
     [ -n "${RCLONE_REMOTES:-}" ] || die "没给包路径，要从网盘取就得在 env.conf 填 RCLONE_REMOTES"
     require_cmd rclone
     r=${LITELLM_DRILL_REMOTE:-${RCLONE_REMOTES%% *}}
-    dir=${LITELLM_CLOUD_DIR:-Backup-LiteLLM}
+    dir=$(bk_cloud_dir litellm)
     n=$(rclone lsf "$r:/$dir" --files-only --include 'litellm_*.7z' 2>/dev/null | sort | tail -1)
     [ -n "$n" ] || die "$r:/$dir 里没有 litellm_*.7z"
     log "网盘最新包：$r:/$dir/$n"

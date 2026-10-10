@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ops/install-backup-cron.sh — 按统一时间表安装备份定时任务（幂等，可反复运行）
-# VERSION: 1.3.0
+# VERSION: 2.0.0
+# 2.0.0: 按 2026-10 备份重新规划排时间表（UTC）：vault-backup 每小时 :15、hk-host-backup 每天 20:00、newapi-fullbackup 每 6 小时（04:30 / 10:30 / 16:30 / 22:30）、litellm-fullbackup 每周日 20:40、panel-backup-create 每周日 19:30。装了 vault-backup / hk-host-backup 时，旧的 vw-fullbackup / xboard-fullbackup 行一并拿掉（命令前的环境变量照留到新行）。系统时区不是 UTC 时告警：cron 按系统时区解释时间表。
 # 1.3.0: 新增 panel-backup-create（面板整机备份），每周日 UTC 19:30（北京周一 03:30）：18 点那批 6 小时备份已跑完，下一次整点的 newapi 还没到，是国内用户最少的时段。
 # 1.2.0: 旧行命令前的环境变量（如 MAIL_TO=... 把某个脚本的告警发到别的邮箱）照留到新行；几个备份脚本原来共用一把外层锁时不再沿用、各用各的（旧行是 flock -w 排队，新行是 -n 撞上就跳过，共用会让每小时的 newapi 撞上正在跑的 vw 时整轮跳过）。
 # 1.1.0: 新增 litellm-fullbackup，每 6 小时（:40）。
@@ -16,12 +17,15 @@ APPLY=0; [ "${1:-}" = "--apply" ] && APPLY=1
 BIN=${OPS_BIN_DIR:-/usr/local/bin}
 DEFAULT_PATH='PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
-# 名称|分 时 日 月 周。分钟错开，几个 6 小时任务不会同时上云
-SCHEDULE="vw-fullbackup|0 */6 * * *
-xboard-fullbackup|20 */6 * * *
-newapi-fullbackup|5 * * * *
-litellm-fullbackup|40 */6 * * *
+# 名称|分 时 日 月 周（UTC）。按轻重缓急：密码库每小时，前置机整机每天，new-api 每 6 小时
+# （避开 12:00–15:00 前置机到落地机线路容易抖的时段），LiteLLM 与面板整机每周；分钟错开，不同时上云
+SCHEDULE="vault-backup|15 * * * *
+hk-host-backup|0 20 * * *
+newapi-fullbackup|30 4,10,16,22 * * *
+litellm-fullbackup|40 20 * * 0
 panel-backup-create|30 19 * * 0"
+# 被新脚本取代的旧脚本：新的装了，旧行一并拿掉（旧行命令前的环境变量沿用到新行）
+declare -A RETIRES=([vault-backup]=vw-fullbackup [hk-host-backup]=xboard-fullbackup)
 
 CUR=$(mktemp); NEW=$(mktemp); trap 'rm -f "$CUR" "$NEW"' EXIT
 crontab -l > "$CUR" 2>/dev/null || : > "$CUR"
@@ -53,12 +57,14 @@ env_prefix_of() {  # env_prefix_of <行>
 # 每个备份脚本自己都有防重入锁（/run/lock/<名>.lock），外层各用各的就够了
 declare -A LOCK_USERS=()
 while IFS='|' read -r n _; do
+  for n in "$n" ${RETIRES[$n]:-}; do
   while IFS= read -r l || [ -n "$l" ]; do
     case "$l" in [[:space:]]*'#'*|'#'*) continue ;; esac
     calls_script "$n" "$l" || continue
     k=$(lock_of "$l")
     [ -n "$k" ] && case " ${LOCK_USERS[$k]:-} " in *" $n "*) ;; *) LOCK_USERS[$k]="${LOCK_USERS[$k]:-} $n" ;; esac
   done < "$CUR"
+  done
 done <<<"$SCHEDULE"
 shared_lock() {  # shared_lock <锁文件>：有两个以上的备份脚本在用它
   local u=${LOCK_USERS[$1]:-}
@@ -72,7 +78,7 @@ while IFS='|' read -r name when; do
     log "$name：本机没装（$BIN/$name.sh），跳过"
     continue
   fi
-  lock="" prefix=""
+  lock="" prefix="" old=${RETIRES[$name]:-}
   : > "$NEW.t"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -82,6 +88,11 @@ while IFS='|' read -r name when; do
       [ -n "$lock" ] || lock=$(lock_of "$line")
       [ -n "$prefix" ] || prefix=$(env_prefix_of "$line")
       continue                                   # 旧行一律拿掉，下面按时间表写一行新的
+    fi
+    if [ -n "$old" ] && calls_script "$old" "$line"; then
+      [ -n "$prefix" ] || prefix=$(env_prefix_of "$line")
+      log "$name：取代旧的 $old 行"
+      continue                                   # 旧脚本的锁不沿用（不是同一个脚本）
     fi
     printf '%s\n' "$line" >> "$NEW.t"
   done < "$NEW"
@@ -101,6 +112,12 @@ while IFS='|' read -r name when; do
 done <<<"$SCHEDULE"
 
 [ -n "$ADDED" ] || { warn "本机一个备份脚本都没装（opsget -i backup/<名字>），没有可排的任务"; finish; exit $?; }
+
+# cron 按系统时区解释时间表，时间表写的是 UTC
+TZNOW=$(date +%z)
+if [ "$TZNOW" != "+0000" ]; then
+  warn "系统时区不是 UTC（$(date +%Z)，$TZNOW）：上面的时间表会按本地时间执行。改成 UTC：timedatectl set-timezone Etc/UTC && systemctl restart cron"
+fi
 
 # cron 环境几乎没有 PATH：脚本里的 7z、rclone、mysqldump 找不到时，手动跑正常、定时跑失败
 if ! grep -qE '^[[:space:]]*PATH=' "$NEW"; then
@@ -128,5 +145,5 @@ cp "$CUR" "$BAK" && chmod 600 "$BAK"
 crontab "$NEW" || die "写入 crontab 失败（原内容在 $BAK）"
 ok "已写入。原 crontab 备份在 $BAK"
 log "已排任务:$ADDED"
-log "外部心跳监控的周期要跟着改：vw / xboard / litellm 6 小时，newapi 1 小时，面板整机备份每周（各加宽限）。上一次还没跑完时本次直接跳过、不报心跳"
+log "外部心跳监控的周期要跟着改：vault 1 小时、hk-host 1 天、newapi 6 小时、litellm 与面板整机备份 1 周（各加宽限）。上一次还没跑完时本次直接跳过、不报心跳"
 finish

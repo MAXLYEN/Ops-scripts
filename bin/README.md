@@ -5,16 +5,16 @@
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
 | `opsget` | 1.6.0 | 从仓库拉取、安装和执行运维脚本 |
-| `opsbox` | 1.5.2 | 中文菜单：按分类或场景挑功能，常用组合自动串联 |
+| `opsbox` | 1.6.0 | 中文菜单：按分类或场景挑功能，常用组合自动串联 |
 
 ## 常用命令
 
 ```bash
 opsget -l                         # 列出 MANIFEST 中的脚本
 opsget migrate/01-inventory       # 拉取、安装并执行
-opsget -i backup/vw-fullbackup    # 仅安装，不执行
-opsget -e backup/vw-fullbackup    # 查看该脚本需要的配置键
-opsget -c backup/vw-fullbackup    # 补齐该脚本需要的配置键
+opsget -i backup/vault-backup     # 仅安装，不执行
+opsget -e backup/vault-backup     # 查看该脚本需要的配置键
+opsget -c backup/vault-backup     # 补齐该脚本需要的配置键
 opsget -u                         # 更新引导器与公共库
 opsget --pin v2026.09.24          # 固定到验证过的 tag；--pin 查看，--unpin 取消
 ```

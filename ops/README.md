@@ -10,14 +10,14 @@
 | `compare-backup-content.sh` | 1.0.5 | 比对两个加密备份包的内容清单 |
 | `diag-key.sh` | 1.1.0 | 诊断指定主机的 SSH 密钥登录失败原因 |
 | `komari-metrics-check.sh` | 2.0.2 | 检查 Komari 指标库的保留期与增长速度 |
-| `mail-doctor.sh` | 1.0.3 | 诊断告警邮件的配置与发送链路 |
+| `mail-doctor.sh` | 1.0.4 | 诊断告警邮件的配置与发送链路 |
 | `panel-cron-inspect.sh` | 2.0.5 | 查看面板计划任务的真实命令与运行状态 |
 | `panel-data-locate.sh` | 2.0.2 | 定位面板数据在磁盘上的存储位置 |
-| `preflight-backup.sh` | 2.1.0 | 检查备份脚本运行前的依赖与配置 |
+| `preflight-backup.sh` | 2.2.0 | 检查备份脚本运行前的依赖与配置 |
 | `save-fw.sh` | 2.0.2 | 在修改防火墙前保存当前配置快照 |
 | `script-inventory.sh` | 1.0.2 | 盘点本机脚本并区分仓库来源与本地文件 |
 | `ssl-audit.sh` | 2.1.2 | 核对证书文件、站点引用与续期记录 |
-| `verify-backup-pass.sh` | 2.2.0 | 验证本地密码能否解开云端备份包，并检查最新包是否过旧 |
+| `verify-backup-pass.sh` | 3.0.0 | 验证本地密码能否解开云端备份包，并检查最新包是否过旧 |
 
 
 ### 云端备份每周校验
@@ -29,7 +29,7 @@ opsget -i ops/verify-backup-pass
 ( crontab -l 2>/dev/null; echo '0 6 * * 1 /usr/bin/flock -n /run/verify-backup-pass.lock /usr/local/bin/verify-backup-pass.sh --cron >> /var/log/verify-backup-pass.log 2>&1' ) | crontab -
 ```
 
-每周一 06:00（UTC）运行，排在凌晨备份之后。`RCLONE_PATHS` 要列全所有备份目录（`Backup-Server Backup-Xboard Backup-NewAPI Backup-LiteLLM` 这类）。漏列时：本机装了的备份脚本（vw / xboard / newapi / litellm）的云端目录会自动并入本次校验，并在输出与汇总里提示补进 `RCLONE_PATHS`；其余目录（如面板整机备份）漏了就不会被校验。不带 `--cron` 手动运行时只输出结果，不发告警。
+每周一 06:00（UTC）运行。本机装了哪个备份脚本（vault / hk-host / newapi / litellm），就校验它的 `Backups/<包名>`，不用手填；`RCLONE_PATHS` 只用来加别的目录（面板整机备份默认不校验，包太大）。最新包超过 `VERIFY_MAX_AGE_DAYS`（默认 2 天）算过期，litellm 每周一次按 8 天算。不带 `--cron` 手动运行时只输出结果，不发告警。
 
 ### 备份定时任务
 
@@ -38,7 +38,7 @@ opsget ops/install-backup-cron            # 预演：显示改后的 crontab 与
 opsget ops/install-backup-cron --apply    # 写入
 ```
 
-`vw-fullbackup`、`xboard-fullbackup`、`litellm-fullbackup` 每 6 小时（分别在 :00、:20、:40，不同时上云），`newapi-fullbackup` 每小时 :05。只给 `/usr/local/bin` 里已装的备份脚本排任务；每个脚本一把 `flock -n` 锁 `/var/lock/<脚本>-cron.lock`（原有行带锁就沿用，换表那一刻正在跑的备份仍互斥，菜单的「立即备份」也读这把锁；但不用 `/run/lock/<脚本>.lock` —— 那是备份脚本自己的锁，外层拿了它，脚本一启动就会撞上退出），输出进 `/var/log/<脚本>-cron.log`，没有 `PATH=` 时补上。原有调用这几个脚本的行（包括不该有的 `opsget backup/…`）一律替换，其他行不动；可以反复运行，改之前的 crontab 存在 `/root/ops-backups/`。`migrate/restore-from-backup` 恢复时会自动调用它。上一次还没跑完时本次直接跳过、不报心跳，外部心跳监控的周期要跟着改成 6 小时 / 1 小时（加宽限）。
+时间表（UTC）：`vault-backup` 每小时 :15，`hk-host-backup` 每天 20:00，`newapi-fullbackup` 每 6 小时（04:30、10:30、16:30、22:30），`litellm-fullbackup` 每周日 20:40，`panel-backup-create` 每周日 19:30。cron 按系统时区解释时间表，系统时区不是 UTC 时会告警。装了 `vault-backup` / `hk-host-backup` 的机器上，旧的 `vw-fullbackup` / `xboard-fullbackup` 行一并换掉（命令前的环境变量照留，旧锁不沿用）。只给 `/usr/local/bin` 里已装的备份脚本排任务；每个脚本一把 `flock -n` 锁 `/var/lock/<脚本>-cron.lock`（原有行带锁就沿用，换表那一刻正在跑的备份仍互斥，菜单的「立即备份」也读这把锁；但不用 `/run/lock/<脚本>.lock` —— 那是备份脚本自己的锁，外层拿了它，脚本一启动就会撞上退出），输出进 `/var/log/<脚本>-cron.log`，没有 `PATH=` 时补上。原有调用这几个脚本的行（包括不该有的 `opsget backup/…`）一律替换，其他行不动；可以反复运行，改之前的 crontab 存在 `/root/ops-backups/`。`migrate/restore-from-backup` 恢复时会自动调用它。上一次还没跑完时本次直接跳过、不报心跳，外部心跳监控的周期要跟着改：vault 1 小时、hk-host 1 天、newapi 6 小时、litellm 与面板整机 1 周（加宽限）。
 
 ## 部署与日常维护
 
@@ -46,23 +46,23 @@ opsget ops/install-backup-cron --apply    # 写入
 | --- | --- | --- |
 | `bind-localhost.sh` | 2.1.1 | 将容器端口映射从公网绑定改为本机绑定 |
 | `containerize-and-pin.sh` | 1.1.1 | 把服务改为 compose 管理并锁定镜像 digest |
-| `decommission-archive.sh` | 2.0.1 | 在机器退役前归档最终状态与数据 |
+| `decommission-archive.sh` | 2.0.2 | 在机器退役前归档最终状态与数据 |
 | `deploy-litellm.sh` | 1.2.4 | 部署 LiteLLM、Postgres 与 Redis 容器 |
-| `panel-backup-upload.sh` | 1.0.5 | 加密并上传面板生成的整机备份包 |
+| `panel-backup-upload.sh` | 1.1.0 | 加密并上传面板生成的整机备份包 |
 | `panel-backup-create.sh` | 1.2.0 | 照面板上次的设置生成整机备份，加密上传，本机与云端各留最近几份 |
 | `ssh-allowlist.sh` | 1.1.2 | 本机 SSH 只放行名单里的 IP（ufw）；菜单里新增、删除，改完当场验证，不确认就回滚 |
 | `push-keys.sh` | 1.0.4 | 按主机清单批量下发 SSH 公钥 |
-| `install-backup-cron.sh` | 1.3.0 | 按统一时间表安装备份定时任务（幂等） |
+| `install-backup-cron.sh` | 2.0.0 | 按统一时间表安装备份定时任务（幂等） |
 | `restore-cron.sh` | 2.0.2 | 从快照恢复仓库管理的 cron 任务 |
 | `setup-key-login.sh` | 1.0.2 | 配置新机器的 SSH 密钥登录并验证 |
 | `sync-llm-allowlist.sh` | 2.0.4 | 同步 LLM 站点白名单与 fail2ban 规则 |
-| `upgrade-vaultwarden.sh` | 1.2.1 | 检查并升级 Vaultwarden，锁定镜像 digest |
+| `upgrade-vaultwarden.sh` | 1.3.0 | 检查并升级 Vaultwarden，锁定镜像 digest |
 
 ## LiteLLM
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `litellm-drill.sh` | 1.0.0 | 在备用机上演练 LiteLLM 备份包的恢复、核对与清理 |
+| `litellm-drill.sh` | 1.1.0 | 在备用机上演练 LiteLLM 备份包的恢复、核对与清理 |
 
 ```bash
 opsget ops/litellm-drill restore <备用机IP> [包路径]   # 不给包就从网盘取最新的 litellm_*.7z
@@ -80,7 +80,7 @@ opsget ops/litellm-drill teardown <备用机IP>           # 删掉演练实例�
 | `fix-newapi-fallback-quota.sh` | 1.0.1 | 修正 new-api 兜底倍率造成的虚高消费 |
 | `fix-newapi-quota-data.sh` | 1.1.0 | 按已修正的日志重算 new-api 配额统计（按组合汇总核对，兼容拆行） |
 | `fix-newapi-reprice.sh` | 1.1.0 | 按后台当前价格重算指定模型的历史消费（日志、用户、令牌、渠道）；`--align-channels` 把渠道已用额度对齐到非测试日志 |
-| `newapi-drill.sh` | 1.0.4 | 在备用机演练 new-api 备份的恢复与清理 |
+| `newapi-drill.sh` | 1.1.0 | 在备用机演练 new-api 备份的恢复与清理 |
 | `newapi-linkcheck.sh` | 1.0.3 | 检查 new-api 隧道和公网访问全链路 |
 | `newapi-log-prune.sh` | 1.0.3 | 清理超过保留期的 new-api 消费日志 |
 

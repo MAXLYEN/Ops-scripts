@@ -2,6 +2,22 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-10-10：备份重新规划的配套
+
+用户 2026-10-10 确认的备份重新规划：OneDrive（5GB）快满，查下来 Server 包和 Xboard 包都是整台前置机、内容重复。按轻重缓急重排频率、重新拆包和命名，时间一律 UTC，旧包在新方案观察 24 小时通过后全部删除。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `install-backup-cron.sh` | 1.3.0 → 2.0.0 | 时间表（UTC）：vault 每小时 :15、hk-host 每天 20:00、newapi 每 6 小时（04:30 起）、litellm 每周日 20:40、面板整机每周日 19:30；装了新脚本就换掉旧的 vw / xboard 行（命令前的环境变量照留）；系统时区不是 UTC 时告警 |
+| `verify-backup-pass.sh` | 2.2.0 → 3.0.0 | 按本机装的备份脚本校验 `Backups/<包名>`，`RCLONE_PATHS` 改为可选；litellm 每周一次，最新包超过 8 天才算过期 |
+| `panel-backup-upload.sh` | 1.0.5 → 1.1.0 | 网盘目录默认 `Backups/panel`；包配 `.sha256` 一起上传、一起清理 |
+| `preflight-backup.sh` | 2.1.0 → 2.2.0 | 云端现状列新目录 |
+| `upgrade-vaultwarden.sh` | 1.2.1 → 1.3.0 | 升级前的近期备份改看 vault 包 |
+| `litellm-drill.sh` | 1.0.0 → 1.1.0 | 从 `Backups/litellm` 取包 |
+| `newapi-drill.sh` | 1.0.4 → 1.1.0 | 从 `Backups/newapi` 取包 |
+| `mail-doctor.sh` | 1.0.3 → 1.0.4 | 看新备份脚本的日志 |
+| `decommission-archive.sh` | 2.0.1 → 2.0.2 | 本地备份包清单看 `/box/backup/<包名>` |
+
 ## 2026-10-01：面板整机备份只清理自己建的
 
 宝塔升到 13.1.0 后核对：`backup_manager.py` 仍在 `mod/project/backup_restore/`，命令行仍是「方法名 时间戳」，`backup_task.json` 字段不变（多一个 `auto_exit` 也照原样复制）。用户要求面板「备份还原」列表里自己手动建的备份由自己处理，脚本只管它建的。

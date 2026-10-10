@@ -54,6 +54,7 @@ done
 if [ -z "$q" ]; then
   in=$(cat)
   if [ -n "$db" ]; then
+    mkdir -p "$D/db/$db"; printf '%s\n' "$in" > "$D/db/$db/import.sql"   # 导入的 SQL 原文，用例据此看表与数据
     echo "$(grep -c '^CREATE TABLE' <<<"$in")" > "$D/db/$db/tables"; echo "IMPORT $db" >> "$D/log"; exit 0
   fi
   q=$in
@@ -267,11 +268,12 @@ none() {
   grep -q 'image: ghcr.io/komari-monitor/komari:1.0.5' "$R/opt/komari/compose.yaml"
 }
 
-@test "restore：原机定时任务并入，面板任务列为手动，备份按统一时间表重排并沿用原来的锁" {
+@test "restore：原机定时任务并入，面板任务列为手动；备份装新脚本、按统一时间表重排，旧脚本的行换掉" {
   make_vw
   restore restore "$VW" --no-start
-  [ -x /usr/local/bin/vw-fullbackup.sh ]
-  crontab -l | grep -qx '0 \*/6 \* \* \* /usr/bin/flock -n /var/lock/fb.lock /usr/local/bin/vw-fullbackup.sh >> /var/log/vw-fullbackup-cron.log 2>&1'
+  [ -x /usr/local/bin/vault-backup.sh ]
+  crontab -l | grep -qx '15 \* \* \* \* /usr/bin/flock -n /var/lock/vault-backup-cron.lock /usr/local/bin/vault-backup.sh >> /var/log/vault-backup-cron.log 2>&1'
+  none 'vw-fullbackup' "$(crontab -l)"
   none '^30 3' "$(crontab -l)"
   none '/www/server/cron' "$(crontab -l)"
   crontab -l | grep -qx 'PATH=/usr/bin:/bin'
@@ -287,7 +289,7 @@ none() {
   [ -f "$R/opt/vaultwarden/data/rsa_key.pem" ]
   grep -qx 'IMPORT vaultwarden' "$FDB/log"
   [ -z "$(crontab -l 2>/dev/null)" ]
-  [ ! -e /usr/local/bin/vw-fullbackup.sh ]
+  [ ! -e /usr/local/bin/vault-backup.sh ]
   has "--no-cron：不装定时任务"
   has "不带 --no-cron 再跑一次恢复"
   grep -qx 'MODE	real' /var/lib/ops-scripts/dr-restore.state
@@ -595,8 +597,9 @@ make_xboard() {  # make_xboard [.env 的 APP_KEY 行]：照 xboard-fullbackup �
   [ "$(stat -c %a /root/deploy/nodes.txt)" = 600 ]
   [ "$(cat "$R/etc/xboard-db-pass")" = "xb pass" ] && [ "$(stat -c %a "$R/etc/xboard-db-pass")" = 600 ]
   has "xboard 镜像锁不住版本，不启动"
-  crontab -l | grep -q '^20 \*/6 \* \* \* /usr/bin/flock -n /var/lock/xboard-fullbackup-cron.lock /usr/local/bin/xboard-fullbackup.sh'
-  crontab -l | grep -q '^0 \*/6 .*vw-fullbackup.sh'
+  crontab -l | grep -q '^0 20 \* \* \* /usr/bin/flock -n /var/lock/hk-host-backup-cron.lock /usr/local/bin/hk-host-backup.sh'
+  crontab -l | grep -q '^15 \* \* \* \* .*vault-backup.sh'
+  none 'xboard-fullbackup|vw-fullbackup' "$(crontab -l)"
   rm -rf /root/deploy
 }
 
@@ -607,6 +610,144 @@ make_xboard() {  # make_xboard [.env 的 APP_KEY 行]：照 xboard-fullbackup �
   has "没有 APP_KEY"
   [ ! -e "$R/opt" ]
   none '^IMPORT' "$(cat "$FDB/log" 2>/dev/null)"
+}
+
+# ── 2026-10 起的两个包：hk-host（整机，不含 Vaultwarden）+ vault（只有 Vaultwarden）──
+# 布局照 backup/hk-host-backup.sh、backup/vault-backup.sh 的产物：payload.tar.gz 里 rootfs/ + restore-manifest.tsv，
+# 历史表只有 CREATE TABLE 没有数据，rootfs-skipped.txt 记着原因
+make_split() {  # 路径放 $HK、$VA
+  local s=/tmp/pkgsrc/hk v=/tmp/pkgsrc/va h
+  h=$(printf 'b%.0s' $(seq 64))
+  rm -rf "$s" "$v"
+  mkdir -p "$s/rootfs$R/opt/xboard/.docker/.data" "$s/rootfs$R/etc/sys" "$s/rootfs/root/.ssh" "$s/db" "$s/system"
+  printf '%s\n' 'APP_KEY=base64:abc' 'DB_DATABASE=xboard' > "$s/rootfs$R/opt/xboard/.env"
+  printf 'services:\n  xboard:\n    image: ghcr.io/cedar2025/xboard:new\n' > "$s/rootfs$R/opt/xboard/compose.yaml"
+  echo 'from-original' > "$s/rootfs$R/etc/sys/sysfile.conf"
+  echo 'ssh-ed25519 AAAA-original-key' > "$s/rootfs/root/.ssh/authorized_keys"
+  { printf -- 'CREATE TABLE `v2_user` (id int, u bigint, d bigint);\nINSERT INTO `v2_user` VALUES (1,100,200);\n'
+    printf -- 'CREATE TABLE `v2_order` (id int);\nINSERT INTO `v2_order` VALUES (7);\n-- Dump completed\n'
+    printf -- 'CREATE TABLE `v2_log` (id int);\nCREATE TABLE `v2_stat_user` (id int);\n-- Dump completed\n'; } | gzip > "$s/db/xboard.sql.gz"
+  printf 'xboard\tutf8mb4\tutf8mb4_unicode_ci\n' > "$s/db/databases.tsv"
+  cat > "$s/db/mysql-users.sql" <<'SQL'
+CREATE USER IF NOT EXISTS 'xboard'@'%' IDENTIFIED WITH 'mysql_native_password' AS '*XB';
+GRANT ALL PRIVILEGES ON `xboard`.* TO `xboard`@`%`;
+CREATE USER IF NOT EXISTS 'vaultwarden'@'%' IDENTIFIED WITH 'mysql_native_password' AS '*VW';
+GRANT ALL PRIVILEGES ON `vaultwarden`.* TO `vaultwarden`@`%`;
+FLUSH PRIVILEGES;
+SQL
+  printf '# container\timage\trepo_digest\nxboard-xboard-1\tghcr.io/cedar2025/xboard:new\tghcr.io/cedar2025/xboard@sha256:%s\n' "$h" > "$s/images.tsv"
+  printf '%s\n' '# restore-manifest v1：path mode owner kind' \
+    "/root/.ssh	700	root:root	dir" \
+    "$R/etc/sys	755	root:root	dir" \
+    "$R/opt/xboard	755	root:root	dir" \
+    "$R/opt/xboard/compose.yaml	644	root:root	file" \
+    "db/mysql-users.sql	-	-	mysql-user" \
+    "db/xboard.sql.gz	-	-	mysql-db" \
+    "$R/opt/xboard	-	-	compose-project" > "$s/restore-manifest.tsv"
+  printf '%s\t%s\n' "mysql:xboard.v2_log" "历史数据，只收表结构；恢复后从零开始记" \
+    "mysql:xboard.v2_stat_user" "历史数据，只收表结构；恢复后从零开始记" \
+    "$R/opt/vaultwarden" "Vaultwarden 在 vault 包里（每小时一次）" \
+    "mysql:vaultwarden" "Vaultwarden 的库在 vault 包里" > "$s/system/rootfs-skipped.txt"
+  echo '包 hk-host' > "$s/manifest.txt"; echo '# hk-host 包' > "$s/RESTORE.md"
+  HK=/tmp/pkgs/hk-host_20261010_200000.7z
+  seal "$s" "$HK" tar
+  ( cd /tmp/pkgs && sha256sum "$(basename "$HK")" > "$(basename "$HK").sha256" )
+
+  mkdir -p "$v/rootfs$R/opt/vaultwarden/data" "$v/db" "$v/system"
+  echo KEY > "$v/rootfs$R/opt/vaultwarden/data/rsa_key.pem"
+  echo 'DATABASE_URL=mysql://vaultwarden:pw@host.docker.internal:3306/vaultwarden' > "$v/rootfs$R/opt/vaultwarden/vaultwarden.env"
+  printf 'services:\n  vaultwarden:\n    image: vaultwarden/server:latest\n' > "$v/rootfs$R/opt/vaultwarden/compose.yaml"
+  { printf -- 'CREATE TABLE `users` (id int);\nINSERT INTO `users` VALUES (1);\n-- Dump completed\n'
+    printf -- 'CREATE TABLE `event` (id int);\n-- Dump completed\n'; } | gzip > "$v/db/vaultwarden.sql.gz"
+  printf 'vaultwarden\tutf8mb4\tutf8mb4_unicode_ci\n' > "$v/db/databases.tsv"
+  printf '# container\timage\trepo_digest\nvaultwarden\tvaultwarden/server:latest\tvaultwarden/server@sha256:%s\n' "$h" > "$v/images.tsv"
+  printf '%s\n' '# restore-manifest v1：path mode owner kind' \
+    "db/vaultwarden.sql.gz	-	-	mysql-db" \
+    "$R/opt/vaultwarden/data	700	root:root	dir" \
+    "$R/opt/vaultwarden/vaultwarden.env	600	root:root	file" \
+    "$R/opt/vaultwarden/compose.yaml	644	root:root	file" \
+    "$R/opt/vaultwarden	-	-	compose-project" > "$v/restore-manifest.tsv"
+  printf '%s\t%s\n' "mysql:vaultwarden.event" "历史数据，只收表结构；恢复后从零开始记" > "$v/system/rootfs-skipped.txt"
+  echo '包 vault' > "$v/manifest.txt"; echo '# vault 包' > "$v/RESTORE.md"
+  VA=/tmp/pkgs/vault_20261010_201500.7z
+  seal "$v" "$VA" tar
+}
+
+@test "hk-host 加 vault 两个包从零恢复前置机：系统、账号、两个库、两个应用都在；历史表恢复后是空表；两个应用都按锁定的版本启动" {
+  make_split; v2_local
+  restore restore "$HK" "$VA" --no-start
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # 系统部分（hk-host）
+  [ "$(cat "$R/etc/sys/sysfile.conf")" = from-original ]
+  grep -q 'AAAA-original-key' /root/.ssh/authorized_keys
+  # 两个库都导入，账号都建（Vaultwarden 的账号由 hk-host 包建）
+  grep -qx 'IMPORT xboard' "$FDB/log" && grep -qx 'IMPORT vaultwarden' "$FDB/log"
+  [ -e "$FDB/user/xboard@172.%" ] && [ -e "$FDB/user/vaultwarden@172.%" ]
+  # 业务数据在（用户已用流量、订单），历史表只有结构
+  grep -q 'INSERT INTO `v2_user` VALUES (1,100,200)' "$FDB/db/xboard/import.sql"
+  grep -q 'INSERT INTO `v2_order`' "$FDB/db/xboard/import.sql"
+  grep -q 'CREATE TABLE `v2_log`' "$FDB/db/xboard/import.sql" && none 'INSERT INTO `v2_log`' "$(cat "$FDB/db/xboard/import.sql")"
+  grep -q 'CREATE TABLE `event`' "$FDB/db/vaultwarden/import.sql" && none 'INSERT INTO `event`' "$(cat "$FDB/db/vaultwarden/import.sql")"
+  [ "$(cat "$FDB/db/xboard/tables")" = 4 ]
+  has "只有表结构的历史表（恢复后是空表，从零开始记）：xboard.v2_log xboard.v2_stat_user"
+  # 应用数据与配置
+  [ -f "$R/opt/vaultwarden/data/rsa_key.pem" ] && grep -q '^APP_KEY=base64:abc' "$R/opt/xboard/.env"
+  # 两个应用都按 images.tsv 的 digest 锁版本、列出启动步骤（--no-start 只打印）
+  grep -q 'image: ghcr.io/cedar2025/xboard@sha256:bbbb' "$R/opt/xboard/compose.yaml"
+  grep -q 'image: vaultwarden/server@sha256:bbbb' "$R/opt/vaultwarden/compose.yaml"
+  has "cd $R/opt/xboard && docker compose pull && docker compose up -d"
+  has "cd $R/opt/vaultwarden && docker compose pull && docker compose up -d"
+  lacks "锁不住版本"
+  # 「在 vault 包里」的条目这次 vault 包也在，不列成手动步骤；历史表也不列
+  lacks "这一项在 vault 包里"
+  lacks "备份没收 mysql:"
+}
+
+@test "只给 hk-host 包：提示 Vaultwarden 在 vault 包里、这次没给" {
+  make_split; v2_local
+  restore restore "$HK" --no-start
+  [ "$status" -eq 0 ]
+  has "这一项在 vault 包里，这次没给：$R/opt/vaultwarden"
+  [ ! -e "$R/opt/vaultwarden" ]
+}
+
+@test "新机时区不是 UTC：恢复把它列进手动步骤（--no-start 不动系统）；是 UTC 就不提" {
+  make_split; v2_local
+  TZ=Asia/Shanghai restore restore "$HK" "$VA" --no-start
+  has "timedatectl set-timezone Etc/UTC"
+  has "原机的定时任务按 UTC 写"
+  has "系统时区不是 UTC"                     # 定时任务安装器同样提醒（告警，所以退出码非零）
+  [ -f "$R/opt/vaultwarden/data/rsa_key.pem" ]  # 其余照常恢复
+  rm -rf "$R" "$FDB" /var/lib/ops-scripts/dr-restore.state; crontab -r 2>/dev/null; make_split; v2_local
+  restore restore "$HK" "$VA" --no-start
+  lacks "timedatectl set-timezone"
+}
+
+@test "不给包名：从网盘的 Backups/hk-host 与 Backups/vault 各取最新的一个（连 .sha256）" {
+  make_split; v2_local
+  local c=/tmp/fakecloud
+  rm -rf "$c"; mkdir -p "$c/r1/Backups/hk-host" "$c/r1/Backups/vault"
+  cp "$HK" "$HK.sha256" "$c/r1/Backups/hk-host/"; cp "$VA" "$c/r1/Backups/vault/"
+  cat > /usr/local/bin/rclone <<'SH'
+#!/bin/bash
+C=/tmp/fakecloud
+loc() { local r=${1%%:*} p=${1#*:}; p=${p#/}; printf '%s/%s/%s' "$C" "$r" "${p%/}"; }
+case "$1" in
+  version) echo "rclone v9.9.9" ;;
+  lsf) d=$(loc "$2"); pat='*'; [ "$3" = --include ] && pat=$4; for f in "$d"/$pat; do [ -f "$f" ] && echo "${f##*/}"; done ;;
+  copy) s=$(loc "$2"); [ -f "$s" ] || exit 1; mkdir -p "$3"; cp "$s" "$3/" ;;
+esac
+SH
+  chmod 755 /usr/local/bin/rclone
+  printf 'RCLONE_REMOTES=r1\n' >> /etc/ops-scripts/env.conf
+  restore check
+  echo "$output"
+  has "没有冲突，可以 restore"
+  has "r1:Backups/hk-host 最新：hk-host_20261010_200000.7z"
+  has "r1:Backups/vault 最新：vault_20261010_201500.7z"
+  has "sha256 与旁挂的 .sha256 一致"
+  printf '#!/bin/sh\necho "rclone v9.9.9"\n' > /usr/local/bin/rclone
 }
 
 # ── 新布局：rootfs + restore-manifest.tsv ───────────────────
@@ -737,9 +878,9 @@ v2_local() {  # 新机的样子：引导用的公钥、配好的 .my.cnf、init/
 # ── 定时任务安装器 ──────────────────────────────────────────
 cron_install() { run bash "$SRC/ops/install-backup-cron.sh" "$@"; }
 
-@test "安装器：预演不写入；--apply 补 PATH、按时间表写入、沿用原锁；再跑不重复" {
-  local_stub vw-fullbackup; local_stub newapi-fullbackup
-  printf '%s\n' '30 3 * * * flock -w 3600 /var/lock/fullbackup.lock /usr/local/bin/vw-fullbackup.sh >> /var/log/vw-fullbackup-cron.log 2>&1' \
+@test "安装器：预演不写入；--apply 补 PATH、按时间表（UTC）写入、沿用原锁；再跑不重复" {
+  local_stub vault-backup; local_stub newapi-fullbackup
+  printf '%s\n' '30 3 * * * flock -w 3600 /var/lock/fullbackup.lock /usr/local/bin/vault-backup.sh >> /var/log/vault-backup-cron.log 2>&1' \
     '15 2 * * * /usr/local/bin/other.sh >/dev/null 2>&1' | crontab -
   crontab -l > /tmp/c0
   cron_install
@@ -747,11 +888,11 @@ cron_install() { run bash "$SRC/ops/install-backup-cron.sh" "$@"; }
   crontab -l | diff /tmp/c0 -
   cron_install --apply
   crontab -l | head -1 | grep -q '^PATH='
-  crontab -l | grep -qx '0 \*/6 \* \* \* /usr/bin/flock -n /var/lock/fullbackup.lock /usr/local/bin/vw-fullbackup.sh >> /var/log/vw-fullbackup-cron.log 2>&1'
-  crontab -l | grep -qx '5 \* \* \* \* /usr/bin/flock -n /var/lock/newapi-fullbackup-cron.lock /usr/local/bin/newapi-fullbackup.sh >> /var/log/newapi-fullbackup-cron.log 2>&1'
+  crontab -l | grep -qx '15 \* \* \* \* /usr/bin/flock -n /var/lock/fullbackup.lock /usr/local/bin/vault-backup.sh >> /var/log/vault-backup-cron.log 2>&1'
+  crontab -l | grep -qx '30 4,10,16,22 \* \* \* /usr/bin/flock -n /var/lock/newapi-fullbackup-cron.lock /usr/local/bin/newapi-fullbackup.sh >> /var/log/newapi-fullbackup-cron.log 2>&1'
   crontab -l | grep -q '/usr/local/bin/other.sh'
-  none 'xboard-fullbackup' "$(crontab -l)"
-  [ "$(crontab -l | grep -c 'vw-fullbackup.sh')" = 1 ]
+  none 'hk-host-backup' "$(crontab -l)"
+  [ "$(crontab -l | grep -c 'vault-backup.sh')" = 1 ]
   ls /root/ops-backups/crontab.* >/dev/null
   crontab -l > /tmp/c1
   cron_install --apply
@@ -760,33 +901,33 @@ cron_install() { run bash "$SRC/ops/install-backup-cron.sh" "$@"; }
 }
 
 @test "安装器：opsget 写法的旧行也换掉，日志路径里的同名不误伤" {
-  local_stub vw-fullbackup
-  printf '%s\n' '0 1 * * * opsget backup/vw-fullbackup' '0 9 * * * tail -5 /var/log/vw-fullbackup.log > /tmp/x' | crontab -
+  local_stub vault-backup
+  printf '%s\n' '0 1 * * * opsget backup/vault-backup' '0 9 * * * tail -5 /var/log/vault-backup.log > /tmp/x' | crontab -
   cron_install --apply
   none opsget "$(crontab -l)"
-  crontab -l | grep -q 'tail -5 /var/log/vw-fullbackup.log'
-  [ "$(crontab -l | grep -c '/usr/local/bin/vw-fullbackup.sh')" = 1 ]
+  crontab -l | grep -q 'tail -5 /var/log/vault-backup.log'
+  [ "$(crontab -l | grep -c '/usr/local/bin/vault-backup.sh')" = 1 ]
 }
 
 @test "安装器：外层锁不用脚本自己的 /run/lock/<名>.lock（同一把锁会让备份一启动就退出）" {
-  local_stub vw-fullbackup; local_stub xboard-fullbackup
-  printf '%s\n' '0 3 * * * /usr/bin/flock -n /run/lock/vw-fullbackup.lock /usr/local/bin/vw-fullbackup.sh' \
-    '0 4 * * * flock -n /var/lock/xboard-fullbackup.lock /usr/local/bin/xboard-fullbackup.sh' | crontab -
+  local_stub vault-backup; local_stub hk-host-backup
+  printf '%s\n' '0 3 * * * /usr/bin/flock -n /run/lock/vault-backup.lock /usr/local/bin/vault-backup.sh' \
+    '0 4 * * * flock -n /var/lock/hk-host-backup.lock /usr/local/bin/hk-host-backup.sh' | crontab -
   cron_install --apply
-  none 'flock -n /(run|var)/lock/(vw|xboard)-fullbackup\.lock' "$(crontab -l)"
-  crontab -l | grep -q 'flock -n /var/lock/vw-fullbackup-cron.lock /usr/local/bin/vw-fullbackup.sh'
-  crontab -l | grep -q 'flock -n /var/lock/xboard-fullbackup-cron.lock /usr/local/bin/xboard-fullbackup.sh'
+  none 'flock -n /(run|var)/lock/(vault|hk-host)-backup\.lock' "$(crontab -l)"
+  crontab -l | grep -q 'flock -n /var/lock/vault-backup-cron.lock /usr/local/bin/vault-backup.sh'
+  crontab -l | grep -qx '0 20 \* \* \* /usr/bin/flock -n /var/lock/hk-host-backup-cron.lock /usr/local/bin/hk-host-backup.sh >> /var/log/hk-host-backup-cron.log 2>&1'
   has "心跳监控的周期"
 }
 
-@test "安装器：litellm-fullbackup 每 6 小时 :40，旧行换掉，再跑不重复" {
+@test "安装器：litellm-fullbackup 每周日 UTC 20:40，旧行换掉，再跑不重复" {
   local_stub litellm-fullbackup
-  echo '0 2 * * * /usr/local/bin/litellm-fullbackup.sh >> /tmp/x.log 2>&1' | crontab -
+  echo '40 */6 * * * /usr/local/bin/litellm-fullbackup.sh >> /tmp/x.log 2>&1' | crontab -
   cron_install --apply
-  crontab -l | grep -qx '40 \*/6 \* \* \* /usr/bin/flock -n /var/lock/litellm-fullbackup-cron.lock /usr/local/bin/litellm-fullbackup.sh >> /var/log/litellm-fullbackup-cron.log 2>&1'
+  crontab -l | grep -qx '40 20 \* \* 0 /usr/bin/flock -n /var/lock/litellm-fullbackup-cron.lock /usr/local/bin/litellm-fullbackup.sh >> /var/log/litellm-fullbackup-cron.log 2>&1'
   [ "$(crontab -l | grep -c 'litellm-fullbackup.sh')" = 1 ]
-  none '^0 2 ' "$(crontab -l)"
-  has "vw / xboard / litellm 6 小时"
+  none '^40 \*/6 ' "$(crontab -l)"
+  has "litellm 与面板整机备份 1 周"
   crontab -l > /tmp/c1
   cron_install --apply
   has "无需改动"
@@ -797,7 +938,32 @@ cron_install() { run bash "$SRC/ops/install-backup-cron.sh" "$@"; }
   local_stub panel-backup-create
   cron_install --apply
   crontab -l | grep -qx '30 19 \* \* 0 /usr/bin/flock -n /var/lock/panel-backup-create-cron.lock /usr/local/bin/panel-backup-create.sh >> /var/log/panel-backup-create-cron.log 2>&1'
-  has "面板整机备份每周"
+  has "litellm 与面板整机备份 1 周"
+}
+
+@test "安装器：装了 vault-backup / hk-host-backup 就换掉旧的 vw / xboard 行（命令前的环境变量照留、旧锁不沿用）；没装新的旧行不动" {
+  local_stub hk-host-backup
+  printf '%s\n' \
+    '0 */6 * * * /usr/bin/flock -n /var/lock/vw-fullbackup-cron.lock /usr/local/bin/vw-fullbackup.sh >> /var/log/vw-fullbackup-cron.log 2>&1' \
+    '20 */6 * * * MAIL_TO=ops-xboard@example.com /usr/bin/flock -n /var/lock/xboard-fullbackup-cron.lock /usr/local/bin/xboard-fullbackup.sh >> /var/log/xboard-fullbackup-cron.log 2>&1' | crontab -
+  cron_install --apply
+  crontab -l | grep -qx '0 20 \* \* \* MAIL_TO=ops-xboard@example.com /usr/bin/flock -n /var/lock/hk-host-backup-cron.lock /usr/local/bin/hk-host-backup.sh >> /var/log/hk-host-backup-cron.log 2>&1'
+  none 'xboard-fullbackup' "$(crontab -l)"
+  has "取代旧的 xboard-fullbackup 行"
+  # vault-backup 还没装：旧的 vw 行留着，备份不断
+  crontab -l | grep -q '/usr/local/bin/vw-fullbackup.sh'
+  local_stub vault-backup
+  cron_install --apply
+  none 'vw-fullbackup\.sh' "$(crontab -l)"
+  crontab -l | grep -qx '15 \* \* \* \* /usr/bin/flock -n /var/lock/vault-backup-cron.lock /usr/local/bin/vault-backup.sh >> /var/log/vault-backup-cron.log 2>&1'
+}
+
+@test "安装器：系统时区不是 UTC 时告警（cron 按系统时区解释时间表）" {
+  local_stub vault-backup
+  TZ=Asia/Shanghai cron_install
+  has "系统时区不是 UTC"
+  cron_install
+  lacks "系统时区不是 UTC"
 }
 
 @test "安装器：一个备份脚本都没装时说清楚，不动 crontab" {
@@ -888,24 +1054,24 @@ ufw_cleanup() { rm -rf /etc/ufw /etc/ufw.bak.* /etc/ssh/sshd_config.bak.*; }
 }
 
 @test "安装器：旧行命令前的环境变量（MAIL_TO=...）照留到新行" {
-  local_stub xboard-fullbackup
-  printf '%s\n' '50 3 * * * MAIL_TO=ops-xboard@example.com flock -w 3600 /var/lock/xb.lock /usr/local/bin/xboard-fullbackup.sh >> /var/log/xboard-fullbackup-cron.log 2>&1' | crontab -
+  local_stub hk-host-backup
+  printf '%s\n' '50 3 * * * MAIL_TO=ops-xboard@example.com flock -w 3600 /var/lock/xb.lock /usr/local/bin/hk-host-backup.sh >> /var/log/hk-host-backup-cron.log 2>&1' | crontab -
   cron_install --apply
-  crontab -l | grep -qx '20 \*/6 \* \* \* MAIL_TO=ops-xboard@example.com /usr/bin/flock -n /var/lock/xb.lock /usr/local/bin/xboard-fullbackup.sh >> /var/log/xboard-fullbackup-cron.log 2>&1'
+  crontab -l | grep -qx '0 20 \* \* \* MAIL_TO=ops-xboard@example.com /usr/bin/flock -n /var/lock/xb.lock /usr/local/bin/hk-host-backup.sh >> /var/log/hk-host-backup-cron.log 2>&1'
   has "沿用旧行的环境变量 MAIL_TO=ops-xboard@example.com"
   crontab -l > /tmp/c1; cron_install --apply; has "无需改动"; crontab -l | diff /tmp/c1 -
 }
 
 @test "安装器：几个备份脚本共用的外层锁不沿用，各用各的（-n 下共用会互相挤掉）" {
-  local_stub vw-fullbackup; local_stub xboard-fullbackup; local_stub newapi-fullbackup
+  local_stub vault-backup; local_stub hk-host-backup; local_stub newapi-fullbackup
   printf '%s\n' \
-    '30 3 * * * flock -w 3600 /var/lock/fullbackup.lock /usr/local/bin/vw-fullbackup.sh >> /var/log/vw-fullbackup-cron.log 2>&1' \
-    '50 3 * * * flock -w 3600 /var/lock/fullbackup.lock /usr/local/bin/xboard-fullbackup.sh >> /var/log/xboard-fullbackup-cron.log 2>&1' \
+    '30 3 * * * flock -w 3600 /var/lock/fullbackup.lock /usr/local/bin/vault-backup.sh >> /var/log/vault-backup-cron.log 2>&1' \
+    '50 3 * * * flock -w 3600 /var/lock/fullbackup.lock /usr/local/bin/hk-host-backup.sh >> /var/log/hk-host-backup-cron.log 2>&1' \
     '10 4 * * * flock -w 3600 /var/lock/fullbackup.lock /usr/local/bin/newapi-fullbackup.sh >> /var/log/newapi-fullbackup-cron.log 2>&1' | crontab -
   cron_install --apply
   none 'fullbackup\.lock' "$(crontab -l)"
-  crontab -l | grep -q -- '-n /var/lock/vw-fullbackup-cron.lock /usr/local/bin/vw-fullbackup.sh'
-  crontab -l | grep -q -- '-n /var/lock/xboard-fullbackup-cron.lock /usr/local/bin/xboard-fullbackup.sh'
+  crontab -l | grep -q -- '-n /var/lock/vault-backup-cron.lock /usr/local/bin/vault-backup.sh'
+  crontab -l | grep -q -- '-n /var/lock/hk-host-backup-cron.lock /usr/local/bin/hk-host-backup.sh'
   crontab -l | grep -q -- '-n /var/lock/newapi-fullbackup-cron.lock /usr/local/bin/newapi-fullbackup.sh'
   has "原来和其他备份脚本共用外层锁 /var/lock/fullbackup.lock"
   crontab -l > /tmp/c1; cron_install --apply; has "无需改动"; crontab -l | diff /tmp/c1 -
