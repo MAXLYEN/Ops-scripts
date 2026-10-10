@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.2.8
+# VERSION: 1.2.9
+# 1.2.9: 面板 data/ 不收入侵检测（HIDS）事件日志 hids_data/log/（含 high/）：宝塔 13.1.0 起每天新增一个约 250MB 的 json，vw 与 xboard 包各带一份，两个包每天各涨约 9.5MB，5GB 的 OneDrive 几天就满；恢复不需要，hids_data 下的配置照收。
 # 1.2.8: warn 记下每条告警原文，finish 在「完成（N 条告警）」下面再列一遍（只累加了 OPS_WARNINGS、没走 warn 的，另起一行说明条数）。真机演练的 teardown 报了 1 条告警，原文滚出了屏幕，事后查不到是哪条。
 # 1.2.7: 新增 ensure_rclone（缺失或低于 1.75.0 时装官方版到 /usr/local/bin/rclone，按 SHA256SUMS 校验）与 rclone_version、ver_ge。真机演练发现 Debian 源的 rclone 1.60 下载 OneDrive 报 unauthenticated。
 # 1.2.6: 新增 is_yes，confirm 改用它：处理退格、去掉首尾空白（含回车、全角空格）、全角转半角、不分大小写后等于 yes 才算同意（生产机上输了 yes 却被当成取消）；空输入、y 仍然不算。
@@ -14,7 +15,7 @@ set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 # shellcheck disable=SC2034  # 供调用方查询公共库版本
-OPS_COMMON_VERSION="1.2.8"
+OPS_COMMON_VERSION="1.2.9"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
@@ -541,11 +542,12 @@ bk_nginx_conf_dir() {
 #                         面板照常运行，曲线从零开始记
 #   warning/              漏洞扫描规则库与扫描结果，面板会重新下载
 #   firewall/GeoLite2-Country.json  按国家屏蔽用的地理库，面板会重新下载
+#   hids_data/log/        入侵检测（宝塔 13.1 起）的事件日志，每天一个约 250MB 的 json；hids_data 下的配置照收
 # 站点、计划任务、面板账号等记录都在 db/ 等小文件里，照收。
 bk_panel_data() {
   local d=${1%/} sdb dst
   [ -d "$d" ] || return 0
-  bk_dir "$d" "$d/system.db" "$d/warning" "$d/firewall/GeoLite2-Country.json" || return 1
+  bk_dir "$d" "$d/system.db" "$d/warning" "$d/firewall/GeoLite2-Country.json" "$d/hids_data/log" || return 1
   sdb="$d/system.db"
   if [ -f "$sdb" ]; then
     dst="$BK_ROOT/rootfs$sdb"
@@ -559,6 +561,7 @@ bk_panel_data() {
   fi
   [ -e "$d/warning" ] && bk_skip "$d/warning" "面板漏洞扫描规则库与结果，面板会重新下载"
   [ -e "$d/firewall/GeoLite2-Country.json" ] && bk_skip "$d/firewall/GeoLite2-Country.json" "按国家屏蔽用的地理库，面板会重新下载"
+  [ -e "$d/hids_data/log" ] && bk_skip "$d/hids_data/log" "宝塔入侵检测（HIDS）事件日志，每天约 250MB，恢复不需要"
   return 0
 }
 

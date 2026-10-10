@@ -384,8 +384,11 @@ EOF
   grep -qP "^\Q$S/proxy_project\E\t\d+\t\S+\tdir$" "$T/pkg/restore-manifest.tsv"
 }
 
-@test "面板 data：监控历史只留表结构，漏洞库与国家库不收，站点记录照收" {
-  P="$T/panel"; mkdir -p "$P/data/db" "$P/data/warning" "$P/data/firewall"
+@test "面板 data：监控历史只留表结构，漏洞库、国家库、入侵检测日志不收，站点记录与入侵检测配置照收" {
+  P="$T/panel"; mkdir -p "$P/data/db" "$P/data/warning" "$P/data/firewall" "$P/data/hids_data/log/high"
+  head -c 4096 /dev/zero > "$P/data/hids_data/log/2026-10-09.json"
+  head -c 4096 /dev/zero > "$P/data/hids_data/log/high/high_log.json"
+  echo '{"open":true}' > "$P/data/hids_data/config.json"
   sqlite3 "$P/data/system.db" "CREATE TABLE cpuio(id INTEGER, pro REAL); INSERT INTO cpuio VALUES (1, 0.5), (2, 0.7);"
   chmod 600 "$P/data/system.db"
   sqlite3 "$P/data/db/site.db" "CREATE TABLE sites(name TEXT); INSERT INTO sites VALUES ('a.example.com');"
@@ -403,5 +406,8 @@ EOF
   [ -f "$R/firewall/rules.json" ]
   grep -q "system.db"$'\t'"面板监控历史，只收表结构" "$T/pkg/system/rootfs-skipped.txt"
   grep -q "/warning"$'\t' "$T/pkg/system/rootfs-skipped.txt"
+  [ ! -e "$R/hids_data/log" ]
+  [ -f "$R/hids_data/config.json" ]
+  grep -q "^$P/data/hids_data/log"$'\t'"宝塔入侵检测（HIDS）事件日志" "$T/pkg/system/rootfs-skipped.txt"
   grep -qP "^\Q$P/data\E\t\d+\t\S+\tdir$" "$T/pkg/restore-manifest.tsv"
 }
