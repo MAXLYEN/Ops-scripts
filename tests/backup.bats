@@ -325,6 +325,42 @@ EOF
   grep -q 'MYSQL_DEFAULTS_FILE' "$WARN_LOG"
 }
 
+@test "连不上 MySQL：隔一会儿重试，恢复了照常；一直连不上就告警，带客户端路径和报错原文" {
+  LOG_FILE=$T/log; log() { printf '%s\n' "$*" >> "$LOG_FILE"; }
+  sleep() { echo "sleep $*" >> "$T/sleep"; }
+  # 前 $T/fails 次报 MariaDB 客户端找错 socket 的错
+  mkdir -p "$T/bin"
+  cat > "$T/bin/mysql" <<EOF
+#!/bin/bash
+n=\$(cat "$T/fails" 2>/dev/null || echo 0)
+if [ "\$n" -gt 0 ]; then echo \$((n - 1)) > "$T/fails"
+  echo "ERROR 2002 (HY000): Can't connect to local server through socket '/run/mysqld/mysqld.sock' (2)" >&2; exit 1; fi
+echo 1
+EOF
+  chmod +x "$T/bin/mysql"; echo '[client]' > "$T/my.cnf"
+  BK_MYSQL="$T/bin/mysql" MYSQL_DEFAULTS_FILE="$T/my.cnf" BK_MYSQL_RETRY_WAIT=7
+  echo 2 > "$T/fails"
+  bk_mysql_ready
+  grep -q "连不上 MySQL（第 1/3 次）：ERROR 2002 .*mysqld.sock' (2)，7 秒后重试" "$LOG_FILE"
+  grep -q '第 2/3 次' "$LOG_FILE"
+  [ "$(grep -c 'sleep 7' "$T/sleep")" -eq 2 ]
+  [ ! -s "$WARN_LOG" ]
+  echo 9 > "$T/fails"; : > "$T/sleep"
+  run bk_mysql_ready
+  [ "$status" -ne 0 ]
+  grep -q "连不上 MySQL（试了 3 次，客户端 $T/bin/mysql）：ERROR 2002" "$WARN_LOG"
+  [ "$(grep -c . "$T/sleep")" -eq 2 ]                        # 最后一次失败后不再等
+}
+
+@test "bk_mysql_bin：有宝塔自带的客户端就用它，不用 PATH 里的；没有才用 PATH 里的" {
+  mkdir -p "$T/bt" "$T/path"
+  printf '#!/bin/sh\n' > "$T/bt/mysql"; printf '#!/bin/sh\n' > "$T/path/mysql"; printf '#!/bin/sh\n' > "$T/path/mysqldump"
+  chmod +x "$T/bt/mysql" "$T/path/mysql" "$T/path/mysqldump"
+  PATH="$T/path:$PATH" BK_MYSQL_BIN_DIR="$T/bt"
+  [ "$(bk_mysql_bin mysql)" = "$T/bt/mysql" ]
+  [ "$(bk_mysql_bin mysqldump)" = "$T/path/mysqldump" ]
+}
+
 @test "SSH 两步验证：/etc/pam.d/sshd 与 /root/.google_authenticator 进包，权限照原样" {
   mkdir -p /etc/pam.d
   printf 'auth required pam_google_authenticator.so\n' > /etc/pam.d/sshd

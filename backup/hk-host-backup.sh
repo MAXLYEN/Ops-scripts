@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # backup/hk-host-backup.sh — 前置机整机备份：系统配置、面板、nginx 与证书、ufw、全部 MySQL 账号与业务库（Xboard 等）、
 #                            Xboard 目录、Komari、SubConverter、站点；加密上传。每天一次
-# VERSION: 1.0.0
+# VERSION: 1.0.1
+# 1.0.1: mysql / mysqldump 优先用宝塔自带的客户端（公共库 bk_mysql_bin）：PATH 里的换成 MariaDB 客户端后找错 socket，2026-10-15 整轮失败。连不上 MySQL 时重试并在告警里带报错原文（公共库 1.4.1）。
 # 1.0.0: 首版。由 vw-fullbackup 与 xboard-fullbackup 合并去重：系统部分只在这一个包里，Vaultwarden 归 vault-backup。
 #        日志与历史数据只收表结构（公共库 bk_history_default、komari.db 的 logs / task_results）。不再带旧布局的副本（app/、nginx/、system/），恢复只认 rootfs。
 #        包名 hk-host_YYYYMMDD_HHMMSS.7z（UTC），本机 <BACKUP_LOCAL_ROOT>/hk-host，网盘 <BACKUP_CLOUD_ROOT>/hk-host，配 .sha256。
@@ -77,9 +78,9 @@ KOMARI_DATA="${SVC_KOMARI_DATA:+${SVC_KOMARI_DATA%/}}"
 KOMARI_EXTRA="${SVC_KOMARI_EXTRA:-}"
 SUBCONV_DIR="${SVC_SUBCONV_DIR:+${SVC_SUBCONV_DIR%/}}"
 # shellcheck disable=SC2034  # 公共库读
-BK_MYSQL="$(command -v mysql || echo /www/server/mysql/bin/mysql)"
+BK_MYSQL="$(bk_mysql_bin mysql)"
 # shellcheck disable=SC2034
-BK_MYSQLDUMP="$(command -v mysqldump || echo /www/server/mysql/bin/mysqldump)"
+BK_MYSQLDUMP="$(bk_mysql_bin mysqldump)"
 
 mkdir -p /run/lock
 exec 9>"/run/lock/$PKG-backup.lock" || die "无法创建锁文件"

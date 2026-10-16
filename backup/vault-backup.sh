@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # backup/vault-backup.sh — 只备份 Vaultwarden（库、数据目录、配置），加密上传；每小时一次
-# VERSION: 1.0.0
+# VERSION: 1.0.1
+# 1.0.1: mysql / mysqldump 优先用宝塔自带、与服务端同版本的客户端（公共库 bk_mysql_bin），不用 PATH 里可能被换成的 MariaDB 客户端。
 # 1.0.0: 首版。由 vw-fullbackup 拆出：系统部分、Komari、SubConverter 归 hk-host-backup，本包只收 Vaultwarden 自己的东西（库只导 event 的结构）。
 #        包名 vault_YYYYMMDD_HHMMSS.7z（UTC），本机 <BACKUP_LOCAL_ROOT>/vault，网盘 <BACKUP_CLOUD_ROOT>/vault，配 .sha256；分级保留见公共库 bk_tiers。
 # ENV-REQUIRED: SVC_VW_DIR RCLONE_REMOTES BACKUP_PASS_FILE|VW_PASS_FILE
@@ -73,8 +74,8 @@ TS="$(bk_stamp)"
 NAME="${PKG}_${TS}"
 ARCHIVE="$OUT_DIR/$NAME.7z"
 STAGE="$OUT_DIR/.staging_$TS"
-MYSQL_BIN="$(command -v mysql || echo /www/server/mysql/bin/mysql)"
-MYSQLDUMP_BIN="$(command -v mysqldump || echo /www/server/mysql/bin/mysqldump)"
+MYSQL_BIN="$(bk_mysql_bin mysql)"
+MYSQLDUMP_BIN="$(bk_mysql_bin mysqldump)"
 
 # 防重入：每小时一次，上一轮还在上传时两轮会同时清理同一批包
 mkdir -p /run/lock

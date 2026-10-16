@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.4.0
+# VERSION: 1.4.1
+# 1.4.1: 新增 bk_mysql_bin：宝塔机优先用面板自带、与服务端同版本的客户端（/www/server/mysql/bin），PATH 里的 mysql 可能被别的软件包换成 MariaDB 客户端，它默认找 /run/mysqld/mysqld.sock，连不上宝塔的 MySQL（2026-10-15 生产 hk-host-backup 因此失败）。bk_mysql_ready 连不上时隔 BK_MYSQL_RETRY_WAIT 秒（默认 30）重试，共 BK_MYSQL_TRIES 次（默认 3），告警里带上客户端路径和 MySQL 的报错原文。
 # 1.4.0: 按 2026-10 备份重新规划：新增 BK_PKGS、bk_local_dir / bk_cloud_dir（本机 <BACKUP_LOCAL_ROOT>/<包名>、网盘 <BACKUP_CLOUD_ROOT>/<包名>）、bk_stamp（UTC 时间戳，不看系统时区）、bk_tiers（按包的分级档位）、bk_upload（包与 .sha256 传到每个网盘并校验）、bk_prune_all（本机与每个网盘按档位清理）；bk_init 把 BACKUP_LOCAL_ROOT 当落盘目录排除，结尾显式 return 0（只配了一个不存在的落盘目录时原先返回失败）。
 # 1.3.0: 历史数据只收表结构：bk_mysql_dbs 对清单里的历史表（Xboard 的日志、统计、机器负载曲线、管理审计、流量重置记录、失败队列，vaultwarden 的 event）只导结构不导数据，记进 rootfs-skipped；清单由 bk_history_default 给出，BACKUP_HISTORY_TABLES 可整个改写。新增 bk_history_want / bk_history_pick / bk_history_tables，以及 bk_sqlite_strip（在包里的 SQLite 副本上清空历史表）。订单、支付、佣金照导。
 # 1.2.9: 面板 data/ 不收入侵检测（HIDS）事件日志 hids_data/log/（含 high/）：宝塔 13.1.0 起每天新增一个约 250MB 的 json，vw 与 xboard 包各带一份，两个包每天各涨约 9.5MB，5GB 的 OneDrive 几天就满；恢复不需要，hids_data 下的配置照收。
@@ -751,11 +752,29 @@ bk_compose_projects() {
 # 之后还会读 ~/.my.cnf，那里的 [client] 会把指定的凭据覆盖掉。
 _bk_my() { "${BK_MYSQL:-mysql}" --defaults-file="$MYSQL_DEFAULTS_FILE" "$@"; }
 
+# bk_mysql_bin <mysql|mysqldump>：宝塔机优先用面板自带、与服务端同版本的客户端（BK_MYSQL_BIN_DIR，默认 /www/server/mysql/bin），
+# 没有再用 PATH 里的。PATH 里的 mysql 可能被别的软件包换成 MariaDB 客户端：它默认找 /run/mysqld/mysqld.sock，
+# 宝塔的 MySQL 在 /tmp/mysql.sock，--defaults-file 又不读 /etc/my.cnf，于是连不上（2026-10-15 生产踩过）
+bk_mysql_bin() {
+  local d=${BK_MYSQL_BIN_DIR:-/www/server/mysql/bin}
+  if [ -x "$d/$1" ]; then printf '%s' "$d/$1"; else command -v "$1" || printf '%s' "$d/$1"; fi
+}
+
+# 连不上时隔 BK_MYSQL_RETRY_WAIT 秒重试，共 BK_MYSQL_TRIES 次：MySQL 恰好在重启时不至于整轮失败；告警带报错原文
 bk_mysql_ready() {
   [ -n "${MYSQL_DEFAULTS_FILE:-}" ] && [ -r "$MYSQL_DEFAULTS_FILE" ] \
     || { warn "未配置可读的 MYSQL_DEFAULTS_FILE，全部账号与其余业务库没有进包"; return 1; }
-  _bk_my -N -B -e 'SELECT 1' >/dev/null 2>&1 \
-    || { warn "MYSQL_DEFAULTS_FILE（$MYSQL_DEFAULTS_FILE）连不上 MySQL，全部账号与其余业务库没有进包"; return 1; }
+  local i n=${BK_MYSQL_TRIES:-3} err=""
+  for ((i = 1; i <= n; i++)); do
+    err=$(_bk_my -N -B -e 'SELECT 1' 2>&1 >/dev/null) && return 0
+    err=${err%%$'\n'*}
+    if [ "$i" -lt "$n" ]; then
+      log "  连不上 MySQL（第 $i/$n 次）：${err:-没有报错输出}，${BK_MYSQL_RETRY_WAIT:-30} 秒后重试"
+      sleep "${BK_MYSQL_RETRY_WAIT:-30}"
+    fi
+  done
+  warn "MYSQL_DEFAULTS_FILE（$MYSQL_DEFAULTS_FILE）连不上 MySQL（试了 $n 次，客户端 ${BK_MYSQL:-mysql}）：${err:-没有报错输出}；全部账号与其余业务库没有进包"
+  return 1
 }
 
 # bk_mysql_users <包内相对路径> —— 全部账号的 CREATE USER + ALTER USER + GRANT。

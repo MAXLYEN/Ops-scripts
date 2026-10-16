@@ -11,10 +11,11 @@
 | `drive.py` | — | 在伪终端里运行交互命令并逐行送入按键（菜单读 `/dev/tty`，管道喂不进去） |
 | `opsget.bats` | — | 引导器：安装、`-u`、固定旧版本、配置预检、菜单入口 |
 | `opsbox.bats` | — | 菜单：界面、说明卡片、两段式与主机名确认、缺配置引导、各联动流程、向导进度 |
-| `backup.bats` | — | 备份包公共函数（`lib/common.sh` 的 `bk_*`）：GFS 分级保留逐档校验与 60 天滚动、各包的档位与 UTC 包名、上传（含 `.sha256`）与按包清理、历史表只导结构（MySQL 与 SQLite）、rootfs 权限属主、解密密码排除、SQLite 在线备份、systemd 单元归类、MySQL 账号 SQL 格式、`set -u` 兼容 |
+| `backup.bats` | — | 备份包公共函数（`lib/common.sh` 的 `bk_*`）：GFS 分级保留逐档校验与 60 天滚动、各包的档位与 UTC 包名、上传（含 `.sha256`）与按包清理、历史表只导结构（MySQL 与 SQLite）、rootfs 权限属主、解密密码排除、SQLite 在线备份、systemd 单元归类、MySQL 账号 SQL 格式、连不上 MySQL 时重试与告警原文、优先用宝塔自带的 MySQL 客户端、`set -u` 兼容 |
 | `live-migrate.bats` | — | 真跑 `migrate/live-migrate` 与 `vault-backup`、`hk-host-backup` 的 `--local-only`（包里只有自己该收的东西、历史表只有结构）：旧机是这台容器（真 crontab、真出加密包），新机由假 ssh 扮演（只读与改防火墙的动作真跑，恢复、验收、停服只记录）；覆盖预检拒绝、演练不动旧机、切换暂停备份任务并停容器、回滚复原、放行名单的增删、DNS 复核 |
 | `restore.bats` | — | 真跑 `migrate/restore-from-backup` 与 `ops/install-backup-cron`：现场打加密包，MySQL 换成记录语句的假实现，恢复一律 `--no-start` |
 | `litellm.bats` | — | 真跑 `backup/litellm-fullbackup`、`ops/litellm-drill`、`ops/verify-backup-pass`（含 `.sha256` 缺失与不符、网盘报不报 sha256 两种情况、面板整机备份目录）：ssh 在本机执行远端命令，docker、rclone、curl 换成假实现，7z 与公共库是真的；假 ssh 能注入握手超时、传到一半断开，验证重试与放弃 |
+| `linkcheck.bats` | — | 真跑 `ops/newapi-linkcheck`：curl、systemctl、sleep 换成假实现；覆盖不通先重探、重探恢复不报失败、两次都不通才报 `/fail`、内层重探仍不通才重启隧道 |
 | `newapi.bats` | — | 真跑 `backup/newapi-fullbackup`：ssh 在本机执行远端命令（SQLite 在线快照是真的），docker、rclone、curl 换成假实现；覆盖出包上传、线路抖动时的重试与放弃、落地机报错不重试、残留暂存清理 |
 
 ## 端到端怎么测

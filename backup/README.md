@@ -8,8 +8,8 @@
 | --- | --- | --- |
 | `litellm-fullbackup.sh` | 2.0.1 | 从汇总机拉取 LiteLLM 节点的库导出与工作目录，加密上传 |
 | `newapi-fullbackup.sh` | 2.0.1 | 从汇总机拉取 new-api 数据，生成一致性快照并加密上传 |
-| `vault-backup.sh` | 1.0.0 | 只备份 Vaultwarden（库、数据目录、配置），每小时一次 |
-| `hk-host-backup.sh` | 1.0.0 | 前置机整机备份：系统、面板、全部 MySQL 账号与业务库（Xboard 等）、Xboard 目录、Komari、SubConverter、站点，每天一次 |
+| `vault-backup.sh` | 1.0.1 | 只备份 Vaultwarden（库、数据目录、配置），每小时一次 |
+| `hk-host-backup.sh` | 1.0.1 | 前置机整机备份：系统、面板、全部 MySQL 账号与业务库（Xboard 等）、Xboard 目录、Komari、SubConverter、站点，每天一次 |
 
 ## 运行与更新
 
@@ -19,7 +19,7 @@
 - 包名 `<包名>_YYYYMMDD_HHMMSS.7z`，时间一律 UTC（不看系统时区）；旁边配 `.sha256`，两个都上传。本机放 `<BACKUP_LOCAL_ROOT>/<包名>/`（默认 `/box/backup`），每个网盘放 `<BACKUP_CLOUD_ROOT>/<包名>/`（默认 `Backups`）。
 - 加密都用 `BACKUP_PASS_FILE`（兼容旧的 `VW_PASS_FILE`），是密码文件路径。
 - 日志和历史数据只收表结构、不收数据（恢复后应用照常启动，这些记录从零开始）：Xboard 的日志与统计、机器负载曲线、管理审计、流量重置记录、失败队列，vaultwarden 的 `event`，Komari 的 `logs`、`task_results`，new-api 的 `quota_data`、`audit_logs`、`perf_metrics` 与程序日志目录，LiteLLM 的花费明细与按天用量、健康检查、错误与审计日志。订单、支付、佣金、new-api 的调用明细 `logs` 照收。清单可用 `BACKUP_HISTORY_TABLES`、`NEWAPI_HISTORY_TABLES`、`LITELLM_HISTORY_TABLES` 改。
-- `hk-host-backup.sh` 用 `MYSQL_DEFAULTS_FILE` 导出全部账号与业务库（Vaultwarden 的库在 vault 包，指标库只留本地），整个 Xboard 目录原样收进 rootfs（框架日志除外），Komari 用 `.backup` 取一致性副本；面板程序配置、nginx 依赖、GeoLite2-City、ufw 国家屏蔽规则照收，恢复时少下载。
+- `hk-host-backup.sh` 用 `MYSQL_DEFAULTS_FILE` 导出全部账号与业务库（Vaultwarden 的库在 vault 包，指标库只留本地），整个 Xboard 目录原样收进 rootfs（框架日志除外），Komari 用 `.backup` 取一致性副本；mysql / mysqldump 优先用宝塔自带的客户端（`/www/server/mysql/bin`，PATH 里的可能是找错 socket 的 MariaDB 客户端），连不上 MySQL 隔 30 秒重试、共 3 次，告警里带报错原文；面板程序配置、nginx 依赖、GeoLite2-City、ufw 国家屏蔽规则照收，恢复时少下载。
 - `newapi-fullbackup.sh` 从落地机拉取数据；SQLite 用在线备份 API 生成一致性快照，避免直接复制运行中的 WAL 数据库。
 - `litellm-fullbackup.sh` 从 LiteLLM 节点拉取数据：在节点上 `docker exec litellm-postgres pg_dump -U litellm -Fc litellm`（事务快照，一致且不停服；**绝不复制运行中的 `pgdata/`**），并用容器自己的 `pg_restore --list` 读一遍，读不开就整轮失败；工作目录 `LITELLM_WORKDIR` 除 `pgdata/` 与日志外全收（`.env`、`config.yaml`、`docker-compose.yml`）。SSH 端口取 `LITELLM_SSH_PORT`，没有就取 `~/.vps-hosts.txt`，再没有用 22。
 - **LiteLLM 的 Redis 不备份**：`ops/deploy-litellm` 起的 Redis 只作响应缓存（`config.yaml` 的 `cache_params`），compose 里就关了持久化（`--save "" --appendonly no`），重启本来就是空的，里面没有要留的状态。

@@ -2,6 +2,14 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-10-16：MySQL 客户端优先用宝塔自带的；连不上时重试
+
+2026-10-15 UTC 20:00 生产 hk-host-backup 失败：PATH 里的 `mysql` 变成了 MariaDB 客户端，它默认找 `/run/mysqld/mysqld.sock`，宝塔的 MySQL 在 `/tmp/mysql.sock`（`--defaults-file` 不读 `/etc/my.cnf`），于是「连不上 MySQL」；同一时间 vault-backup 走 TCP，照常成功。另外 newapi-linkcheck 单次不通就报 `/fail`，Healthchecks 收到失败信号立刻 DOWN，用户觉得「掉线率很高」——实际 10-11 到 10-15 每天 288 次全通，10-16 失败 2 次。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `common.sh` | 1.4.0 → 1.4.1 | 新增 `bk_mysql_bin`（优先 `/www/server/mysql/bin`，`BK_MYSQL_BIN_DIR` 可改）；`bk_mysql_ready` 连不上隔 `BK_MYSQL_RETRY_WAIT`（30）秒重试、共 `BK_MYSQL_TRIES`（3）次，告警带客户端路径和报错原文 |
+
 ## 2026-10-10：备份重新规划的公共部分
 
 | 文件 | 原版本 → 当前版本 | 变更 |

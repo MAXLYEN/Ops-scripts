@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/live-migrate.sh — 原机还在时的一键迁移（在旧机上运行）：预检 → 演练 → 停写切换 → DNS
-# VERSION: 2.0.0
+# VERSION: 2.0.1
+# 2.0.1: 新机上的 MySQL 客户端优先用宝塔自带的（/www/server/mysql/bin 放到 PATH 最前），PATH 里的可能是找错 socket 的 MariaDB 客户端。
 # 2.0.0: 按 2026-10 备份重新规划：现做的包是 hk-host 与 vault（hk-host-backup / vault-backup 的 --local-only），新机用这两个包恢复；旧的 vw-fullbackup / xboard-fullbackup 不再认。切换时暂停的备份定时任务也认 vault-backup、hk-host-backup、panel-backup-create（原先只认 *-fullbackup，新脚本会漏停）。
 # 1.1.1: standby（演练结束、回滚时新机退回待命）除了停容器，还停用并取消自启用原机身份上报的 komari-agent（回滚时它在新机上跑着，会和恢复服务的原机一起上报）；隧道单元不动。
 # 1.1.0: 演练时新机恢复带 --no-egress：容器不许主动连外网（原机还在服务，新机上的 Xboard 会重复给用户发提醒邮件，Komari 看到被控端全离线会告警）；切换那次恢复不带它，起容器前撤掉；回滚时新机先加回限制再停容器。「DNS 已经改好」的确认改用公共库的 is_yes（前后空格、大小写、全角字符不再让 yes 被当成否）。
@@ -91,7 +92,7 @@ lm_agent() {
   shift
   # shellcheck disable=SC1091
   [ -r /etc/ops-scripts/env.conf ] && . /etc/ops-scripts/env.conf >/dev/null 2>&1
-  command -v mysql >/dev/null 2>&1 || { [ -x /www/server/mysql/bin/mysql ] && PATH="/www/server/mysql/bin:$PATH"; }
+  [ -x /www/server/mysql/bin/mysql ] && PATH="/www/server/mysql/bin:$PATH"   # 优先面板自带的：PATH 里的可能是 MariaDB 客户端
   case "$act" in
     probe) lm_probe "$@" ;;
     prep)  mkdir -p /var/lib/ops-scripts && printf '%s\t%s\t%s\n' "$1" "$2" "$(date -u +%FT%TZ)" > /var/lib/ops-scripts/live-migrate.target ;;

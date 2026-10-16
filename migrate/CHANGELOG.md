@@ -2,6 +2,15 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-10-16：MySQL 客户端优先用宝塔自带的
+
+2026-10-15 UTC 20:00 生产 hk-host-backup 失败：PATH 里的 `mysql` 变成了 MariaDB 客户端，它默认找 `/run/mysqld/mysqld.sock`，宝塔的 MySQL 在 `/tmp/mysql.sock`（`--defaults-file` 不读 `/etc/my.cnf`），于是「连不上 MySQL」；同一时间 vault-backup 走 TCP，照常成功。另外 newapi-linkcheck 单次不通就报 `/fail`，Healthchecks 收到失败信号立刻 DOWN，用户觉得「掉线率很高」——实际 10-11 到 10-15 每天 288 次全通，10-16 失败 2 次。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `restore-from-backup.sh` | 2.0.1 → 2.0.2 | `/www/server/mysql/bin` 有就放到 PATH 最前（原先只在 PATH 里没有 mysql 时才加） |
+| `live-migrate.sh` | 2.0.0 → 2.0.1 | 同上 |
+
 ## 2026-10-10：缺 .sha256 改为告警；旧格式包的后备用法
 
 用户 2026-10-10 要求「所有备份文件都要 sha256」：五类包（vault、hk-host、newapi、litellm、面板整机）在本机和两个网盘都配 `.sha256`，每周校验要核对，恢复与演练下载后要核对。

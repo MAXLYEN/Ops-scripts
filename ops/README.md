@@ -81,7 +81,7 @@ opsget ops/litellm-drill teardown <备用机IP>           # 删掉演练实例�
 | `fix-newapi-quota-data.sh` | 1.1.0 | 按已修正的日志重算 new-api 配额统计（按组合汇总核对，兼容拆行） |
 | `fix-newapi-reprice.sh` | 1.1.0 | 按后台当前价格重算指定模型的历史消费（日志、用户、令牌、渠道）；`--align-channels` 把渠道已用额度对齐到非测试日志 |
 | `newapi-drill.sh` | 1.2.0 | 在备用机演练 new-api 备份的恢复与清理 |
-| `newapi-linkcheck.sh` | 1.0.3 | 检查 new-api 隧道和公网访问全链路 |
+| `newapi-linkcheck.sh` | 1.1.0 | 检查 new-api 隧道和公网访问全链路；不通先隔 20 秒重探，两次都不通才报失败 |
 | `newapi-log-prune.sh` | 1.0.3 | 清理超过保留期的 new-api 消费日志 |
 
 ## 清理
