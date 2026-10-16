@@ -138,6 +138,8 @@ opsget --unpin               # 取消固定，回到 main
 3. 验证通过后打 tag 并推送：`git tag -a v2026.09.24 -m "<说明>" && git push origin v2026.09.24`，同一天再发用 `v2026.09.24.1`
 4. 其余机器 `opsget --pin <新 tag> && opsget -u`，需要更新的脚本再逐个 `opsget -i`
 
+`opsget -u` 只换引导器、`common.sh` 和菜单，已装的脚本不跟着变。回滚也一样：`opsget --pin <旧 tag> && opsget -u` 之后，这一版改过的脚本要逐个 `opsget -i` 装回旧版（新版脚本可能调用旧 `common.sh` 里没有的函数），最后 `opsget --outdated` 应显示全部一致。
+
 tag 发布后不要移动，有问题就打新 tag。`--pin` 会拒绝 `main`、拒绝仓库里取不到的 ref，也拒绝 opsget 早于 1.4.0 的 ref —— 固定到那里再 `opsget -u`，会装回一个不读固定文件的旧引导器，固定就悄悄失效了。
 
 ## 改完云端立刻验证
