@@ -6,6 +6,7 @@
 # crontab 合并与统一时间表、演练清理。证明不了：真实 MySQL 导入、容器启动、nginx、宝塔、systemd。
 
 load helpers
+load fake-pg
 
 setup_file() { mock_build; http_start; }
 teardown_file() { http_stop; }
@@ -19,7 +20,7 @@ setup() {
   reset_host
   rm -rf "$R" "$FDB" /tmp/pkgsrc /tmp/pkgs /root/ops-backups /root/.ssh /root/.ssh.bak.* /root/.my.cnf* /root/deploy \
          /usr/local/sbin/ops-drill-egress /etc/systemd/system/ops-drill-egress.service /tmp/ipt.rules \
-         /tmp/docker.calls /tmp/docker.down-fails /tmp/nginx.calls
+         /tmp/docker.calls /tmp/docker.down-fails /tmp/nginx.calls /tmp/fakepg
   mkdir -p /tmp/pkgs "$R/vhost"
   printf 'correct-horse-battery-staple-01\n' > "$PASSF"; chmod 600 "$PASSF"
   touch /root/.my.cnf
@@ -1089,4 +1090,126 @@ ufw_cleanup() { rm -rf /etc/ufw /etc/ufw.bak.* /etc/ssh/sshd_config.bak.*; }
   crontab -l | grep -q -- '-n /var/lock/newapi-fullbackup-cron.lock /usr/local/bin/newapi-fullbackup.sh'
   has "原来和其他备份脚本共用外层锁 /var/lock/fullbackup.lock"
   crontab -l > /tmp/c1; cron_install --apply; has "无需改动"; crontab -l | diff /tmp/c1 -
+}
+
+# ── 宝塔 PostgreSQL（hk-host 1.1.0 起的包）──────────────────
+PGB=/tmp/fakepg/bin
+PGS=/tmp/fakepg/st
+# 在 make_split 打出的 hk-host 包里加上 PostgreSQL：角色、openwebui 库（带 pgvector）、pg_hba.conf 与 auto.conf
+add_pg_to_hk() {
+  local s=/tmp/pkgsrc/hk
+  mkdir -p "$s/db/pg" "$s/rootfs$R/pgdata" "$s/system/ref/pgsql"
+  printf '%s\n' 'SET default_transaction_read_only = off;' 'CREATE ROLE openwebui;' \
+    "ALTER ROLE openwebui WITH NOSUPERUSER LOGIN PASSWORD 'SCRAM-SHA-256\$4096:ow';" \
+    'CREATE ROLE postgres;' "ALTER ROLE postgres WITH SUPERUSER LOGIN PASSWORD 'SCRAM-SHA-256\$4096:pg';" > "$s/db/pg-globals.sql"
+  printf '%s\t%s\tUTF8\tC.UTF-8\tC.UTF-8\n' openwebui openwebui postgres postgres > "$s/db/pg-databases.tsv"
+  pg_dump_body > "$s/db/pg/openwebui.dump"
+  echo 'host openwebui openwebui 172.16.0.0/12 scram-sha-256' > "$s/rootfs$R/pgdata/pg_hba.conf"
+  echo "listen_addresses = '*'" > "$s/rootfs$R/pgdata/postgresql.auto.conf"
+  echo 17.11 > "$s/system/ref/pgsql/server_version"
+  printf '%s\n' "db/pg-globals.sql	-	-	pg-globals" "db/pg/openwebui.dump	-	-	pg-db" \
+    "$R/pgdata/pg_hba.conf	600	root:root	pg-conf" "$R/pgdata/postgresql.auto.conf	600	root:root	pg-conf" >> "$s/restore-manifest.tsv"
+  seal "$s" "$HK" tar
+}
+pg_local() {  # 新机：宝塔已装好 PostgreSQL（数据目录有 PG_VERSION、默认的 pg_hba.conf），本机只有 postgres 角色
+  fake_pg "$PGB" "$PGS"
+  touch "$PGS/role/postgres"
+  mkdir -p "$R/pgdata"; echo 17 > "$R/pgdata/PG_VERSION"; echo 'local all all trust' > "$R/pgdata/pg_hba.conf"
+  printf '%s\n' "PG_BIN_DIR=$PGB" "PG_DATA_DIR=$R/pgdata" "PG_RESTART_CMD='touch $PGS/restarted'" >> /etc/ops-scripts/env.conf
+}
+
+@test "PostgreSQL：先导角色（本机的 postgres 不动），再按原属主、编码、排序规则建库导入；配置放回并重启 PostgreSQL" {
+  make_split; add_pg_to_hk; v2_local; pg_local
+  restore check "$HK" "$VA"
+  echo "$output"
+  has "openwebui.dump：PostgreSQL 导出，文件头完整"
+  has "PostgreSQL 可用（17.11；原机 17.11）"
+  [ ! -e "$PGS/role/openwebui" ]
+  [ ! -d "$PGS/db/openwebui" ]         # check 不改本机
+  fake_docker; fake_nginx                                                    # 不带 --no-start 才会真的重启 PostgreSQL
+  restore restore "$HK" "$VA"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ -e "$PGS/role/openwebui" ]
+  grep -q "SQL ALTER ROLE openwebui WITH NOSUPERUSER LOGIN PASSWORD 'SCRAM-SHA-256" "$PGS/log"
+  none 'SQL (CREATE|ALTER) ROLE postgres' "$(cat "$PGS/log")"
+  grep -qF "SQL CREATE DATABASE \"openwebui\" OWNER \"openwebui\" ENCODING 'UTF8' LC_COLLATE 'C.UTF-8' LC_CTYPE 'C.UTF-8' TEMPLATE template0" "$PGS/log"
+  grep -qx 'RESTORE openwebui' "$PGS/log"
+  # 先角色、再建库、再导入
+  [ "$(grep -n '^SQL CREATE ROLE openwebui' "$PGS/log" | cut -d: -f1)" -lt "$(grep -n '^SQL CREATE DATABASE' "$PGS/log" | cut -d: -f1)" ]
+  [ "$(grep -n '^SQL CREATE DATABASE' "$PGS/log" | cut -d: -f1)" -lt "$(grep -n '^RESTORE openwebui' "$PGS/log" | cut -d: -f1)" ]
+  has "PostgreSQL 角色 1 个（含密码哈希；本机的 postgres 不动）"
+  has "PostgreSQL 库 openwebui：2 张表"
+  # 配置：宝塔的默认 pg_hba.conf 留 .bak 再换成原机的，放完重启
+  grep -q 'scram-sha-256' "$R/pgdata/pg_hba.conf"
+  ls "$R/pgdata"/pg_hba.conf.bak.* >/dev/null
+  [ "$(stat -c %a "$R/pgdata/pg_hba.conf")" = 600 ]
+  [ -e "$PGS/restarted" ]
+  has "PostgreSQL 已按原机配置重启"
+  # 重跑：库已恢复过，跳过
+  rm -f "$PGS/restarted"; : > "$PGS/log"
+  restore restore "$HK" "$VA"
+  [ "$status" -eq 0 ]
+  has "PostgreSQL 库 openwebui：已恢复过，跳过"
+  none '^RESTORE' "$(cat "$PGS/log")"
+}
+
+@test "PostgreSQL 还没装：配置不放（不碰空的数据目录），角色和库列进手动步骤，其余照常恢复" {
+  make_split; add_pg_to_hk; v2_local
+  restore restore "$HK" "$VA" --no-start
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ ! -e "$R/pgdata" ]
+  has "本机还没装 PostgreSQL"
+  has "在面板装 PostgreSQL（原机 17.11）并把 pgvector 编译装进去，再重跑本脚本导入角色和库"
+  grep -qx 'IMPORT xboard' "$FDB/log"                                       # MySQL 那边照常
+}
+
+@test "PostgreSQL 库要的扩展（pgvector）本机没有：check 提示，restore 动手前就停，本机没有改动" {
+  make_split; add_pg_to_hk; v2_local; pg_local
+  touch "$PGS/no-ext-vector"
+  restore check "$HK" "$VA"
+  has "本机 PostgreSQL 没有这些库要的扩展（库:扩展）： openwebui:vector"
+  restore restore "$HK" "$VA" --no-start
+  [ "$status" -ne 0 ]
+  has "pgvector 要手动编译装进宝塔的 PostgreSQL"
+  [ ! -e "$PGS/role/openwebui" ]
+  none '^IMPORT [a-z]' "$(cat "$FDB/log" 2>/dev/null)"
+  grep -qx 'local all all trust' "$R/pgdata/pg_hba.conf"
+}
+
+@test "PostgreSQL：原机的排序规则本机建不出来就用默认的并告警；--no-start 时重启列进手动步骤" {
+  make_split; add_pg_to_hk; v2_local; pg_local
+  touch "$PGS/no-locale"
+  restore restore "$HK" "$VA" --no-start
+  echo "$output"
+  has "PostgreSQL 库 openwebui：2 张表"
+  has "按原机的排序规则 C.UTF-8 建不出来"
+  grep -qF "SQL CREATE DATABASE \"openwebui\" OWNER \"openwebui\" ENCODING 'UTF8' TEMPLATE template0" "$PGS/log"
+  has "重启 PostgreSQL 让放回的配置生效：touch $PGS/restarted"
+  [ ! -e "$PGS/restarted" ]
+}
+
+@test "PostgreSQL：本机已有同名库、里面有表算冲突，不带 --force 拒绝" {
+  make_split; add_pg_to_hk; v2_local; pg_local
+  mkdir -p "$PGS/db/openwebui"; echo 5 > "$PGS/db/openwebui/tables"
+  restore restore "$HK" "$VA" --no-start
+  [ "$status" -ne 0 ]
+  has "库已存在，有 5 张表"
+  none '^RESTORE' "$(cat "$PGS/log")"
+}
+
+@test "演练 teardown：删掉恢复出来的 PostgreSQL 库与角色，本机原有的 postgres 角色不动" {
+  make_split; add_pg_to_hk; v2_local; pg_local
+  restore restore "$HK" "$VA" --no-start --drill
+  echo "$output"
+  [ -d "$PGS/db/openwebui" ]
+  [ -e "$PGS/role/openwebui" ]
+  OPS_YES=1 restore teardown
+  echo "$output"
+  [ ! -d "$PGS/db/openwebui" ]
+  [ ! -e "$PGS/role/openwebui" ]
+  [ -e "$PGS/role/postgres" ]
+  has "删 PostgreSQL 库 openwebui"
+  has "删 PostgreSQL 角色 openwebui"
 }

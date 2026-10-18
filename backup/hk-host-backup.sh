@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # backup/hk-host-backup.sh — 前置机整机备份：系统配置、面板、nginx 与证书、ufw、全部 MySQL 账号与业务库（Xboard 等）、
-#                            Xboard 目录、Komari、SubConverter、站点；加密上传。每天一次
-# VERSION: 1.0.1
+#                            宝塔 PostgreSQL 的角色与库（Open WebUI 等）、Xboard 目录、Komari、SubConverter、站点；加密上传。每天一次
+# VERSION: 1.1.0
+# 1.1.0: 宝塔 PostgreSQL 进包（公共库 1.5.0 bk_pg：角色与密码哈希、每个库 pg_dump -Fc、配置文件；配了 PG_BIN_DIR 才做，连不上告警不中断）。
+#        compose 用 env_file 引用的文件一起收；EXTRA_SNAPSHOT_EXCLUDES 可排除目录里的缓存。
 # 1.0.1: mysql / mysqldump 优先用宝塔自带的客户端（公共库 bk_mysql_bin）：PATH 里的换成 MariaDB 客户端后找错 socket，2026-10-15 整轮失败。连不上 MySQL 时重试并在告警里带报错原文（公共库 1.4.1）。
 # 1.0.0: 首版。由 vw-fullbackup 与 xboard-fullbackup 合并去重：系统部分只在这一个包里，Vaultwarden 归 vault-backup。
 #        日志与历史数据只收表结构（公共库 bk_history_default、komari.db 的 logs / task_results）。不再带旧布局的副本（app/、nginx/、system/），恢复只认 rootfs。
@@ -63,8 +65,8 @@ hb() {
 }
 
 for v in RCLONE_REMOTES BACKUP_PASS_FILE MYSQL_DEFAULTS_FILE; do [ -n "${!v:-}" ] || die "配置项未填: $v（见 $ENV_FILE）"; done
-[ "$LIB_OK" -eq 1 ] && declare -F bk_local_dir >/dev/null \
-    || die "公共库缺失或版本过旧（需要 1.3.0 起），先运行 opsget -u"
+[ "$LIB_OK" -eq 1 ] && declare -F bk_pg >/dev/null \
+    || die "公共库缺失或版本过旧（需要 1.5.0 起），先运行 opsget -u"
 
 OUT_DIR="${LOCAL_ONLY:-$(bk_local_dir "$PKG")}"
 [ -n "$LOCAL_ONLY" ] && BACKUP_DIRS="${BACKUP_DIRS:-} $LOCAL_ONLY"
@@ -166,6 +168,8 @@ bk_system
 bk_mysql_users db/mysql-users.sql
 # 全部业务库（Xboard 等），历史表只导结构；Vaultwarden 的库在 vault 包，指标库按方案只留本地
 bk_mysql_dbs "$VW_DB" "${METRICS_DB_NAME:-metrics}"
+# 宝塔 PostgreSQL（Open WebUI、LobeHub 的账号、对话、向量）：没配 PG_BIN_DIR 就跳过
+bk_pg
 bk_compose_projects
 CTS=()
 for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null); do
@@ -188,7 +192,8 @@ log "  ✓ rootfs $(du -sh "$STAGE/rootfs" | cut -f1)，还原清单 $(grep -vc 
     docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null
     echo
     echo "---- 业务库 ----"
-    (cd "$STAGE" && ls db/ 2>/dev/null)
+    (cd "$STAGE" && find db -type f 2>/dev/null | sort)
+    [ -f "$STAGE/system/ref/pgsql/server_version" ] && echo "PostgreSQL: $(cat "$STAGE/system/ref/pgsql/server_version")"
     echo
     echo "---- 还原清单按类别 ----"
     grep -v '^#' "$BK_MANIFEST" | cut -f4 | sort | uniq -c
@@ -214,6 +219,9 @@ cat > "$STAGE/RESTORE.md" <<'EOF'
 - Xboard：`.env` 里的 APP_KEY 必须和库配套；**不要跑 `xboard:install`**（会重新生成 APP_KEY、清空库）；
   镜像按 digest 拉，不要按标签拉 latest（启动时的 migration 会改掉按旧版结构恢复的库）。
 - 面板域名不变的话，Xboard 各节点、Komari 被控端会自己重连。
+- 宝塔 PostgreSQL（`db/pg-globals.sql` 角色、`db/pg/<库>.dump`）：先在面板装同一大版本的 PostgreSQL、
+  把 pgvector 编译装进去（库里有 `CREATE EXTENSION vector`），再跑恢复；配置文件等 PostgreSQL 装好才放回，
+  `postgresql.conf` 只在 `system/ref/pgsql/` 作参考。
 - 证书文件能用 ≠ 会自动续期：恢复后在面板里确认续期任务还在。
 EOF
 

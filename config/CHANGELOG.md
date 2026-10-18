@@ -2,6 +2,12 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-10-18：PostgreSQL 与目录排除的键
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `env.example.conf` | 2.1.0 → 2.2.0 | 新增 `PG_BIN_DIR`、`PG_HOST`、`PG_PORT`、`PG_SUPERUSER`、`PG_OS_USER`、`PG_DATA_DIR`、`PG_SKIP_DBS`、`PG_RESTART_CMD`、`BK_PG_TRIES`、`BK_PG_RETRY_WAIT`、`EXTRA_SNAPSHOT_EXCLUDES` |
+
 ## 2026-10-16：MySQL 重试与链路重探的可选键
 
 | 文件 | 原版本 → 当前版本 | 变更 |

@@ -115,7 +115,7 @@ cat "$(. /etc/ops-scripts/env.conf; echo "${BACKUP_PASS_FILE:-$VW_PASS_FILE}")"
 
 | 目录 | 文件 | 内容 |
 | --- | --- | --- |
-| `Backups/hk-host` | `hk-host_YYYYMMDD_HHMMSS.7z` | 前置机整机：系统、面板、nginx 与证书、全部账号与业务库（Xboard 等）、Xboard、Komari、站点（每天一份） |
+| `Backups/hk-host` | `hk-host_YYYYMMDD_HHMMSS.7z` | 前置机整机：系统、面板、nginx 与证书、MySQL 与 PostgreSQL 的全部账号与业务库（Xboard、Open WebUI 等）、Xboard、Komari、Open WebUI 等容器的配置、站点（每天一份） |
 | `Backups/vault` | `vault_YYYYMMDD_HHMMSS.7z` | Vaultwarden（每小时一份） |
 | `Backups/newapi` | `newapi_YYYYMMDD_HHMMSS.7z` | new-api 落地机 |
 | `Backups/litellm` | `litellm_YYYYMMDD_HHMMSS.7z` | LiteLLM 节点 |
@@ -179,6 +179,26 @@ opsget init/run
    ```
 
 3. **备份依赖与 rclone**：`restore-from-backup` 1.5.0 起恢复时自动装（任何模式），这里不用手动做。要自己装时注意两点：rclone **一定用官方版**（`curl -fsSL https://rclone.org/install.sh -o /tmp/rclone-install.sh && bash /tmp/rclone-install.sh`；发行版源里的 rclone 太旧，Debian 12 是 1.60，对 OneDrive 能列目录、下载却报 `unauthenticated`，从网盘取包这条路就断了）；其余用 `DEBIAN_FRONTEND=noninteractive apt-get install -y msmtp msmtp-mta p7zip-full rsync sqlite3`。**装软件一律加 `DEBIAN_FRONTEND=noninteractive`**：有的终端显示不了 debconf 的全屏对话框，看起来就像卡死。
+
+4. **PostgreSQL、Redis 与 pgvector**（`manifest.txt` 里有 `PostgreSQL:` 一行时）：在面板软件商店装 **PostgreSQL（同一大版本，原机是 17）**和 **Redis**。Open WebUI、LobeHub 的库要用 pgvector，宝塔商店里没有，要自己编译进宝塔的 PostgreSQL（只编译扩展，不重新编译 PostgreSQL；宝塔升级或重装 PostgreSQL 后要重做）：
+
+   ```bash
+   DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential
+   ```
+
+   ```bash
+   curl -fsSL -o /root/pgvector-0.8.7.tar.gz https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.7.tar.gz
+   ```
+
+   ```bash
+   echo 'cac0b10c360f05b2d521200105ba3697e773d4cd3731f5a915a7e37ebe0bea85  /root/pgvector-0.8.7.tar.gz' | sha256sum -c -
+   ```
+
+   ```bash
+   tar -xzf /root/pgvector-0.8.7.tar.gz -C /root && make -C /root/pgvector-0.8.7 PG_CONFIG=/www/server/pgsql/bin/pg_config OPTFLAGS="" && make -C /root/pgvector-0.8.7 PG_CONFIG=/www/server/pgsql/bin/pg_config OPTFLAGS="" install
+   ```
+
+   `OPTFLAGS=""` 不按本机 CPU 优化，换机器也能用。没装 pgvector 的话恢复脚本会在动手前停下，告诉你哪个库缺哪个扩展。
 
 宝塔安装本身要 40 分钟以上（真机演练实测 46 分钟），是整个恢复里最长的一步，可以趁这时候去做落地机（4.8）。
 
@@ -260,6 +280,10 @@ restore-from-backup.sh restore /root/pkgs/srvbak_*.7z /root/pkgs/xboard_*.7z
 OneDrive 取不到就把 `onedrive:` 换成 `gdrive:`。这些包停在 2026-10-10，恢复出来的是那时的数据；恢复后照样装新的 `vault-backup`、`hk-host-backup` 和新时间表。
 
 恢复会自动完成：文件（权限、属主跟原机一致）、数据库和全部账号、各服务数据、按原版本拉镜像并启动容器、systemd 单元（包括连落地机的隧道）、Nginx、定时任务（按新频率）。最后 MySQL 的 root 密码也会改成原机的；系统时区不是 UTC 的话改成 UTC（定时任务按 UTC 写）。
+
+包里有 PostgreSQL 时还会：先导角色（含密码哈希，新机的 `postgres` 不动），再按原机的属主、编码、排序规则建库，用 `pg_restore` 导入；放回 `pg_hba.conf`、`postgresql.auto.conf`（原文件留 `.bak`）后用 `/etc/init.d/pgsql restart` 重启（宝塔的 PostgreSQL 用 `systemctl restart` 不生效）；ufw 放行容器网段访问 5432。`postgresql.conf` 不放回，只在包里 `system/ref/pgsql/` 作参考：内存参数是按原机规格配的，按新机规格在面板里调。PostgreSQL 还没装好的话，这部分列进「还要手动做的事」，装好后重跑 `restore` 即可，其余部分不受影响。
+
+还有两件手动做的事会列出来：`systemctl restart systemd-logind`（让原机的 `RemoveIPC=no` 生效，没有它 postgres 的共享内存会被删、PostgreSQL 出错；不影响已登录的 SSH），以及重启宝塔 Redis（`redis.conf` 换成了原机的，含原机的密码）。
 
 恢复放回的是原机的面板配置，面板一重启就换到**原机的面板端口**（之前经 SSH 通道开面板的，通道要改转新端口）；反代到面板的那个站点在面板换端口之前是 404。
 

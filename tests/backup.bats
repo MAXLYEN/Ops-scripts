@@ -2,6 +2,8 @@
 # tests/backup.bats — 备份包公共函数：GFS 分级保留、rootfs 采集与还原清单、MySQL 账号导出
 # 在一次性容器里以 root 运行，会在 /tmp、/etc/systemd/system 下建测试文件。
 
+load fake-pg
+
 setup() {
   # shellcheck disable=SC1091
   . /src/lib/common.sh
@@ -609,4 +611,148 @@ SH
   [ -n "$(ls "$T/cloud/onedrive/Backups/hk-host" | awk -v c="$(TZ=UTC date -d "@$(( $(date +%s) - 181 * 86400 ))" +%Y%m%d)" -F_ '$2 < c')" ]
   # 30 天内每天一份全在
   [ "$(ls "$T/local/hk-host" | awk -v c="$(TZ=UTC date -d "@$(( $(date +%s) - 29 * 86400 ))" +%Y%m%d)" -F_ '$2 >= c' | wc -l)" -ge 28 ]
+}
+
+# ── PostgreSQL（宝塔）────────────────────────────────────────
+pg_setup() {  # 假 PostgreSQL：openwebui 带 pgvector 两张表，lobehub 空库，postgres 库不导
+  fake_pg "$T/pgbin" "$T/pgst"
+  PG_BIN_DIR="$T/pgbin" PG_DATA_DIR="$T/pgdata" BK_PG_RETRY_WAIT=0
+  printf '%s\t%s\tUTF8\tC.UTF-8\tC.UTF-8\n' openwebui openwebui lobehub lobehub postgres postgres > "$T/pgst/databases.tsv"
+  printf '%s\n' 'SET default_transaction_read_only = off;' 'CREATE ROLE lobehub;' \
+    "ALTER ROLE lobehub WITH LOGIN PASSWORD 'SCRAM-SHA-256\$4096:lb';" 'CREATE ROLE openwebui;' \
+    "ALTER ROLE openwebui WITH LOGIN PASSWORD 'SCRAM-SHA-256\$4096:ow';" 'CREATE ROLE postgres;' \
+    'ALTER ROLE postgres WITH SUPERUSER;' > "$T/pgst/globals.sql"
+  pg_dump_body > "$T/pgst/src/openwebui"
+  mkdir -p "$T/pgdata"
+  for f in pg_hba.conf postgresql.auto.conf postgresql.conf; do echo "# $f" > "$T/pgdata/$f"; done
+  chmod 600 "$T/pgdata"/*
+}
+
+@test "PostgreSQL：角色与密码哈希、每个库 pg_dump -Fc（postgres 库不导）、配置记 pg-conf，postgresql.conf 只作参考" {
+  LOG_FILE=$T/log; log() { printf '%s\n' "$*" >> "$LOG_FILE"; }
+  pg_setup
+  bk_init "$T/pkg"
+  bk_pg
+  cat "$LOG_FILE"
+  [ ! -s "$WARN_LOG" ]
+  grep -q "ALTER ROLE openwebui WITH LOGIN PASSWORD 'SCRAM-SHA-256" "$T/pkg/db/pg-globals.sql"
+  [ "$(head -c 5 "$T/pkg/db/pg/openwebui.dump")" = PGDMP ]
+  [ -f "$T/pkg/db/pg/lobehub.dump" ]
+  [ ! -e "$T/pkg/db/pg/postgres.dump" ]
+  grep -qP '^db/pg-globals\.sql\t-\t-\tpg-globals$' "$T/pkg/restore-manifest.tsv"
+  grep -qP '^db/pg/openwebui\.dump\t-\t-\tpg-db$' "$T/pkg/restore-manifest.tsv"
+  grep -qP "^$T/pgdata/pg_hba\.conf\t600\t[^\t]+\tpg-conf$" "$T/pkg/restore-manifest.tsv"
+  grep -qP "^$T/pgdata/postgresql\.auto\.conf\t600\t[^\t]+\tpg-conf$" "$T/pkg/restore-manifest.tsv"
+  [ -z "$(grep -F 'postgresql.conf' "$T/pkg/restore-manifest.tsv")" ]
+  [ -f "$T/pkg/system/ref/pgsql/postgresql.conf" ]
+  [ "$(cat "$T/pkg/system/ref/pgsql/server_version")" = 17.11 ]
+  grep -q '角色 3 个' "$LOG_FILE"
+  grep -q 'PostgreSQL 库 openwebui（属主 openwebui，.*2 张表，扩展 vector）' "$LOG_FILE"
+  grep -q 'PostgreSQL 库 lobehub（属主 lobehub，.*0 张表）' "$LOG_FILE"
+  # 以超级用户经 socket 连，导出用自定义格式
+  grep -q -- "pg_dump -h /tmp -p 5432 -U postgres -Fc -d openwebui" "$T/pgst/log"
+  grep -q -- "pg_dumpall -h /tmp -p 5432 -U postgres --globals-only" "$T/pgst/log"
+}
+
+@test "PostgreSQL：没配 PG_BIN_DIR 就跳过；连不上隔一会儿重试，一直连不上就告警带报错原文；一个库导不出告警、其余照导" {
+  LOG_FILE=$T/log; log() { printf '%s\n' "$*" >> "$LOG_FILE"; }
+  sleep() { echo "sleep $*" >> "$T/sleep"; }
+  bk_init "$T/pkg"
+  unset PG_BIN_DIR
+  bk_pg
+  grep -q '没配 PG_BIN_DIR，跳过 PostgreSQL' "$LOG_FILE"
+  [ ! -s "$WARN_LOG" ]
+  [ ! -e "$T/pkg/db/pg" ]
+  pg_setup
+  echo 1 > "$T/pgst/down"                        # 第一次连不上，重试成功
+  bk_pg
+  grep -q '连不上 PostgreSQL（第 1/3 次）：psql: error: connection to server on socket' "$LOG_FILE"
+  [ ! -s "$WARN_LOG" ]
+  [ -f "$T/pkg/db/pg/openwebui.dump" ]
+  : > "$T/pgst/down"                              # 一直连不上
+  run bk_pg
+  [ "$status" -ne 0 ]
+  grep -q 'PostgreSQL（/tmp:5432，用户 postgres）连不上（试了 3 次）：psql: error: connection' "$WARN_LOG"
+  rm -f "$T/pgst/down"; : > "$WARN_LOG"; rm -rf "$T/pkg"; bk_init "$T/pkg"
+  touch "$T/pgst/dump-fail-openwebui"
+  bk_pg
+  grep -q 'PostgreSQL 库 openwebui 导出失败' "$WARN_LOG"
+  [ ! -e "$T/pkg/db/pg/openwebui.dump" ]
+  [ -f "$T/pkg/db/pg/lobehub.dump" ]
+  [ -z "$(grep -F 'openwebui.dump' "$T/pkg/restore-manifest.tsv")" ]
+}
+
+@test "PG_OS_USER：切到这个系统用户执行（先 cd /），输出仍由 root 写进包" {
+  pg_setup
+  id postgres >/dev/null 2>&1 || useradd -r -M -d /nonexistent postgres
+  chmod 755 "$T" "$T/pgbin"; touch "$T/pgst/log"; chmod -R a+rwX "$T/pgst"   # 假实现以 postgres 身份写状态
+  PG_OS_USER=postgres
+  bk_init "$T/pkg"
+  bk_pg
+  [ ! -s "$WARN_LOG" ]
+  [ "$(stat -c %U "$T/pkg/db/pg/openwebui.dump")" = root ]
+  [ "$(head -c 5 "$T/pkg/db/pg/openwebui.dump")" = PGDMP ]
+}
+
+@test "compose 的 env_file：三种写法都认，相对路径按项目目录算；bk_compose_projects 把它们收进包" {
+  mkdir -p "$T/app"
+  cat > "$T/app/compose.yaml" <<'YML'
+services:
+  web:
+    image: x
+    env_file: db.env
+  api:
+    image: y
+    env_file: [ ./a.env, "/etc/shared.env" ]   # 注释
+  worker:
+    env_file:
+      - ./redis.env
+      - path: ./opt.env
+        required: false
+    ports:
+      - "3080:8080"
+YML
+  run bk_compose_env_files "$T/app" "$T/app/compose.yaml"
+  [ "$output" = "$T/app/db.env
+$T/app/a.env
+/etc/shared.env
+$T/app/redis.env
+$T/app/opt.env" ]
+  # 收进包：compose 文件、.env、env_file 引用的（不存在的跳过）
+  for f in .env db.env redis.env; do echo "K=$f" > "$T/app/$f"; done; chmod 600 "$T/app/db.env"
+  mkdir -p "$T/bin"
+  printf '#!/bin/bash\ncase "$1 $2" in "ps -a") echo app-web-1 ;; esac\ncase "$*" in *working_dir*) echo %s ;; *config_files*) echo %s/compose.yaml ;; esac\nexit 0\n' "$T/app" "$T/app" > "$T/bin/docker"
+  chmod +x "$T/bin/docker"
+  PATH="$T/bin:$PATH"
+  bk_init "$T/pkg"
+  bk_compose_projects
+  for f in compose.yaml .env db.env redis.env; do [ -f "$T/pkg/rootfs$T/app/$f" ]; done
+  grep -qP "^$T/app/db\.env\t600\t" "$T/pkg/restore-manifest.tsv"
+  grep -q "compose 项目 $T/app（容器 app-web-1）的数据没有备份" "$WARN_LOG"   # 只收了配置，数据目录没收照样告警
+}
+
+@test "EXTRA_SNAPSHOT_EXCLUDES：EXTRA_SNAPSHOT_PATHS 里的目录排除缓存与旧副本（可带通配），记进未进包清单" {
+  mkdir -p /opt/bk-ex/data/cache /opt/bk-ex/data/uploads /opt/bk-ex/data.sqlite-20261017T165832Z
+  echo big > /opt/bk-ex/data/cache/model.bin; echo f > /opt/bk-ex/data/uploads/a.pdf
+  echo old > /opt/bk-ex/data.sqlite-20261017T165832Z/webui.db; echo 'K=1' > /opt/bk-ex/db.env
+  EXTRA_SNAPSHOT_PATHS="/opt/bk-ex/" EXTRA_SNAPSHOT_EXCLUDES="/opt/bk-ex/data/cache /opt/bk-ex/data.sqlite-* /other/x"
+  bk_init "$T/pkg"
+  run bk_system
+  [ -f "$T/pkg/rootfs/opt/bk-ex/data/uploads/a.pdf" ]
+  [ -f "$T/pkg/rootfs/opt/bk-ex/db.env" ]
+  [ ! -e "$T/pkg/rootfs/opt/bk-ex/data/cache" ]
+  [ ! -e "$T/pkg/rootfs/opt/bk-ex/data.sqlite-20261017T165832Z" ]
+  grep -qP '^/opt/bk-ex\t755\troot:root\tdir$' "$T/pkg/restore-manifest.tsv"
+  grep -q '/opt/bk-ex/data/cache.*EXTRA_SNAPSHOT_EXCLUDES' "$T/pkg/system/rootfs-skipped.txt"
+  [ -z "$(grep -F '/other/x' "$T/pkg/system/rootfs-skipped.txt")" ]
+  rm -rf /opt/bk-ex
+}
+
+@test "logind 的 drop-in（RemoveIPC=no）进包" {
+  mkdir -p /etc/systemd/logind.conf.d
+  printf '[Login]\nRemoveIPC=no\n' > /etc/systemd/logind.conf.d/10-postgres-removeipc.conf
+  bk_init "$T/pkg"
+  run bk_system
+  grep -q 'RemoveIPC=no' "$T/pkg/rootfs/etc/systemd/logind.conf.d/10-postgres-removeipc.conf"
+  rm -rf /etc/systemd/logind.conf.d
 }

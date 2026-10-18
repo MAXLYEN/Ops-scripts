@@ -2,6 +2,14 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-10-18：恢复宝塔 PostgreSQL
+
+2026-10-17 前置机上线了 Open WebUI（数据在宝塔 PostgreSQL 17 的 openwebui 库，向量用 pgvector），LobeHub 也要用这套 PostgreSQL 和宝塔 Redis；hk-host 包原先只导 MySQL，这些都不在备份里，hk-host-backup 每晚报「compose 项目 /opt/open-webui 的数据没有备份」。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `restore-from-backup.sh` | 2.0.2 → 2.1.0 | 新类型 `pg-globals`（导角色，本机 `postgres` 不动）、`pg-db`（按原属主、编码、排序规则建库，`pg_restore --single-transaction`；locale 建不出来退回默认并告警；已有非空库算冲突）、`pg-conf`（本机装好 PostgreSQL 才放回，放完 `PG_RESTART_CMD` 重启）；库要的扩展本机没有就在动手前停；PostgreSQL 不可用时列进手动步骤、其余照常；ufw 放行容器网段访问 PostgreSQL 端口；logind drop-in、宝塔 Redis 配置放回后提示重启；演练 teardown 删 PostgreSQL 库与角色 |
+
 ## 2026-10-16：MySQL 客户端优先用宝塔自带的
 
 2026-10-15 UTC 20:00 生产 hk-host-backup 失败：PATH 里的 `mysql` 变成了 MariaDB 客户端，它默认找 `/run/mysqld/mysqld.sock`，宝塔的 MySQL 在 `/tmp/mysql.sock`（`--defaults-file` 不读 `/etc/my.cnf`），于是「连不上 MySQL」；同一时间 vault-backup 走 TCP，照常成功。另外 newapi-linkcheck 单次不通就报 `/fail`，Healthchecks 收到失败信号立刻 DOWN，用户觉得「掉线率很高」——实际 10-11 到 10-15 每天 288 次全通，10-16 失败 2 次。

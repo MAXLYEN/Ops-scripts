@@ -4,7 +4,7 @@
 
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
-| `env.example.conf` | 2.1.0 | 供运维脚本读取的环境配置模板 |
+| `env.example.conf` | 2.2.0 | 供运维脚本读取的环境配置模板 |
 
 ```bash
 install -d -m 700 /etc/ops-scripts

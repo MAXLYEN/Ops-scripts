@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.4.1
+# VERSION: 1.5.0
+# 1.5.0: 新增 PostgreSQL 进包（bk_pg：pg_dumpall --globals-only 导角色与密码哈希、每个非模板库 pg_dump -Fc 并用 pg_restore --list 读一遍；pg_hba.conf、postgresql.auto.conf、pg_ident.conf 记为 pg-conf，postgresql.conf 只作参考），PG_BIN_DIR 没配就跳过；连不上与 MySQL 同样重试、带报错原文（共用 _bk_try）。bk_compose_projects 也收 compose 用 env_file 引用的文件。EXTRA_SNAPSHOT_EXCLUDES 给 EXTRA_SNAPSHOT_PATHS 里的目录排除子路径。系统配置多收 /etc/systemd/logind.conf.d（PostgreSQL 要的 RemoveIPC=no）。
 # 1.4.1: 新增 bk_mysql_bin：宝塔机优先用面板自带、与服务端同版本的客户端（/www/server/mysql/bin），PATH 里的 mysql 可能被别的软件包换成 MariaDB 客户端，它默认找 /run/mysqld/mysqld.sock，连不上宝塔的 MySQL（2026-10-15 生产 hk-host-backup 因此失败）。bk_mysql_ready 连不上时隔 BK_MYSQL_RETRY_WAIT 秒（默认 30）重试，共 BK_MYSQL_TRIES 次（默认 3），告警里带上客户端路径和 MySQL 的报错原文。
 # 1.4.0: 按 2026-10 备份重新规划：新增 BK_PKGS、bk_local_dir / bk_cloud_dir（本机 <BACKUP_LOCAL_ROOT>/<包名>、网盘 <BACKUP_CLOUD_ROOT>/<包名>）、bk_stamp（UTC 时间戳，不看系统时区）、bk_tiers（按包的分级档位）、bk_upload（包与 .sha256 传到每个网盘并校验）、bk_prune_all（本机与每个网盘按档位清理）；bk_init 把 BACKUP_LOCAL_ROOT 当落盘目录排除，结尾显式 return 0（只配了一个不存在的落盘目录时原先返回失败）。
 # 1.3.0: 历史数据只收表结构：bk_mysql_dbs 对清单里的历史表（Xboard 的日志、统计、机器负载曲线、管理审计、流量重置记录、失败队列，vaultwarden 的 event）只导结构不导数据，记进 rootfs-skipped；清单由 bk_history_default 给出，BACKUP_HISTORY_TABLES 可整个改写。新增 bk_history_want / bk_history_pick / bk_history_tables，以及 bk_sqlite_strip（在包里的 SQLite 副本上清空历史表）。订单、支付、佣金照导。
@@ -640,6 +641,8 @@ bk_system() {
   bk_opt /etc/gai.conf
   bk_opt /etc/security/limits.d
   bk_opt /etc/docker/daemon.json
+  # logind 的 drop-in（如 RemoveIPC=no：没有它，postgres 用户的会话一结束共享内存就被删，PostgreSQL 出错）
+  bk_opt /etc/systemd/logind.conf.d
   bk_opt /etc/cron.d
   bk_opt /etc/logrotate.d
   bk_opt /etc/my.cnf
@@ -666,10 +669,22 @@ bk_system() {
   else
     rm -f "$BK_ROOT/system/crontab.txt"; log "  i root 没有 crontab"
   fi
-  # 配置里额外列出的路径：EXTRA_SNAPSHOT_PATHS 可缺，CRITICAL_FILES 缺了告警
+  # 配置里额外列出的路径：EXTRA_SNAPSHOT_PATHS 可缺，CRITICAL_FILES 缺了告警。
+  # 目录里不要的子路径写进 EXTRA_SNAPSHOT_EXCLUDES（完整路径，可带通配，如 /opt/app/data/cache）
+  local -a ex
+  local x
   for p in ${EXTRA_SNAPSHOT_PATHS:-}; do
     case "$p" in /usr/local/bin|/usr/local/bin/) continue ;; esac  # 已按单个文件收过
-    bk_opt "$p"
+    p=${p%/}
+    if [ -d "$p" ] && [ ! -L "$p" ]; then
+      ex=()
+      for x in ${EXTRA_SNAPSHOT_EXCLUDES:-}; do
+        case "$x" in "$p"/*) ex+=("$x"); bk_skip "$x" "EXTRA_SNAPSHOT_EXCLUDES 排除" ;; esac
+      done
+      bk_dir "$p" "${ex[@]+"${ex[@]}"}"
+    else
+      bk_opt "$p"
+    fi
   done
   for p in ${CRITICAL_FILES:-}; do
     if [ -e "$p" ]; then bk_opt "$p"; else warn "CRITICAL_FILES 里的 $p 不存在"; fi
@@ -736,7 +751,7 @@ bk_compose_projects() {
     # 先判断数据有没有进包，再收 compose 文件 —— 否则刚收的 compose 文件自己就算「已覆盖」
     covered=0
     awk -F'\t' -v d="$dir" '$1==d || index($1, d"/")==1 {f=1} END {exit !f}' "$BK_MANIFEST" && covered=1
-    for f in ${files//,/ } "$dir/.env"; do
+    for f in ${files//,/ } "$dir/.env" $(bk_compose_env_files "$dir" ${files//,/ }); do
       [ -f "$f" ] && ! bk_has_row "$f" && bk_file "$f"
     done
     if [ "$covered" -eq 1 ]; then
@@ -745,6 +760,41 @@ bk_compose_projects() {
       warn "compose 项目 $dir（容器 $c）的数据没有备份，还原时不会自动启动；需要的话把数据目录加进 EXTRA_SNAPSHOT_PATHS"
     fi
   done
+}
+
+# bk_compose_env_files <项目目录> <compose 文件...>：compose 里 env_file 引用的文件，每行一个绝对路径。
+# 认三种写法：env_file: a.env / env_file: [a.env, b.env] / 列表（含 - path: a.env 的长写法），相对路径按项目目录算
+bk_compose_env_files() {
+  local dir=$1 f p; shift
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    awk '
+      function out(s) { sub(/[[:space:]]+#.*$/, "", s); sub(/^path:[[:space:]]*/, "", s)
+                        gsub(/^[[:space:]"\047]+|[[:space:]"\047]+$/, "", s); if (s != "") print s }
+      /^[[:space:]]*env_file:/ {
+        s = $0; sub(/^[^:]*:[[:space:]]*/, "", s); sub(/[[:space:]]+#.*$/, "", s)
+        if (s == "") { inl = 1; next }
+        inl = 0; gsub(/[][]/, "", s); n = split(s, a, ","); for (i = 1; i <= n; i++) out(a[i]); next }
+      inl && /^[[:space:]]*-[[:space:]]/ { s = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", s); out(s); next }
+      inl && /^[[:space:]]*(required|format):/ { next }
+      { inl = 0 }' "$f"
+  done | while IFS= read -r p; do
+    case "$p" in /*) printf '%s\n' "$p" ;; *) printf '%s/%s\n' "$dir" "${p#./}" ;; esac
+  done
+}
+
+# _bk_try <名称> <次数> <间隔秒> <命令...>：命令失败就隔一会儿重试，全失败返回 1；最后一次的报错首行留在 BK_TRY_ERR
+_bk_try() {
+  local what=$1 n=$2 w=$3 i; shift 3
+  for ((i = 1; i <= n; i++)); do
+    BK_TRY_ERR=$("$@" 2>&1 >/dev/null) && return 0
+    BK_TRY_ERR=${BK_TRY_ERR%%$'\n'*}
+    if [ "$i" -lt "$n" ]; then
+      log "  连不上 $what（第 $i/$n 次）：${BK_TRY_ERR:-没有报错输出}，$w 秒后重试"
+      sleep "$w"
+    fi
+  done
+  return 1
 }
 
 # ── 备份包：MySQL ───────────────────────────────────────────
@@ -764,16 +814,9 @@ bk_mysql_bin() {
 bk_mysql_ready() {
   [ -n "${MYSQL_DEFAULTS_FILE:-}" ] && [ -r "$MYSQL_DEFAULTS_FILE" ] \
     || { warn "未配置可读的 MYSQL_DEFAULTS_FILE，全部账号与其余业务库没有进包"; return 1; }
-  local i n=${BK_MYSQL_TRIES:-3} err=""
-  for ((i = 1; i <= n; i++)); do
-    err=$(_bk_my -N -B -e 'SELECT 1' 2>&1 >/dev/null) && return 0
-    err=${err%%$'\n'*}
-    if [ "$i" -lt "$n" ]; then
-      log "  连不上 MySQL（第 $i/$n 次）：${err:-没有报错输出}，${BK_MYSQL_RETRY_WAIT:-30} 秒后重试"
-      sleep "${BK_MYSQL_RETRY_WAIT:-30}"
-    fi
-  done
-  warn "MYSQL_DEFAULTS_FILE（$MYSQL_DEFAULTS_FILE）连不上 MySQL（试了 $n 次，客户端 ${BK_MYSQL:-mysql}）：${err:-没有报错输出}；全部账号与其余业务库没有进包"
+  local n=${BK_MYSQL_TRIES:-3}
+  _bk_try MySQL "$n" "${BK_MYSQL_RETRY_WAIT:-30}" _bk_my -N -B -e 'SELECT 1' && return 0
+  warn "MYSQL_DEFAULTS_FILE（$MYSQL_DEFAULTS_FILE）连不上 MySQL（试了 $n 次，客户端 ${BK_MYSQL:-mysql}）：${BK_TRY_ERR:-没有报错输出}；全部账号与其余业务库没有进包"
   return 1
 }
 
@@ -876,6 +919,78 @@ bk_mysql_dbs() {
       rm -f "$BK_ROOT/$f"; warn "库 $db 导出失败"
     fi
   done < "$BK_ROOT/db/databases.tsv"
+}
+
+# ── 备份包：PostgreSQL（宝塔装的；PG_BIN_DIR 没配就整段跳过）──────────
+# 以超级用户 PG_SUPERUSER（默认 postgres）经 PG_HOST（unix socket 目录，默认 /tmp）、PG_PORT 连本机。
+# 配了 PG_OS_USER 就切到这个系统用户执行（pg_hba 是 peer 认证时要这样）；先 cd /，它进不了 /root。
+# 输出由调用方（root）重定向写进暂存区，切过去的用户不需要写权限
+_bk_pg() {  # _bk_pg <程序> <参数...>
+  local p="${PG_BIN_DIR%/}/$1"; shift
+  local -a c=("$p" -h "${PG_HOST:-/tmp}" -p "${PG_PORT:-5432}" -U "${PG_SUPERUSER:-postgres}" "$@")
+  if [ -n "${PG_OS_USER:-}" ] && [ "$(id -u)" = 0 ]; then (cd / && runuser -u "$PG_OS_USER" -- "${c[@]}")
+  else "${c[@]}"; fi
+}
+# pg_restore --list 的条目：「215; 1259 16389 TABLE public auth openwebui」第 4 列是类型
+bk_pg_list_tables() { awk '$4 == "TABLE" && $5 != "DATA"' | wc -l; }
+bk_pg_list_exts() { awk '$4 == "EXTENSION" { print $6 }'; }
+
+# bk_pg_ready：0 能连上；1 没配 PG_BIN_DIR（调用方跳过）；2 配了但用不了（已告警）
+bk_pg_ready() {
+  [ -n "${PG_BIN_DIR:-}" ] || return 1
+  [ -x "${PG_BIN_DIR%/}/psql" ] || { warn "PG_BIN_DIR（$PG_BIN_DIR）下没有 psql，PostgreSQL 的角色与库没有进包"; return 2; }
+  local n=${BK_PG_TRIES:-${BK_MYSQL_TRIES:-3}}
+  _bk_try PostgreSQL "$n" "${BK_PG_RETRY_WAIT:-${BK_MYSQL_RETRY_WAIT:-30}}" _bk_pg psql -d postgres -Atc 'SELECT 1' && return 0
+  warn "PostgreSQL（${PG_HOST:-/tmp}:${PG_PORT:-5432}，用户 ${PG_SUPERUSER:-postgres}）连不上（试了 $n 次）：${BK_TRY_ERR:-没有报错输出}；PostgreSQL 的角色与库没有进包"
+  return 2
+}
+
+# bk_pg —— db/pg-globals.sql（角色与密码哈希，pg_dumpall --globals-only）、db/pg-databases.tsv
+# （库名 属主 编码 排序规则 字符分类）、每个非模板库一个 db/pg/<库>.dump（pg_dump -Fc，导完用
+# pg_restore --list 读一遍）。postgres 库和 PG_SKIP_DBS 里的不导。
+# 配置（PG_DATA_DIR 下的 pg_hba.conf、postgresql.auto.conf、pg_ident.conf）记为 pg-conf：恢复时等宝塔装好
+# PostgreSQL 才放回 —— 抢先放进空的数据目录，宝塔初始化（initdb）会失败。postgresql.conf 只放 system/ref/pgsql/
+# 作参考：内存参数是按原机规格配的，新机规格不同直接放回可能起不来
+bk_pg() {
+  local rc db f n owner ver list ext skip
+  rc=0; bk_pg_ready || rc=$?
+  [ "$rc" -eq 1 ] && { log "  i 没配 PG_BIN_DIR，跳过 PostgreSQL"; return 0; }
+  [ "$rc" -eq 0 ] || return 1
+  mkdir -p "$BK_ROOT/db/pg"
+  ver=$(_bk_pg psql -d postgres -Atc 'SHOW server_version' 2>/dev/null)
+  if _bk_pg pg_dumpall --globals-only --no-tablespaces > "$BK_ROOT/db/pg-globals.sql" 2>/dev/null \
+     && grep -q '^CREATE ROLE' "$BK_ROOT/db/pg-globals.sql"; then
+    bk_row db/pg-globals.sql - - pg-globals
+    log "  ✓ PostgreSQL ${ver:-?}：角色 $(grep -c '^CREATE ROLE' "$BK_ROOT/db/pg-globals.sql") 个（含密码哈希）"
+  else
+    rm -f "$BK_ROOT/db/pg-globals.sql"; warn "pg_dumpall --globals-only 失败，PostgreSQL 的角色没有进包"
+  fi
+  _bk_pg psql -d postgres -AtF $'\t' -c "SELECT datname, pg_get_userbyid(datdba), pg_encoding_to_char(encoding), datcollate, datctype
+      FROM pg_database WHERE NOT datistemplate ORDER BY datname" > "$BK_ROOT/db/pg-databases.tsv" 2>/dev/null \
+    || { warn "列不出 PostgreSQL 的库，PostgreSQL 的库没有进包"; return 1; }
+  skip=" postgres ${PG_SKIP_DBS:-} "
+  while IFS=$'\t' read -r db owner _ _ _; do
+    case "$skip" in *" $db "*) continue ;; esac
+    case "$db" in */*|.*|'') warn "PostgreSQL 库名不适合做文件名，跳过: $db"; continue ;; esac
+    f="db/pg/$db.dump"
+    if _bk_pg pg_dump -Fc -d "$db" > "$BK_ROOT/$f" 2>/dev/null \
+       && list=$("${PG_BIN_DIR%/}/pg_restore" --list "$BK_ROOT/$f" 2>/dev/null) && [ -n "$list" ]; then
+      n=$(bk_pg_list_tables <<<"$list"); ext=$(bk_pg_list_exts <<<"$list" | tr '\n' ' ')
+      bk_row "$f" - - pg-db
+      log "  ✓ PostgreSQL 库 $db（属主 ${owner:-?}，$(du -h "$BK_ROOT/$f" | cut -f1)，$n 张表${ext:+，扩展 ${ext% }}）"
+    else
+      rm -f "$BK_ROOT/$f"; warn "PostgreSQL 库 $db 导出失败（或导出的文件 pg_restore --list 读不开）"
+    fi
+  done < "$BK_ROOT/db/pg-databases.tsv"
+  if [ -n "${PG_DATA_DIR:-}" ]; then
+    for f in pg_hba.conf postgresql.auto.conf pg_ident.conf; do
+      [ -f "$PG_DATA_DIR/$f" ] && { bk_file "$PG_DATA_DIR/$f" pg-conf || warn "PostgreSQL 配置 $f 没收进包"; }
+    done
+    mkdir -p "$BK_ROOT/system/ref/pgsql"
+    [ -f "$PG_DATA_DIR/postgresql.conf" ] && cp -p "$PG_DATA_DIR/postgresql.conf" "$BK_ROOT/system/ref/pgsql/"
+    [ -n "$ver" ] && printf '%s\n' "$ver" > "$BK_ROOT/system/ref/pgsql/server_version"
+  fi
+  return 0
 }
 
 # ── 备份包：分级保留（GFS）──────────────────────────────────

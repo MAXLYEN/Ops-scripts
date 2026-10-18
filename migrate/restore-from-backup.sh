@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # migrate/restore-from-backup.sh — 原机已不在时，用每日加密备份包把新机恢复成原样
-# VERSION: 2.0.2
+# VERSION: 2.1.0
+# 2.1.0: 恢复宝塔 PostgreSQL（hk-host 1.1.0 起的包）：先导角色（pg-globals，新机的 postgres 不动），再按原属主、编码、排序规则建库并 pg_restore（pg-db），库里要的扩展（pgvector）本机没装就在动手前停下；配置（pg-conf）等本机装好 PostgreSQL（数据目录有 PG_VERSION）才放回，放完用 PG_RESTART_CMD（默认 /etc/init.d/pgsql restart）重启；ufw 放行容器网段访问 PostgreSQL 端口。PostgreSQL 没装时这些列进手动步骤，其余照常恢复。放回宝塔 Redis 配置、logind drop-in 时提示重启对应服务。演练 teardown 删掉建出来的 PostgreSQL 库与角色。
 # 2.0.2: 宝塔自带的 MySQL 客户端（/www/server/mysql/bin）放到 PATH 最前，原先只在 PATH 里没有 mysql 时才加：PATH 里的可能是 MariaDB 客户端，找错 socket 就会误判「连不上 MySQL」。
 # 2.0.1: 包旁边没有 .sha256 从提示改为告警（所有备份包都配 .sha256，缺了说明下载漏了或包不完整），恢复照常继续，完整性仍有 7z 的 CRC 兜底。从网盘取包时没取到 .sha256 也告警。
 # 2.0.0: 按 2026-10 备份重新规划：前置机用 hk-host 包加 vault 包恢复（两个包不重复：系统、账号、Xboard、Komari 在 hk-host，Vaultwarden 在 vault）。目标 vault / hk-host / all（默认），从 <BACKUP_CLOUD_ROOT>/<包名> 各取最新的一个，连 .sha256 一起下载核对；恢复后装 vault-backup / hk-host-backup 与新的定时任务。正式恢复与演练都把系统时区设成 UTC（文件名、日志、定时任务都按 UTC），设不了就告警。历史表只有结构是设计如此。
@@ -82,7 +83,8 @@ need_for() {  # need_for <用途> <键...>
 
 # ── 状态文件：记下这台机器上恢复过什么，重跑时据此跳过、teardown 据此清理 ──
 # 一行一条，制表符分隔：MODE / PKG / PLACED 目标 包sha / CREATED 路径 / MOVED 原路径 备份 /
-# DBCREATED 库 / DBSTART 库 sha / DBDONE 库 sha / USER 账号 host / UNIT 名 / UFW 网段 / ENVBAK 备份 / DOCKER_INSTALLED
+# DBCREATED 库 / DBSTART 库 sha / DBDONE 库 sha / USER 账号 host / UNIT 名 / UFW 网段 端口 / ENVBAK 备份 / DOCKER_INSTALLED
+# PostgreSQL：PGDBCREATED 库 / PGROLE 角色；DBSTART、DBDONE、MOVED 里的库名带 pg: 前缀
 st_add() { mkdir -p "$STATE_DIR"; local IFS=$'\t'; printf '%s\n' "$*" >> "$ST"; }
 st_rows() { [ -f "$ST" ] && awk -F'\t' -v t="$1" '$1 == t' "$ST"; }
 st_mode() { st_rows MODE | tail -1 | cut -f2; }
@@ -121,6 +123,20 @@ nginx_bin() { command -v nginx 2>/dev/null || { [ -x /www/server/nginx/sbin/ngin
 compose_file() { ls "$1"/compose.y*ml "$1"/docker-compose.y*ml 2>/dev/null | head -1; }   # 目录里的 compose 文件（任一名字）
 metrics_db() { local d=${METRICS_DB_NAME:-metrics}; [[ $d =~ ^[A-Za-z0-9_]+$ ]] && printf '%s' "$d"; }
 mysql_ok() { [ -f "${MYSQL_DEFAULTS_FILE:-}" ] && command -v mysql >/dev/null 2>&1 && my -e 'SELECT 1' >/dev/null 2>&1; }
+# 本机 PostgreSQL（宝塔装的）：PG_BIN_DIR、PG_HOST、PG_PORT、PG_SUPERUSER、PG_OS_USER 与备份脚本同义，本机 env.conf 没填就用包里原机的
+pgx() {  # pgx <程序> <参数...>
+  local p="${PG_BIN_DIR%/}/$1"; shift
+  local -a c=("$p" -h "${PG_HOST:-/tmp}" -p "${PG_PORT:-5432}" -U "${PG_SUPERUSER:-postgres}" "$@")
+  if [ -n "${PG_OS_USER:-}" ] && [ "$(id -u)" = 0 ]; then (cd / && runuser -u "$PG_OS_USER" -- "${c[@]}"); else "${c[@]}"; fi
+}
+pgq() { pgx psql -d "${2:-postgres}" -Atc "$1" 2>/dev/null; }
+pg_ok() { [ -n "${PG_BIN_DIR:-}" ] && [ -x "${PG_BIN_DIR%/}/psql" ] && [ "$(pgq 'SELECT 1')" = 1 ]; }
+pg_tables() { pgq "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema')" "$1"; }
+pg_db_exists() { [ "$(pgq "SELECT 1 FROM pg_database WHERE datname = '$1'")" = 1 ]; }
+pg_list() { "${PG_BIN_DIR%/}/pg_restore" --list "$1" 2>/dev/null; }   # 读 dump 的目录，不连库
+pg_dump_tables() { pg_list "$1" | awk '$4 == "TABLE" && $5 != "DATA"' | wc -l; }
+pg_dump_exts() { pg_list "$1" | awk '$4 == "EXTENSION" { print $6 }'; }
+pg_installed() { [ -n "${PG_DATA_DIR:-}" ] && [ -f "$PG_DATA_DIR/PG_VERSION" ]; }   # 宝塔已经装好并初始化
 safe_rm() {  # 只删我们建出来的路径；浅层系统目录一律拒绝
   case "$1" in
     ''|/|/bin|/boot|/etc|/home|/lib|/opt|/root|/sbin|/srv|/tmp|/usr|/usr/local|/usr/local/bin|/var|/var/lib) warn "拒绝删除 $1"; return 1 ;;
@@ -218,6 +234,13 @@ verify_pkg() {  # verify_pkg <内容目录>
     fi
   else
     log "包里没有内容校验和清单（xboard 包就是这样），只有 7z 的 CRC"
+  fi
+  # PostgreSQL 的 dump（-Fc）以 PGDMP 开头；本机可能还没装 PostgreSQL，这里只看文件头，内容等导入时 pg_restore 读
+  if [ -f "$x/restore-manifest.tsv" ]; then
+    while IFS= read -r d; do
+      [ "$(head -c 5 "$d" 2>/dev/null)" = PGDMP ] || die "$(basename "$d") 不是 pg_dump -Fc 的导出，不要用这个包"
+      ok "$(basename "$d")：PostgreSQL 导出，文件头完整"
+    done < <(awk -F'\t' -v x="$x" '$4 == "pg-db" { print x "/" $1 }' "$x/restore-manifest.tsv")
   fi
   # 新布局只校验清单里标了 mysql-db 的（db/ 下还有账号 SQL 等）；旧布局 db/ 下的 .sql 都是 dump
   while IFS= read -r d; do
@@ -448,6 +471,14 @@ items_v2() {  # rootfs/ + restore-manifest.tsv（列：path mode owner kind）
         db=$(basename "$path"); db=${db%.gz}; db=${db%.sql}
         item mysql-db "$db" "$x/$path" ;;
       mysql-user) [ -f "$x/$path" ] || die "包里没有 $path"; item mysql-user - "$x/$path" ;;
+      pg-globals) [ -f "$x/$path" ] || die "包里没有 $path"; item pg-globals - "$x/$path" ;;
+      pg-db)
+        [ -f "$x/$path" ] || die "restore-manifest.tsv 列了 $path，包里却没有"
+        item pg-db "$(basename "$path" .dump)" "$x/$path" ;;
+      pg-conf)
+        [[ $path == /* ]] || die "restore-manifest.tsv：pg-conf 要写绝对路径：$path"
+        [ -f "$x/rootfs$path" ] || die "restore-manifest.tsv 列了 $path，rootfs 里却没有"
+        item pg-conf "$path" "$x/rootfs$path" "${mode:--}" "${owner:--}" ;;
       compose-project) item compose-project "$path" - ;;
       crontab) [ -f "$x/$path" ] && item crontab - "$x/$path" ;;
       *) warn "restore-manifest.tsv：不认识的类型 $kind（$path），跳过" ;;
@@ -656,7 +687,7 @@ path_class() {  # path_class <序号>
 # PLACE 放置   SAME 已相同   OURS 本批包上次已恢复过（之后服务可能改了它，不覆盖）   REDO 上次没导完的库
 # CONFLICT 本机已有的业务数据或在跑的服务   REPLACE 系统配置：原有的留 .bak 再换   KEEP 保留本机的
 # SKIP 不放   DUP 被更新的包覆盖
-PL_ACT=() PL_NOTE=() PROJ_DIRS=()
+PL_ACT=() PL_NOTE=() PROJ_DIRS=() PG_EXT_MISSING="" PG_OK=0
 declare -A SEEN=()
 plan() {
   local n k dst src t acc sql c tag u h o dbs=""
@@ -669,11 +700,13 @@ plan() {
   for n in "${!IT_KIND[@]}"; do
     k=${IT_KIND[n]} dst=${IT_DST[n]} src=${IT_SRC[n]}
     PL_ACT[n]=PLACE PL_NOTE[n]=""
-    case "$k" in file|dir|sqlite|systemd-unit) c=$(path_class "$n") ;; *) c="" ;; esac
+    case "$k" in file|dir|sqlite|systemd-unit|pg-conf) c=$(path_class "$n") ;; *) c="" ;; esac
     # 两个包都带的同一路径 / 同一个库（vw 与 xboard 都收系统配置和全部业务库）：较新的包说了算
     case "$k" in
-      file|dir|sqlite|systemd-unit) t="path:$dst" ;;
+      file|dir|sqlite|systemd-unit|pg-conf) t="path:$dst" ;;
       mysql-db) t="db:$dst" ;;
+      pg-db) t="pgdb:$dst" ;;
+      pg-globals) t="pgglobals" ;;
       compose-project) t="proj:$dst" ;;
       *) t="" ;;
     esac
@@ -687,7 +720,11 @@ plan() {
       continue
     fi
     case "$k" in
-      file|sqlite|systemd-unit)
+      pg-conf|file|sqlite|systemd-unit)
+        if [ "$k" = pg-conf ] && ! pg_installed; then
+          PL_ACT[n]=SKIP PL_NOTE[n]="本机还没装 PostgreSQL：放进空的数据目录会让宝塔初始化失败，装好后重跑再放"
+          continue
+        fi
         if [ -e "$dst" ] || [ -L "$dst" ]; then
           if cmp -s "$src" "$dst"; then PL_ACT[n]=SAME
           elif by_set PLACED "$dst"; then PL_ACT[n]=OURS
@@ -716,6 +753,21 @@ plan() {
           fi
         else
           PL_ACT[n]=UNKNOWN PL_NOTE[n]="MySQL 不可用，没法判断"
+        fi ;;
+      pg-db)
+        [[ $dst =~ ^[A-Za-z0-9_]+$ ]] || die "PostgreSQL 库名不合规：$dst"
+        if [ "$PG_OK" = 1 ]; then
+          for t in $(pg_dump_exts "$src"); do
+            [ "$(pgq "SELECT 1 FROM pg_available_extensions WHERE name = '$t'")" = 1 ] || PG_EXT_MISSING="$PG_EXT_MISSING $dst:$t"
+          done
+          t=$(pg_tables "$dst")
+          if [ "${t:-0}" -gt 0 ]; then
+            if by_set DBDONE "pg:$dst"; then PL_ACT[n]=OURS
+            elif by_set DBSTART "pg:$dst"; then PL_ACT[n]=REDO
+            else PL_ACT[n]=CONFLICT PL_NOTE[n]="库已存在，有 $t 张表"; fi
+          fi
+        else
+          PL_ACT[n]=UNKNOWN PL_NOTE[n]="PostgreSQL 不可用，没法判断"
         fi ;;
       mysql-user)
         sql="${P_DIR[IT_PKG[n]]}/users.$n.sql"
@@ -981,6 +1033,104 @@ apply_db() {  # apply_db <序号>
   st_add DBDONE "$db" "$sha"
 }
 
+# PostgreSQL 角色：新机的超级用户 postgres 不动（同 MySQL 的 root）；已有的角色 CREATE 报「已存在」，
+# 随后的 ALTER ROLE 照样把属性和密码哈希改成原机的，重跑结果一样
+apply_pg_globals() {  # apply_pg_globals <序号>
+  local n=$1 sql="$DR_ROOT/pg-globals.$1.sql" before out bad r cnt=0
+  before=$(pgq "SELECT rolname FROM pg_roles")
+  grep -vE '^(CREATE|ALTER) ROLE "?postgres"?( |;)' "${IT_SRC[n]}" > "$sql"
+  out=$(pgx psql -d postgres -q < "$sql" 2>&1)
+  bad=$(grep -E 'ERROR' <<<"$out" | grep -v 'already exists')
+  [ -z "$bad" ] || { printf '%s\n' "$bad" | sed 's/^/  /'; warn "导入 PostgreSQL 角色时有报错（见上）"; }
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    cnt=$((cnt + 1))
+    grep -qxF -- "$r" <<<"$before" || st_add PGROLE "$r"
+  done < <(sed -nE 's/^CREATE ROLE "?([^" ;]+)"?;.*/\1/p' "$sql")
+  ok "PostgreSQL 角色 $cnt 个（含密码哈希；本机的 postgres 不动）"
+}
+
+apply_pg_db() {  # apply_pg_db <序号>
+  local n=$1 db=${IT_DST[$1]} dump=${IT_SRC[$1]} sha=${P_SHA[IT_PKG[$1]]} row owner enc col ctype opts before t want
+  row=$(awk -F'\t' -v d="$db" '$1 == d { print; exit }' "$(dirname "$(dirname "$dump")")/pg-databases.tsv" 2>/dev/null)
+  IFS=$'\t' read -r _ owner enc col ctype <<<"$row"
+  opts=""
+  [[ ${owner:-} =~ ^[A-Za-z0-9_]+$ ]] && opts="$opts OWNER \"$owner\""
+  [[ ${enc:-} =~ ^[A-Za-z0-9_]+$ ]] && opts="$opts ENCODING '$enc'"
+  case "${PL_ACT[n]}" in
+    CONFLICT)
+      before="$DR_ROOT/before-pg-$db-$TS.dump"
+      pgx pg_dump -Fc -d "$db" > "$before" || die "导出原有的 PostgreSQL 库 $db 失败，不删它"
+      st_add MOVED "pg:$db" "$before"; log "[备份] 原有 PostgreSQL 库 $db -> $before"
+      pgx psql -d postgres -qc "DROP DATABASE \"$db\" WITH (FORCE)" || die "删不掉原有的 PostgreSQL 库 $db" ;;
+    REDO)
+      log "PostgreSQL 库 $db 是上次没导完的，删掉重导"
+      pgx psql -d postgres -qc "DROP DATABASE \"$db\" WITH (FORCE)" || die "删不掉 PostgreSQL 库 $db" ;;
+  esac
+  if ! pg_db_exists "$db"; then
+    st_rows MOVED | cut -f2 | grep -qx "pg:$db" || st_add PGDBCREATED "$db"
+    # 排序规则照原机；新机没有这个 locale 时退回数据库默认值
+    if [[ ${col:-} =~ ^[A-Za-z0-9_.@-]+$ && ${ctype:-} =~ ^[A-Za-z0-9_.@-]+$ ]] \
+       && pgx psql -d postgres -qc "CREATE DATABASE \"$db\"$opts LC_COLLATE '$col' LC_CTYPE '$ctype' TEMPLATE template0" 2>/dev/null; then :
+    elif pgx psql -d postgres -qc "CREATE DATABASE \"$db\"$opts TEMPLATE template0"; then
+      [ -n "${col:-}" ] && warn "PostgreSQL 库 $db 按原机的排序规则 $col 建不出来（本机没有这个 locale？），用了本机默认的"
+    else
+      die "建 PostgreSQL 库 $db 失败"
+    fi
+  fi
+  st_add DBSTART "pg:$db" "$sha"
+  log "导入 PostgreSQL 库 $db ..."
+  # 从标准输入喂：切到 PG_OS_USER 时它读不了 /root 下的文件
+  pgx pg_restore -d "$db" --exit-on-error --single-transaction < "$dump" \
+    || die "导入 PostgreSQL 库 $db 失败（重跑本脚本会删掉这次导了一半的库重来）"
+  t=$(pg_tables "$db"); want=$(pg_dump_tables "$dump")
+  if [ "${t:-0}" -ge "${want:-0}" ]; then ok "PostgreSQL 库 $db：$t 张表"; else warn "PostgreSQL 库 $db 只有 $t 张表，dump 里有 $want 张"; fi
+  st_add DBDONE "pg:$db" "$sha"
+}
+
+apply_pg() {
+  local n has=0
+  for n in "${!IT_KIND[@]}"; do case "${IT_KIND[n]}" in pg-globals|pg-db) has=1 ;; esac; done
+  [ "$has" = 1 ] || return 0
+  if [ "$PG_OK" != 1 ]; then
+    manual "在面板装 PostgreSQL（原机 $(pg_orig_ver)）并把 pgvector 编译装进去，再重跑本脚本导入角色和库" \
+           "本机 PostgreSQL 不可用（PG_BIN_DIR=${PG_BIN_DIR:-没配}）；其余部分照常恢复"
+    return 0
+  fi
+  for n in "${!IT_KIND[@]}"; do [ "${IT_KIND[n]}" = pg-globals ] && [ "${PL_ACT[n]}" != DUP ] && apply_pg_globals "$n"; done
+  for n in "${!IT_KIND[@]}"; do
+    [ "${IT_KIND[n]}" = pg-db ] || continue
+    case "${PL_ACT[n]}" in PLACE|REDO|CONFLICT) apply_pg_db "$n" ;; DUP) ;; *) log "PostgreSQL 库 ${IT_DST[n]}：已恢复过，跳过" ;; esac
+  done
+  ufw_db_rule "${PG_PORT:-5432}"
+}
+pg_orig_ver() {
+  local i v
+  for i in "${!P_X[@]}"; do v=$(cat "${P_X[i]}/system/ref/pgsql/server_version" 2>/dev/null) && [ -n "$v" ] && { printf '%s' "$v"; return; }; done
+  printf '同一大版本'
+}
+
+# 放回的 PostgreSQL 配置（pg_hba.conf、postgresql.auto.conf）要重启才生效（listen_addresses 改了只能重启）
+pg_restart() {
+  local cmd=${PG_RESTART_CMD:-/etc/init.d/pgsql restart} i
+  touched_kind pg-conf || return 0
+  if [ "$NOSTART" = 1 ]; then
+    manual "重启 PostgreSQL 让放回的配置生效：$cmd" "--no-start：不重启服务"; return 0
+  fi
+  if $cmd >/dev/null 2>&1; then
+    for i in 1 2 3 4 5 6 7 8 9 10; do pg_ok && { ok "PostgreSQL 已按原机配置重启"; return 0; }; sleep 3; done
+  fi
+  warn "PostgreSQL 重启后连不上：看 ${PG_DATA_DIR:-数据目录} 下的日志，确认放回的 pg_hba.conf / postgresql.auto.conf 适用于这台机器"
+}
+touched_kind() {  # 这次有没有放下某一类条目
+  local n
+  for n in "${!IT_KIND[@]}"; do
+    [ "${IT_KIND[n]}" = "$1" ] || continue
+    case "${PL_ACT[n]}" in PLACE|CONFLICT|REPLACE) return 0 ;; esac
+  done
+  return 1
+}
+
 # 恢复出来的账号里有对指标库的授权、本机又没有这个库：建空库，Komari 启动时自己建表，监控历史从零开始
 apply_metrics_db() {
   local db n
@@ -1068,12 +1218,13 @@ sqlite_checks() {
   done
 }
 
-ufw_db_rule() {  # 容器访问宿主机 3306：漏了这条是延迟发作的全站 503（见包里 RESTORE.md）
-  [ -n "${DOCKER_CIDR:-}" ] || { warn "DOCKER_CIDR 没填，不放行容器访问 3306"; return 0; }
+ufw_db_rule() {  # ufw_db_rule [端口]：容器访问宿主机的库（默认 3306）。漏了这条是延迟发作的全站 503（见包里 RESTORE.md）
+  local port=${1:-3306}
+  [ -n "${DOCKER_CIDR:-}" ] || { warn "DOCKER_CIDR 没填，不放行容器访问 $port"; return 0; }
   command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active' || return 0
-  ufw status | grep -qE "3306.*${DOCKER_CIDR//./\\.}" && return 0
-  ufw allow from "$DOCKER_CIDR" to any port 3306 proto tcp >/dev/null && st_add UFW "$DOCKER_CIDR" \
-    && ok "ufw 已放行 $DOCKER_CIDR -> 3306"
+  ufw status | grep -qE "^$port(/tcp)? .*${DOCKER_CIDR//./\\.}" && return 0
+  ufw allow from "$DOCKER_CIDR" to any port "$port" proto tcp >/dev/null && st_add UFW "$DOCKER_CIDR" "$port" \
+    && ok "ufw 已放行 $DOCKER_CIDR -> $port"
 }
 
 install_script() {  # install_script <脚本名>：本机没装就经 opsget 装上（只装不跑）
@@ -1240,13 +1391,14 @@ apply_all() {
   for n in "${!IT_KIND[@]}"; do [ "${IT_KIND[n]}" = mysql-user ] && [ "${PL_ACT[n]}" != DUP ] && apply_users "$n"; done
   apply_root
   printf '%s\n' "${IT_KIND[@]}" | grep -qx mysql-db && ufw_db_rule
+  apply_pg
   section "文件与数据目录"
   AK_BEFORE="$DR_ROOT/authorized_keys.before.$TS"
   cp /root/.ssh/authorized_keys "$AK_BEFORE" 2>/dev/null || : > "$AK_BEFORE"
   panel_stop_if_touched
   for n in "${!IT_KIND[@]}"; do
     case "${IT_KIND[n]}" in
-      file|dir|sqlite|systemd-unit)
+      file|dir|sqlite|systemd-unit|pg-conf)
         case "${PL_ACT[n]}" in
           PLACE|CONFLICT|REPLACE) place "$n" ;;
           KEEP) [ "${IT_DST[n]}" = "$MYSQL_DEFAULTS_FILE" ] && cmp -s "${IT_SRC[n]}" "${IT_DST[n]}" || keep_local "$n" ;;
@@ -1262,6 +1414,11 @@ apply_all() {
     [ "${IT_KIND[n]}" = compose-project ] && [ "${PL_ACT[n]}" != DUP ] && st_add PLACED "${IT_DST[n]}" "${P_SHA[IT_PKG[n]]}"
   done
   touched_under /etc/systemd && { systemctl daemon-reload 2>/dev/null || warn "systemctl daemon-reload 失败"; }
+  touched_under /etc/systemd/logind.conf.d && manual "systemctl restart systemd-logind（或重启机器），让原机的 logind 设置（RemoveIPC=no）生效" \
+    "没有它，postgres 用户的会话一结束共享内存就被删，PostgreSQL 出错"
+  pg_restart
+  touched_under /www/server/redis/ && manual "重启宝塔 Redis：/etc/init.d/redis restart（或在面板里重启）" \
+    "redis.conf 换成了原机的（含原机的密码），容器里的连接串用的是原机密码，重启后才对得上"
   ssh_2fa_check
   ufw_ssh_self_check
   touched_under /etc/sysctl && { sysctl --system >/dev/null 2>&1 && ok "内核参数已按原机生效" || warn "sysctl --system 失败"; }
@@ -1594,6 +1751,7 @@ prepare() {  # prepare <解开到的父目录>
   env_merge
   check_client_host
   MYSQL_OK=0; mysql_ok && MYSQL_OK=1
+  PG_OK=0; pg_ok && PG_OK=1
   collect_images
   build_items
   pin_projects
@@ -1610,6 +1768,11 @@ do_check() {
   if [ "$MYSQL_OK" = 1 ]; then ok "MySQL 可用（$(mysql --version 2>/dev/null | awk '{ print $3, $5 }')）"
   else warn "MySQL 不可用（$MYSQL_DEFAULTS_FILE）：恢复前先装好，版本照包里 manifest"; fi
   grep -h '^MySQL:' "${P_X[@]/%//manifest.txt}" 2>/dev/null | sed 's/^/  原机 /'
+  if printf '%s\n' "${IT_KIND[@]}" | grep -qx pg-db; then
+    if [ "$PG_OK" = 1 ]; then ok "PostgreSQL 可用（$(pgq 'SHOW server_version')；原机 $(pg_orig_ver)）"
+    else warn "PostgreSQL 不可用（PG_BIN_DIR=${PG_BIN_DIR:-没配}）：恢复前在面板装好（原机 $(pg_orig_ver)），并把 pgvector 编译装进去"; fi
+    [ -z "$PG_EXT_MISSING" ] || warn "本机 PostgreSQL 没有这些库要的扩展（库:扩展）：$PG_EXT_MISSING"
+  fi
   [ -n "$(nginx_bin)" ] && ok "nginx：$(nginx_bin)" || warn "没有 nginx：站点配置会放好，但没法重载"
   docker info >/dev/null 2>&1 && ok "docker 可用" || log "docker 不可用：恢复时会从官方 apt 源安装"
   echo
@@ -1649,6 +1812,7 @@ do_restore() {
     [ "$FORCE" = 1 ] || die "这台机器上已经有数据或在跑的服务（上面标「冲突」的 $CONFLICTS 处）。确认是要覆盖的机器，加 --force：原有目录移到 .bak.$TS，原有库先导出到 $DR_ROOT 再删"
     confirm "覆盖以上 $CONFLICTS 处冲突（原有的先备份）？"
   fi
+  [ -z "$PG_EXT_MISSING" ] || die "本机 PostgreSQL 没有这些库要的扩展（库:扩展）：$PG_EXT_MISSING。pgvector 要手动编译装进宝塔的 PostgreSQL（见灾难恢复手册），装好再重跑；本机还没有任何改动"
   apply_all
   start_all
   probe_sites
@@ -1691,16 +1855,24 @@ do_teardown() {
   else
     warn "MySQL 不可用，库和账号没删：$(st_rows DBCREATED | cut -f2 | sort -u | tr '\n' ' ')"
   fi
-  while read -r p; do
-    command -v ufw >/dev/null 2>&1 && ufw delete allow from "$p" to any port 3306 proto tcp >/dev/null 2>&1 && ok "ufw 删掉 $p -> 3306"
-  done < <(st_rows UFW | cut -f2)
+  if st_rows PGDBCREATED | grep -q . || st_rows PGROLE | grep -q .; then
+    if pg_ok; then
+      while read -r p; do pgx psql -d postgres -qc "DROP DATABASE IF EXISTS \"$p\" WITH (FORCE)" && ok "删 PostgreSQL 库 $p"; done < <(st_rows PGDBCREATED | cut -f2 | sort -u)
+      while read -r p; do pgx psql -d postgres -qc "DROP ROLE IF EXISTS \"$p\"" && ok "删 PostgreSQL 角色 $p"; done < <(st_rows PGROLE | cut -f2 | sort -u)
+    else
+      warn "PostgreSQL 不可用，库和角色没删：$(st_rows PGDBCREATED | cut -f2 | sort -u | tr '\n' ' ')$(st_rows PGROLE | cut -f2 | sort -u | tr '\n' ' ')"
+    fi
+  fi
+  while IFS=$'\t' read -r _ p port; do
+    command -v ufw >/dev/null 2>&1 && ufw delete allow from "$p" to any port "${port:-3306}" proto tcp >/dev/null 2>&1 && ok "ufw 删掉 $p -> ${port:-3306}"
+  done < <(st_rows UFW)
   section "文件"
   while read -r p; do [ -e "$p" ] || [ -L "$p" ] || continue; safe_rm "$p" && ok "删除 $p"; done \
     < <(st_rows CREATED | cut -f2 | awk '!s[$0]++' | tac)
   [ -d /run/systemd/system ] && systemctl daemon-reload 2>/dev/null
   # 演练时替换掉的系统配置（sshd、ufw、面板……）：把 .bak 放回原处
   while IFS=$'\t' read -r _ p b; do
-    case "$p" in mysql:*) continue ;; esac
+    case "$p" in mysql:*|pg:*) continue ;; esac
     [ -e "$b" ] || [ -L "$b" ] || continue
     { [ -e "$p" ] || [ -L "$p" ]; } && { safe_rm "$p" || continue; }
     mv "$b" "$p" && ok "还原 $p"
