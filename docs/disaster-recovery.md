@@ -200,6 +200,12 @@ opsget init/run
 
    `OPTFLAGS=""` 不按本机 CPU 优化，换机器也能用。没装 pgvector 的话恢复脚本会在动手前停下，告诉你哪个库缺哪个扩展。
 
+   原机的 PostgreSQL 库用 `en_US.UTF-8` 排序规则（包里 `db/pg-databases.tsv` 第 4 列）。新机没生成这个 locale 的话，恢复时会退回默认的排序规则并告警，所以先确认，没有就生成（不用重启 PostgreSQL）：
+
+   ```bash
+   locale -a | grep -qi '^en_US\.utf8$' || { sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && locale-gen; }
+   ```
+
 宝塔安装本身要 40 分钟以上（真机演练实测 46 分钟），是整个恢复里最长的一步，可以趁这时候去做落地机（4.8）。
 
 ### 4.6 最小配置，然后恢复
