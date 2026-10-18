@@ -478,13 +478,15 @@ two_outdated() {  # 装两个脚本，再让仓库里两个都出新版
   two_outdated
   drive opsbox 9 2 "" 2 y "" 0 q
   cmp /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
-  ! cmp -s /usr/local/bin/save-fw.sh "$MOCK/main/ops/save-fw.sh"
+  run cmp -s /usr/local/bin/save-fw.sh "$MOCK/main/ops/save-fw.sh"
+  [ "$status" -eq 1 ]   # 1 = 内容不同；2 = 文件不在，也算失败
 }
 
 @test "更新已装脚本：不确认就什么都不动" {
   two_outdated
   drive opsbox 9 2 "" a n "" 0 q
-  ! cmp -s /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+  run cmp -s /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+  [ "$status" -eq 1 ]
 }
 
 @test "更新已装脚本：都一致时直接说" {
@@ -556,7 +558,8 @@ upd_cache() { cat /var/lib/ops-scripts/opsbox.updates 2>/dev/null; }
   two_outdated
   opsbox --check-updates
   drive opsbox u n "" q
-  ! cmp -s /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+  run cmp -s /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+  [ "$status" -eq 1 ]
 }
 
 @test "检查失败时如实提示，不假装已是最新" {
@@ -703,13 +706,15 @@ no_toolbox_left() {
   two_outdated
   opsbox --check-updates
   drive opsbox u "" "" q
-  ! cmp -s /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+  run cmp -s /usr/local/bin/ssl-audit.sh "$MOCK/main/ops/ssl-audit.sh"
+  [ "$status" -eq 1 ]
 }
 
 @test "回车不执行：更新工具箱要先确认" {
   echo '# 新版本' >> "$MOCK/main/bin/opsbox"
   drive opsbox 9 1 "" "" "" 0 q
-  ! cmp -s /usr/local/bin/opsbox "$MOCK/main/bin/opsbox"
+  run cmp -s /usr/local/bin/opsbox "$MOCK/main/bin/opsbox"
+  [ "$status" -eq 1 ]
 }
 
 @test "回车不执行：配置管理的选择没有默认项" {
