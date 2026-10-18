@@ -42,7 +42,8 @@ hb() { cat "$L/hb.log" 2>/dev/null; }
   check
   [ "$status" -eq 0 ]
   [ "$(hb)" = "https://hc.example/ping/lc" ]
-  [ ! -e "$L/sleep.log" ] && [ ! -e "$L/systemctl.log" ]
+  [ ! -e "$L/sleep.log" ]
+  [ ! -e "$L/systemctl.log" ]
   grep -q '正常 内层=200 外层=200' "$L/link.log"
 }
 

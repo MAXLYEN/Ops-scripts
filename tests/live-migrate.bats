@@ -192,7 +192,8 @@ none() {  # none <正则> <文本>
   rm -rf /tmp/hkx; mkdir /tmp/hkx
   7z x -p"$(head -1 "$PASSF")" -o/tmp/hkx "$f" </dev/null >/dev/null
   tar --same-owner -xzf /tmp/hkx/payload.tar.gz -C /tmp/hkx
-  [ -f "/tmp/hkx/rootfs$L/opt/xboard/.env" ] && [ ! -e "/tmp/hkx/rootfs$L/opt/xboard/storage/logs/laravel.log" ]
+  [ -f "/tmp/hkx/rootfs$L/opt/xboard/.env" ]
+  [ ! -e "/tmp/hkx/rootfs$L/opt/xboard/storage/logs/laravel.log" ]
   [ ! -e "/tmp/hkx/rootfs$L/opt/vaultwarden" ]
   grep -q "^$L/opt/vaultwarden"$'\t'"Vaultwarden 在 vault 包里" /tmp/hkx/system/rootfs-skipped.txt
   [ -f /tmp/out/hk-host_20200101_000000.7z ]
@@ -208,7 +209,8 @@ none() {  # none <正则> <文本>
   lm "$NEW" --ssh-port 2222
   [ "$status" -ne 0 ]
   has "opsget ops/setup-key-login $NEW 2222"
-  [ ! -e "$ST" ] && [ ! -s "$RCALLS" ]
+  [ ! -e "$ST" ]
+  [ ! -s "$RCALLS" ]
   crontab -l | diff /tmp/cron.before -
 }
 
@@ -224,7 +226,8 @@ none() {  # none <正则> <文本>
     has "${kv#*|}"
     has "预检没通过"
   done
-  [ ! -e "$ST" ] && [ ! -s "$RCALLS" ]
+  [ ! -e "$ST" ]
+  [ ! -s "$RCALLS" ]
   none 'stop' "$(cat /tmp/docker.log 2>/dev/null)"
   crontab -l | diff /tmp/cron.before -
 }
@@ -259,7 +262,9 @@ none() {  # none <正则> <文本>
   has "预检通过"
   has "迁移计划"
   has "只预检：两台机器都没有改动"
-  [ ! -e "$ST" ] && [ ! -s "$RCALLS" ] && [ ! -e /var/lib/ops-scripts/live-migrate.target ]
+  [ ! -e "$ST" ]
+  [ ! -s "$RCALLS" ]
+  [ ! -e /var/lib/ops-scripts/live-migrate.target ]
   crontab -l | diff /tmp/cron.before -
 }
 
@@ -267,7 +272,8 @@ none() {  # none <正则> <文本>
   lm "$NEW" --rehearse-only
   [ "$status" -eq 0 ]
   has "已取消"
-  [ ! -s "$RCALLS" ] && [ -z "$(ls /root/live-migrate/pkgs 2>/dev/null)" ]
+  [ ! -s "$RCALLS" ]
+  [ -z "$(ls /root/live-migrate/pkgs 2>/dev/null)" ]
 }
 
 @test "--cutover：没演练过就拒绝，本机不动" {
@@ -291,7 +297,8 @@ none() {  # none <正则> <文本>
   # 包现做现传：新机上的与本机的逐字节一致，旁挂的 .sha256 也传了
   f=$(ls /root/live-migrate/pkgs/rehearsal-*/vault_*.7z)
   g=$(ls /root/live-migrate-in/rehearsal-*/vault_*.7z)
-  cmp "$f" "$g" && [ -f "$g.sha256" ]
+  cmp "$f" "$g"
+  [ -f "$g.sha256" ]
   has "新机上的 sha256 一致"
   # 恢复后新机临时放行本机连 SSH
   grep -q "^allow from 127.0.0.1 to any port 22 proto tcp comment live-migrate $(lm_id)$" /tmp/ufw.log
@@ -327,14 +334,17 @@ none() {  # none <正则> <文本>
   [ "$(acts)" = "restore check verify standby restore verify" ]
   grep -qE "^$NEW restore - /root/live-migrate-in/cutover-[0-9]+/vault_[0-9_]+\.7z --force$" "$RCALLS"
   # 演练那次恢复时本机照常；切换那次恢复时本机已停写、备份任务已暂停
-  grep -qx running "$NH/at-restore.1" && none '#MIGRATE-PAUSED' "$(cat "$NH/at-restore.1")"
-  grep -qx exited "$NH/at-restore.2" && grep -q '^#MIGRATE-PAUSED .*vault-backup.sh' "$NH/at-restore.2"
+  grep -qx running "$NH/at-restore.1"
+  none '#MIGRATE-PAUSED' "$(cat "$NH/at-restore.1")"
+  grep -qx exited "$NH/at-restore.2"
+  grep -q '^#MIGRATE-PAUSED .*vault-backup.sh' "$NH/at-restore.2"
   # 只暂停调用备份脚本的行；日志文件名里带 fullbackup 的别的任务不动
   crontab -l | grep -qx '#MIGRATE-PAUSED 15 \* \* \* \* /usr/bin/flock -n /var/lock/vault-backup-cron.lock /usr/local/bin/vault-backup.sh >> /var/log/vault-backup-cron.log 2>&1'
   crontab -l | grep -q '^#MIGRATE-PAUSED 5 \* \* \* \* .*newapi-fullbackup.sh'
   crontab -l | grep -qx '\*/5 \* \* \* \* /usr/local/bin/newapi-linkcheck.sh --cron >> /var/log/newapi-fullbackup.log 2>&1'
   [ "$(running)" = "exited exited" ]
-  [ -x /root/live-migrate/rollback.sh ] && grep -q '^RUN=(.*vaultwarden' /root/live-migrate/rollback.sh
+  [ -x /root/live-migrate/rollback.sh ]
+  grep -q '^RUN=(.*vaultwarden' /root/live-migrate/rollback.sh
   # 切换后演练的包两边都清掉，最终的包留着
   [ -z "$(ls -d /root/live-migrate/pkgs/rehearsal-* /root/live-migrate-in/rehearsal-* 2>/dev/null)" ]
   ls /root/live-migrate/pkgs/cutover-*/vault_*.7z /root/live-migrate-in/cutover-*/vault_*.7z >/dev/null
@@ -500,7 +510,9 @@ SH
   grep -q "^mysql:vaultwarden.event"$'\t' /tmp/vwx/system/rootfs-skipped.txt
   [ -f "/tmp/vwx/rootfs$L/opt/vaultwarden/data/rsa_key.pem" ]
   # 只有 Vaultwarden：没有 SSH、面板、账号这些系统部分
-  [ ! -e /tmp/vwx/rootfs/etc ] && [ ! -e /tmp/vwx/rootfs/root ] && [ ! -e /tmp/vwx/db/mysql-users.sql ]
+  [ ! -e /tmp/vwx/rootfs/etc ]
+  [ ! -e /tmp/vwx/rootfs/root ]
+  [ ! -e /tmp/vwx/db/mysql-users.sql ]
   [ "$(cut -f4 /tmp/vwx/restore-manifest.tsv | grep -v '^#' | sort -u | tr '\n' ' ')" = "compose-project dir file mysql-db " ]
 }
 

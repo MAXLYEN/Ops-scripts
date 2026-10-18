@@ -141,10 +141,13 @@ PY
   touch "$BR/20260101-0000_1790000001_backup.tar.gz.sha256" "$BR/20260101-0000_1790000002_backup.tar.gz.sha256"
   create
   [ "$status" -eq 0 ]
-  [ ! -e "$BR/20260101-0000_1790000001_backup.tar.gz" ] && [ ! -e "$BR/1790000001_backup" ]
-  [ ! -e "$BR/20260101-0000_1790000001_backup.tar.gz.sha256" ] && [ -e "$BR/20260101-0000_1790000002_backup.tar.gz.sha256" ]
+  [ ! -e "$BR/20260101-0000_1790000001_backup.tar.gz" ]
+  [ ! -e "$BR/1790000001_backup" ]
+  [ ! -e "$BR/20260101-0000_1790000001_backup.tar.gz.sha256" ]
+  [ -e "$BR/20260101-0000_1790000002_backup.tar.gz.sha256" ]
   for t in 1790000002 1790000003 1790000000 1790642642; do
-    [ -e "$BR/20260101-0000_${t}_backup.tar.gz" ] && [ -d "$BR/${t}_backup" ]
+    [ -e "$BR/20260101-0000_${t}_backup.tar.gz" ]
+    [ -d "$BR/${t}_backup" ]
   done
   python3 - "$BR/backup_task.json" <<'PY'
 import json, sys
@@ -158,9 +161,12 @@ PY
   create; create; create
   [ "$status" -eq 0 ]
   [ "$(ls "$BR"/*_backup.tar.gz | wc -l)" = 5 ]                       # 2 份手动 + 3 份自动
-  [ -e "$BR/20260101-0000_1790000000_backup.tar.gz" ] && [ -e "$BR/20260101-0000_1790642642_backup.tar.gz" ]
-  [ "$(cloud onedrive | wc -l)" = 3 ] && [ "$(cloud gdrive | wc -l)" = 3 ]
-  [ "$(grep -c . "$L/bt.calls")" = 4 ] && [ "$(sort -u "$L/bt.calls" | wc -l)" = 4 ]   # 每次时间戳都不同
+  [ -e "$BR/20260101-0000_1790000000_backup.tar.gz" ]
+  [ -e "$BR/20260101-0000_1790642642_backup.tar.gz" ]
+  [ "$(cloud onedrive | wc -l)" = 3 ]
+  [ "$(cloud gdrive | wc -l)" = 3 ]
+  [ "$(grep -c . "$L/bt.calls")" = 4 ]
+  [ "$(sort -u "$L/bt.calls" | wc -l)" = 4 ]   # 每次时间戳都不同
 }
 
 @test "只有手动建的备份时一份都不删" {
@@ -177,7 +183,8 @@ PY
   create
   [ "$status" -ne 0 ]
   has "没有生成"
-  [ -z "$(cloud onedrive)" ] && [ -z "$(cloud gdrive)" ]
+  [ -z "$(cloud onedrive)" ]
+  [ -z "$(cloud gdrive)" ]
   [ -e "$BR/20260101-0000_1790000001_backup.tar.gz" ]
   grep -q '面板整机备份失败' "$L/alerts.log"
   grep -q '模拟：打包失败' "$L/alerts.log"
@@ -188,7 +195,8 @@ PY
   touch "$L/bt-partial"
   create
   has "成功/失败项：12/1"
-  [ -n "$(cloud onedrive)" ] && [ -n "$(cloud gdrive)" ]
+  [ -n "$(cloud onedrive)" ]
+  [ -n "$(cloud gdrive)" ]
   grep -q '面板整机备份部分失败' "$L/alerts.log"
 }
 

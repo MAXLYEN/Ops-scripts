@@ -199,14 +199,18 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   # 历史表只导结构：花费明细、按天用量（模式里的 * 原样传给 pg_dump，不被 shell 展开）、健康检查、错误与审计日志
   grep -qx 'docker exec litellm-postgres pg_dump -U litellm -Fc --exclude-table-data="LiteLLM_SpendLogs" --exclude-table-data="LiteLLM_Daily"\*"Spend" --exclude-table-data="LiteLLM_HealthCheckTable" --exclude-table-data="LiteLLM_ErrorLogs" --exclude-table-data="LiteLLM_AuditLog" litellm' "$L/docker.log"
   grep -qx "docker exec -i litellm-postgres pg_restore --list" "$L/docker.log"
-  P=$(pkg); [ -n "$P" ] && [ -f "$P.sha256" ]
+  P=$(pkg); [ -n "$P" ]
+  [ -f "$P.sha256" ]
   [ "$(stat -c %a "$P")" = 600 ]
   unpack "$P"
   [ "$(head -c 5 "$L/x/db/litellm.dump")" = PGDMP ]
   grep -q 'TABLE DATA public LiteLLM_ProxyModelTable' "$L/x/db/litellm.toc"
   cmp "$W/.env" "$L/x/workdir/.env"
-  [ -f "$L/x/workdir/config.yaml" ] && [ -f "$L/x/workdir/docker-compose.yml" ]
-  [ ! -e "$L/x/workdir/pgdata" ] && [ ! -e "$L/x/workdir/logs" ] && [ ! -e "$L/x/workdir/litellm.log" ]
+  [ -f "$L/x/workdir/config.yaml" ]
+  [ -f "$L/x/workdir/docker-compose.yml" ]
+  [ ! -e "$L/x/workdir/pgdata" ]
+  [ ! -e "$L/x/workdir/logs" ]
+  [ ! -e "$L/x/workdir/litellm.log" ]
   grep -qP "^litellm\tghcr.io/berriai/litellm:1.99.1\tghcr.io/berriai/litellm@sha256:$DIG1$" "$L/x/images.tsv"
   grep -qP "^litellm-postgres\tpostgres:17\tpostgres@sha256:$DIG2$" "$L/x/images.tsv"
   grep -qP "^litellm-redis\tredis:7\tredis@sha256:$DIG3$" "$L/x/images.tsv"
@@ -262,7 +266,8 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   [ -n "$(pkg)" ]
   [ ! -e "$L/alerts.log" ]
   [ "$(tail -1 "$L/curl.log")" = "curl -fsS -m 10 --retry 2 https://hc.example/ping/ll" ]
-  [ ! -e /tmp/litellm-snap-stale ] && [ -d /tmp/litellm-snap-fresh ]
+  [ ! -e /tmp/litellm-snap-stale ]
+  [ -d /tmp/litellm-snap-fresh ]
   rm -rf /tmp/litellm-snap-fresh
 }
 
@@ -359,7 +364,8 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   kill "$holder" 2>/dev/null
   [ "$status" -eq 0 ]
   [[ "$output" == *"上一轮备份还在运行，本次跳过"* ]]
-  [ ! -e "$L/curl.log" ] && [ -z "$(pkg)" ]
+  [ ! -e "$L/curl.log" ]
+  [ -z "$(pkg)" ]
 }
 
 @test "备份：镜像没有 RepoDigest 时告警，compose 里那个镜像保持原标签" {
@@ -484,7 +490,8 @@ spare() {  # 备用机的样子：清单里有它的端口，没有 litellm 容�
   [ "$(sed -n 4p <<<"$E")" = "COMPOSE up -d env=600 image=image:ghcr.io/berriai/litellm@sha256:$DIG1" ]
   unpack "$P"; cmp "$L/x/db/litellm.dump" "$L/restored.dump"
   cmp "$L/x/workdir/.env" /opt/litellm-drill/.env
-  [ -e /opt/litellm-drill/.litellm-drill ] && [ ! -e /opt/litellm-drill/.restore ]
+  [ -e /opt/litellm-drill/.litellm-drill ]
+  [ ! -e /opt/litellm-drill/.restore ]
   grep -q "^RESTORED_FROM=$(basename "$P")$" /var/lib/ops-scripts/litellm-drill-203.0.113.50.state
   grep -q -- '-p 2222 root@203.0.113.50' "$L/ssh.log"
   # verify：与线上比行数（假 docker 两边都是 3），列模型；日志里有解密错误要告警
@@ -508,7 +515,8 @@ spare() {  # 备用机的样子：清单里有它的端口，没有 litellm 容�
   : > "$L/containers"; mkdir -p /opt/litellm-drill
   drill restore 203.0.113.50 "$P"
   [ "$status" -ne 0 ]; [[ "$output" == *"目录 /opt/litellm-drill"* ]]
-  [ ! -e "$L/events" ] && [ ! -e /var/lib/ops-scripts/litellm-drill-203.0.113.50.state ]
+  [ ! -e "$L/events" ]
+  [ ! -e /var/lib/ops-scripts/litellm-drill-203.0.113.50.state ]
 }
 
 @test "演练 teardown：没有演练标记的目录不删；有标记的删掉容器与目录，状态清掉" {
@@ -524,7 +532,8 @@ spare() {  # 备用机的样子：清单里有它的端口，没有 litellm 容�
   echo "$output"
   [ "$status" -eq 0 ]
   grep -qx 'COMPOSE down -v --remove-orphans in /opt/litellm-drill' "$L/events"
-  [ ! -e /opt/litellm-drill ] && [ ! -s "$L/containers" ]
+  [ ! -e /opt/litellm-drill ]
+  [ ! -s "$L/containers" ]
   [ ! -e /var/lib/ops-scripts/litellm-drill-203.0.113.50.state ]
   grep -q "docker rmi ghcr.io/berriai/litellm@sha256:$DIG1" "$L/docker.log"
 }

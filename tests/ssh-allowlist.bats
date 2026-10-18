@@ -86,9 +86,11 @@ tagged() { grep -c "comment 'ssh-allowlist'" "$S/rules"; }
   [ "$(tagged)" = 5 ]
   grep -qxF "ufw allow from 198.51.100.64/26 to any port 59967 proto tcp comment 'ssh-allowlist'" "$S/rules"
   none '59967/tcp' "$(cat "$S/rules")"
-  grep -qxF 'ufw allow 80/tcp' "$S/rules" && grep -qF 'port 3306' "$S/rules"
+  grep -qxF 'ufw allow 80/tcp' "$S/rules"
+  grep -qF 'port 3306' "$S/rules"
   grep -q 'systemd-run --on-active=300 --unit=ssh-allowlist-rollback' "$S/calls"
-  b=$(cat "$PENDING"); [ "$(cat "$b/user.rules")" = ORIGINAL4 ] && [ "$(cat "$b/user6.rules")" = ORIGINAL6 ]
+  b=$(cat "$PENDING"); [ "$(cat "$b/user.rules")" = ORIGINAL4 ]
+  [ "$(cat "$b/user6.rules")" = ORIGINAL6 ]
   # 顺序：回滚在前，放行在删全开之前
   run_line() { grep -n -- "$1" "$S/calls" | head -1 | cut -d: -f1; }
   [ "$(run_line 'systemd-run')" -lt "$(run_line 'ufw allow from')" ]

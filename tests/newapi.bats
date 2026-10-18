@@ -92,11 +92,13 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   [ "$status" -eq 0 ]
   [[ "$output" == *"结束：正常"* ]]
   [[ "$output" == *"SQLite integrity_check: ok"* ]]
-  P=$(pkg); [ -n "$P" ] && [ -f "$P.sha256" ]
+  P=$(pkg); [ -n "$P" ]
+  [ -f "$P.sha256" ]
   rm -rf "$L/x"; 7z x -p"$(head -1 "$PASSF")" -o"$L/x" "$P" </dev/null >/dev/null
   [ "$(sqlite3 "$L/x/one-api.db" 'SELECT count(*) FROM options')" = 2 ]
   [ ! -e "$L/x/data-rest/logs" ]
-  [ -f "$L/cloud/onedrive/Backups/newapi/$(basename "$P")" ] && [ -f "$L/cloud/gdrive/Backups/newapi/$(basename "$P")" ]
+  [ -f "$L/cloud/onedrive/Backups/newapi/$(basename "$P")" ]
+  [ -f "$L/cloud/gdrive/Backups/newapi/$(basename "$P")" ]
   [ "$(tail -1 "$L/curl.log")" = "curl -fsS -m 10 --retry 2 https://hc.example/ping/na" ]
   [ -z "$(ls -d /tmp/newapi-snap-* 2>/dev/null)" ]
 }
@@ -113,7 +115,8 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   [ -n "$(pkg)" ]
   [ ! -e "$L/alerts.log" ]
   [ "$(tail -1 "$L/curl.log")" = "curl -fsS -m 10 --retry 2 https://hc.example/ping/na" ]
-  [ ! -e /tmp/newapi-snap-stale ] && [ -d /tmp/newapi-snap-fresh ]
+  [ ! -e /tmp/newapi-snap-stale ]
+  [ -d /tmp/newapi-snap-fresh ]
   rm -rf /tmp/newapi-snap-fresh
 }
 
