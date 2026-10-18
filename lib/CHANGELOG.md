@@ -2,6 +2,14 @@
 
 各文件独立编号。本次按现有头注释建立目录记录；旧注释未标日期的版本保持日期未记载，不补造历史。
 
+## 2026-10-18：版本常量跟上头部
+
+`OPS_COMMON_VERSION` 在 1.4.1、1.5.0 两次升级时都没跟着改，一直是 1.4.0。目前没有调用方读它，但它就是给调用方查版本用的，读到的会是错的。
+
+| 文件 | 原版本 → 当前版本 | 变更 |
+| --- | --- | --- |
+| `common.sh` | 1.5.0 → 1.5.1 | `OPS_COMMON_VERSION` 改为与 `# VERSION:` 头一致；`tests/lint.sh` 1.1.0 起检查两者一致。函数行为不变 |
+
 ## 2026-10-18：宝塔 PostgreSQL 进包
 
 2026-10-17 前置机上线了 Open WebUI（数据在宝塔 PostgreSQL 17 的 openwebui 库，向量用 pgvector），LobeHub 也要用这套 PostgreSQL 和宝塔 Redis；hk-host 包原先只导 MySQL，这些都不在备份里，hk-host-backup 每晚报「compose 项目 /opt/open-webui 的数据没有备份」。

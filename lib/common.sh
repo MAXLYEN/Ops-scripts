@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
-# VERSION: 1.5.0
+# VERSION: 1.5.1
+# 1.5.1: OPS_COMMON_VERSION 跟上头部版本（1.4.1、1.5.0 两次升级都没改它，一直停在 1.4.0）；tests/lint.sh 从此检查两者一致。函数行为不变。
 # 1.5.0: 新增 PostgreSQL 进包（bk_pg：库本身的权限与设置另导成 db/pg/<库>.props.sql（REVOKE / GRANT ON DATABASE、ALTER DATABASE … SET），pg_restore 不带 --create 时不恢复这些；pg_dumpall --globals-only 导角色与密码哈希、每个非模板库 pg_dump -Fc 并用 pg_restore --list 读一遍；pg_hba.conf、postgresql.auto.conf、pg_ident.conf 记为 pg-conf，postgresql.conf 只作参考），PG_BIN_DIR 没配就跳过；连不上与 MySQL 同样重试、带报错原文（共用 _bk_try）。bk_compose_projects 也收 compose 用 env_file 引用的文件。EXTRA_SNAPSHOT_EXCLUDES 给 EXTRA_SNAPSHOT_PATHS 里的目录排除子路径。系统配置多收 /etc/systemd/logind.conf.d（PostgreSQL 要的 RemoveIPC=no）。
 # 1.4.1: 新增 bk_mysql_bin：宝塔机优先用面板自带、与服务端同版本的客户端（/www/server/mysql/bin），PATH 里的 mysql 可能被别的软件包换成 MariaDB 客户端，它默认找 /run/mysqld/mysqld.sock，连不上宝塔的 MySQL（2026-10-15 生产 hk-host-backup 因此失败）。bk_mysql_ready 连不上时隔 BK_MYSQL_RETRY_WAIT 秒（默认 30）重试，共 BK_MYSQL_TRIES 次（默认 3），告警里带上客户端路径和 MySQL 的报错原文。
 # 1.4.0: 按 2026-10 备份重新规划：新增 BK_PKGS、bk_local_dir / bk_cloud_dir（本机 <BACKUP_LOCAL_ROOT>/<包名>、网盘 <BACKUP_CLOUD_ROOT>/<包名>）、bk_stamp（UTC 时间戳，不看系统时区）、bk_tiers（按包的分级档位）、bk_upload（包与 .sha256 传到每个网盘并校验）、bk_prune_all（本机与每个网盘按档位清理）；bk_init 把 BACKUP_LOCAL_ROOT 当落盘目录排除，结尾显式 return 0（只配了一个不存在的落盘目录时原先返回失败）。
@@ -19,7 +20,7 @@ set -o pipefail
 
 OPS_ENV_FILE="${OPS_ENV_FILE:-/etc/ops-scripts/env.conf}"
 # shellcheck disable=SC2034  # 供调用方查询公共库版本
-OPS_COMMON_VERSION="1.4.0"
+OPS_COMMON_VERSION="1.5.1"
 
 # ── 输出 ────────────────────────────────────────────────────
 # 时间戳在调用时计算，不用启动时冻结的变量 —— 否则长任务的日志
