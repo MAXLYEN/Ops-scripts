@@ -204,7 +204,9 @@ none() {
   has "vaultwarden.sql.gz：2 张表，结尾完整"
   has "放置"
   has "没有冲突，可以 restore"
-  [ ! -e "$R/opt" ] && [ ! -e "$DR_ROOT" ] && [ ! -e /var/lib/ops-scripts/dr-restore.state ]
+  [ ! -e "$R/opt" ]
+  [ ! -e "$DR_ROOT" ]
+  [ ! -e /var/lib/ops-scripts/dr-restore.state ]
   [ -z "$(ls "$R/vhost")" ]
 }
 
@@ -359,12 +361,15 @@ none() {
   has "演练：不装定时任务"
   restore teardown
   OPS_YES=1 restore teardown
-  [ ! -e "$R/opt" ] && [ ! -e "$R/cert" ] && [ ! -e "$R/vhost/a.example.com.conf" ]
+  [ ! -e "$R/opt" ]
+  [ ! -e "$R/cert" ]
+  [ ! -e "$R/vhost/a.example.com.conf" ]
   [ -f "$R/vhost/0.default.conf" ]
   [ ! -d "$FDB/db/vaultwarden" ]
   [ -z "$(ls "$FDB/user")" ]
   cmp /tmp/env.before /etc/ops-scripts/env.conf
-  [ ! -e /var/lib/ops-scripts/dr-restore.state ] && [ ! -e "$DR_ROOT" ]
+  [ ! -e /var/lib/ops-scripts/dr-restore.state ]
+  [ ! -e "$DR_ROOT" ]
 }
 
 # 假 iptables / ip6tables：规则按「命令 链 参数」一行记进 /tmp/ipt.rules；-D 删掉一条，没有就失败（跟真的一样）
@@ -401,10 +406,12 @@ SH
   OPS_YES=1 restore teardown
   has "撤掉演练时加的容器外连限制"
   [ ! -s /tmp/ipt.rules ]
-  [ ! -e /usr/local/sbin/ops-drill-egress ] && [ ! -e /etc/systemd/system/ops-drill-egress.service ]
+  [ ! -e /usr/local/sbin/ops-drill-egress ]
+  [ ! -e /etc/systemd/system/ops-drill-egress.service ]
   make_vw
   restore restore "$VW" --no-start
-  [ ! -s /tmp/ipt.rules ] && [ ! -e /etc/systemd/system/ops-drill-egress.service ]
+  [ ! -s /tmp/ipt.rules ]
+  [ ! -e /etc/systemd/system/ops-drill-egress.service ]
   none "外连" "$output"
 }
 
@@ -445,11 +452,13 @@ fake_nginx() {  # 假 nginx：调用记进 /tmp/nginx.calls，-t 总是通过
   V2_EXTRA_SQL="CREATE USER IF NOT EXISTS 'metrics'@'%' IDENTIFIED WITH 'mysql_native_password' AS '*MET';
 GRANT ALL PRIVILEGES ON \`metrics\`.* TO \`metrics\`@\`%\`;" make_v2; v2_local
   restore restore "$V2" --no-start --drill
-  [ -d "$FDB/db/metrics" ] && [ -e "$FDB/user/metrics@172.%" ]
+  [ -d "$FDB/db/metrics" ]
+  [ -e "$FDB/user/metrics@172.%" ]
   has "建空的指标库 metrics"
   none "不恢复账号 metrics" "$output"
   OPS_YES=1 restore teardown
-  [ ! -d "$FDB/db/metrics" ] && [ ! -e "$FDB/user/metrics@172.%" ]
+  [ ! -d "$FDB/db/metrics" ]
+  [ ! -e "$FDB/user/metrics@172.%" ]
 }
 
 @test "演练 teardown：真的停掉只有 compose.yaml 的项目；停不下就中止，外连限制、库、文件都不动，修好后重跑能清完" {
@@ -462,11 +471,16 @@ GRANT ALL PRIVILEGES ON \`metrics\`.* TO \`metrics\`@\`%\`;" make_v2; v2_local
   OPS_YES=1 restore teardown
   [ "$status" -ne 0 ]
   has "容器停不下来"
-  [ -s /tmp/ipt.rules ] && [ -d "$FDB/db/appdb" ] && [ -d "$R/opt/app" ] && [ -e /var/lib/ops-scripts/dr-restore.state ]
+  [ -s /tmp/ipt.rules ]
+  [ -d "$FDB/db/appdb" ]
+  [ -d "$R/opt/app" ]
+  [ -e /var/lib/ops-scripts/dr-restore.state ]
   rm -f /tmp/docker.down-fails
   OPS_YES=1 restore teardown
   has "$R/opt/app 已停并删除容器与镜像"
-  [ ! -s /tmp/ipt.rules ] && [ ! -d "$FDB/db/appdb" ] && [ ! -e "$R/opt/app" ]
+  [ ! -s /tmp/ipt.rules ]
+  [ ! -d "$FDB/db/appdb" ]
+  [ ! -e "$R/opt/app" ]
 }
 
 @test "演练：加不上外连限制时，--no-start 列进手动步骤、不算告警" {
@@ -491,7 +505,8 @@ GRANT ALL PRIVILEGES ON \`metrics\`.* TO \`metrics\`@\`%\`;" make_v2; v2_local
   restore restore "$VW" --no-start --force
   has "撤掉上次 --no-egress 加的容器外连限制"
   [ ! -s /tmp/ipt.rules ]
-  [ ! -e /usr/local/sbin/ops-drill-egress ] && [ ! -e /etc/systemd/system/ops-drill-egress.service ]
+  [ ! -e /usr/local/sbin/ops-drill-egress ]
+  [ ! -e /etc/systemd/system/ops-drill-egress.service ]
   lacks "接手服务时不带 --no-egress"
 }
 
@@ -530,7 +545,8 @@ GRANT ALL PRIVILEGES ON \`metrics\`.* TO \`metrics\`@\`%\`;" make_v2; v2_local
   [ "$status" -eq 0 ]
   has "撤掉了容器外连限制"
   [ ! -s /tmp/ipt.rules ]
-  [ ! -e /usr/local/sbin/ops-drill-egress ] && [ ! -e /etc/systemd/system/ops-drill-egress.service ]
+  [ ! -e /usr/local/sbin/ops-drill-egress ]
+  [ ! -e /etc/systemd/system/ops-drill-egress.service ]
   restore egress off
   [ "$status" -eq 0 ]
   has "本机没有容器外连限制"
@@ -593,11 +609,14 @@ make_xboard() {  # make_xboard [.env 的 APP_KEY 行]：照 xboard-fullbackup �
   [ -f "$R/opt/xboard/compose.yaml" ]
   has "拉不到 Xboard compose 分支"
   grep -qx 'IMPORT xboard' "$FDB/log"
-  [ -e "$FDB/user/xboard@172.%" ] && [ -e "$FDB/user/xboard@127.0.0.1" ]
-  [ -f "$R/vhost/b.example.com.conf" ] && [ -f "$R/cert/b.example.com/fullchain.pem" ]
+  [ -e "$FDB/user/xboard@172.%" ]
+  [ -e "$FDB/user/xboard@127.0.0.1" ]
+  [ -f "$R/vhost/b.example.com.conf" ]
+  [ -f "$R/cert/b.example.com/fullchain.pem" ]
   [ -f "$R/wwwroot/assets.example.com/logo.png" ]
   [ "$(stat -c %a /root/deploy/nodes.txt)" = 600 ]
-  [ "$(cat "$R/etc/xboard-db-pass")" = "xb pass" ] && [ "$(stat -c %a "$R/etc/xboard-db-pass")" = 600 ]
+  [ "$(cat "$R/etc/xboard-db-pass")" = "xb pass" ]
+  [ "$(stat -c %a "$R/etc/xboard-db-pass")" = 600 ]
   has "xboard 镜像锁不住版本，不启动"
   crontab -l | grep -q '^0 20 \* \* \* /usr/bin/flock -n /var/lock/hk-host-backup-cron.lock /usr/local/bin/hk-host-backup.sh'
   crontab -l | grep -q '^15 \* \* \* \* .*vault-backup.sh'
@@ -684,17 +703,22 @@ SQL
   [ "$(cat "$R/etc/sys/sysfile.conf")" = from-original ]
   grep -q 'AAAA-original-key' /root/.ssh/authorized_keys
   # 两个库都导入，账号都建（Vaultwarden 的账号由 hk-host 包建）
-  grep -qx 'IMPORT xboard' "$FDB/log" && grep -qx 'IMPORT vaultwarden' "$FDB/log"
-  [ -e "$FDB/user/xboard@172.%" ] && [ -e "$FDB/user/vaultwarden@172.%" ]
+  grep -qx 'IMPORT xboard' "$FDB/log"
+  grep -qx 'IMPORT vaultwarden' "$FDB/log"
+  [ -e "$FDB/user/xboard@172.%" ]
+  [ -e "$FDB/user/vaultwarden@172.%" ]
   # 业务数据在（用户已用流量、订单），历史表只有结构
   grep -q 'INSERT INTO `v2_user` VALUES (1,100,200)' "$FDB/db/xboard/import.sql"
   grep -q 'INSERT INTO `v2_order`' "$FDB/db/xboard/import.sql"
-  grep -q 'CREATE TABLE `v2_log`' "$FDB/db/xboard/import.sql" && none 'INSERT INTO `v2_log`' "$(cat "$FDB/db/xboard/import.sql")"
-  grep -q 'CREATE TABLE `event`' "$FDB/db/vaultwarden/import.sql" && none 'INSERT INTO `event`' "$(cat "$FDB/db/vaultwarden/import.sql")"
+  grep -q 'CREATE TABLE `v2_log`' "$FDB/db/xboard/import.sql"
+  none 'INSERT INTO `v2_log`' "$(cat "$FDB/db/xboard/import.sql")"
+  grep -q 'CREATE TABLE `event`' "$FDB/db/vaultwarden/import.sql"
+  none 'INSERT INTO `event`' "$(cat "$FDB/db/vaultwarden/import.sql")"
   [ "$(cat "$FDB/db/xboard/tables")" = 4 ]
   has "只有表结构的历史表（恢复后是空表，从零开始记）：xboard.v2_log xboard.v2_stat_user"
   # 应用数据与配置
-  [ -f "$R/opt/vaultwarden/data/rsa_key.pem" ] && grep -q '^APP_KEY=base64:abc' "$R/opt/xboard/.env"
+  [ -f "$R/opt/vaultwarden/data/rsa_key.pem" ]
+  grep -q '^APP_KEY=base64:abc' "$R/opt/xboard/.env"
   # 两个应用都按 images.tsv 的 digest 锁版本、列出启动步骤（--no-start 只打印）
   grep -q 'image: ghcr.io/cedar2025/xboard@sha256:bbbb' "$R/opt/xboard/compose.yaml"
   grep -q 'image: vaultwarden/server@sha256:bbbb' "$R/opt/vaultwarden/compose.yaml"
@@ -779,7 +803,8 @@ v2_local() {  # 新机的样子：引导用的公钥、配好的 .my.cnf、init/
   [ "$(stat -c '%a %U' "$R/etc/app.conf")" = "600 nobody" ]
   [ "$(stat -c '%a %U' "$R/opt/app/data/app.db")" = "640 nobody" ]
   grep -q 'CHARACTER SET latin1 COLLATE latin1_swedish_ci' "$FDB/log"
-  [ -e "$FDB/user/app@172.%" ] && [ -e "$FDB/user/app@localhost" ]
+  [ -e "$FDB/user/app@172.%" ]
+  [ -e "$FDB/user/app@localhost" ]
   none '^(other)@' "$(ls "$FDB/user")"
   none "'root'@'%'" "$(cat "$FDB/log")"
   none "DROP USER IF EXISTS 'root'" "$(cat "$FDB/log")"
@@ -834,7 +859,8 @@ v2_local() {  # 新机的样子：引导用的公钥、配好的 .my.cnf、init/
   OPS_YES=1 restore teardown
   [ "$(cat "$R/etc/sys/sysfile.conf")" = written-by-init ]
   [ "$(cat /root/.ssh/authorized_keys)" = 'ssh-ed25519 AAAA-bootstrap-key' ]
-  [ ! -e "$R/opt" ] && [ ! -e /usr/local/bin/opsget.from-backup ]
+  [ ! -e "$R/opt" ]
+  [ ! -e /usr/local/bin/opsget.from-backup ]
   [ -z "$(ls -d "$R"/etc/sys.bak.* 2>/dev/null)" ]
 }
 

@@ -81,7 +81,8 @@ PY
   echo "$output"; [ "$status" -eq 0 ]
   # 大致数量：2 天×24 + 28 天 + 约 9 周 + 约 10 月
   kept=$(( $(wc -l < "$T/all") - $(wc -l < "$T/del") ))
-  [ "$kept" -ge 90 ] && [ "$kept" -le 100 ]
+  [ "$kept" -ge 90 ]
+  [ "$kept" -le 100 ]
 }
 
 @test "GFS：每 6 小时一份（vw/xboard 档位），带 .sha256 旁注" {
@@ -114,14 +115,14 @@ PY
   names srvbak $((900 * 24)) $((800 * 24)) 24 > "$T/all"
   bk_gfs_select "$NOW" 7 30 90 400 < "$T/all" > "$T/del"
   [ "$(wc -l < "$T/all")" -eq $(( $(wc -l < "$T/del") + 1 )) ]
-  ! grep -qxF "$(tail -1 "$T/all")" "$T/del"
+  [ -z "$(grep -xF -- "$(tail -1 "$T/all")" "$T/del")" ]
 }
 
 @test "GFS：不认识的文件名不动；日期非法时整体放弃、什么都不删" {
   printf '%s\n' notes.txt srvbak_latest.7z srvbak_20200101_000000.7z.part > "$T/all"
   names srvbak $((900 * 24)) $((800 * 24)) 24 >> "$T/all"
   bk_gfs_select "$NOW" 7 30 90 400 < "$T/all" > "$T/del"
-  ! grep -qE 'notes|latest|part' "$T/del"
+  [ -z "$(grep -E 'notes|latest|part' "$T/del")" ]
   printf '%s\n' srvbak_20251399_000000.7z >> "$T/all"
   run bk_gfs_select "$NOW" 7 30 90 400 < "$T/all"
   [ "$status" -ne 0 ]; [ -z "$output" ]
@@ -181,7 +182,7 @@ PY
   echo secret > "$T/pass"; BACKUP_PASS_FILE="$T/pass"; bk_init "$T/pkg"
   bk_file "$T/pass"
   [ ! -e "$T/pkg/rootfs$T/pass" ]
-  ! grep -q "$T/pass" "$T/pkg/restore-manifest.tsv"
+  [ -z "$(grep -F "$T/pass" "$T/pkg/restore-manifest.tsv")" ]
   sqlite3 "$T/k.db" 'PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(3);'
   bk_file "$T/k.db" sqlite
   [ "$(sqlite3 "$T/pkg/rootfs$T/k.db" 'SELECT COUNT(*) FROM t')" = 3 ]
@@ -226,7 +227,7 @@ PY
   grep -qP "^$S/foo-tunnel.service\t644\troot:root\tsystemd-unit$" "$M"
   grep -qP "^$S/foo-tunnel.service.d\t\d+\troot:root\tdir$" "$M"
   grep -qP "^$S/bar-idle.service\t644\troot:root\tfile$" "$M"
-  ! grep -q "baz-masked\|alias.service" "$M"
+  [ -z "$(grep -E 'baz-masked|alias\.service' "$M")" ]
   grep -qx baz-masked.service "$T/pkg/system/ref/systemd-masked.txt"
   rm -rf $S/foo-tunnel.service* $S/bar-idle.service $S/baz-masked.service $S/alias.service $S/multi-user.target.wants/foo-tunnel.service
 }
@@ -257,7 +258,7 @@ EOF
   grep -qxF 'GRANT ALL PRIVILEGES ON `app`.* TO `app`@`172.%`;' "$F"
   [ "$(tail -1 "$F")" = 'FLUSH PRIVILEGES;' ]
   # 只有这四类语句，每条以分号结尾
-  ! grep -vE '^(CREATE USER|ALTER USER|GRANT|FLUSH PRIVILEGES).*;$' "$F"
+  [ -z "$(grep -vE '^(CREATE USER|ALTER USER|GRANT|FLUSH PRIVILEGES).*;$' "$F")" ]
   grep -qP "^db/mysql-users.sql\t-\t-\tmysql-user$" "$T/pkg/restore-manifest.tsv"
 }
 
@@ -559,24 +560,30 @@ SH
 @test "包名与目录：时间戳一律 UTC（系统时区是别的也一样）；本机 <BACKUP_LOCAL_ROOT>/<包名>，网盘 <BACKUP_CLOUD_ROOT>/<包名>" {
   [ "$(TZ=Asia/Shanghai bash -c '. /src/lib/common.sh; bk_stamp')" = "$(date -u +%Y%m%d_%H%M%S)" ] \
     || [ "$(TZ=Asia/Shanghai bash -c '. /src/lib/common.sh; bk_stamp')" = "$(date -u +%Y%m%d_%H%M%S)" ]   # 跨秒重试一次
-  [ "$(bk_local_dir vault)" = /box/backup/vault ] && [ "$(bk_cloud_dir hk-host)" = Backups/hk-host ]
+  [ "$(bk_local_dir vault)" = /box/backup/vault ]
+  [ "$(bk_cloud_dir hk-host)" = Backups/hk-host ]
   BACKUP_LOCAL_ROOT=/data/bk BACKUP_CLOUD_ROOT=Bk
-  [ "$(bk_local_dir newapi)" = /data/bk/newapi ] && [ "$(bk_cloud_dir litellm)" = Bk/litellm ]
+  [ "$(bk_local_dir newapi)" = /data/bk/newapi ]
+  [ "$(bk_cloud_dir litellm)" = Bk/litellm ]
 }
 
 @test "档位：vault / newapi 全留 3 天，hk-host 每天一份起，litellm 每周一份起；<包名>_KEEP_TIERS 可改" {
-  [ "$(bk_tiers vault)" = "3 30 90" ] && [ "$(bk_tiers newapi)" = "3 30 90" ]
-  [ "$(bk_tiers hk-host)" = "1 30 90" ] && [ "$(bk_tiers litellm)" = "1 1 90" ]
+  [ "$(bk_tiers vault)" = "3 30 90" ]
+  [ "$(bk_tiers newapi)" = "3 30 90" ]
+  [ "$(bk_tiers hk-host)" = "1 30 90" ]
+  [ "$(bk_tiers litellm)" = "1 1 90" ]
   HK_HOST_KEEP_TIERS="2 60 120"
   [ "$(bk_tiers hk-host)" = "2 60 120" ]
   # 每天一次的 hk-host：30 天内每天一份；每周一次的 litellm：90 天内每周一份（按 ISO 周、UTC）
   local n del
   n=$(for d in $(seq 1 40); do TZ=UTC date -d "@$((NOW - d * 86400 - 3600))" '+hk-host_%Y%m%d_%H%M%S.7z'; done)
   del=$(bk_gfs_select "$NOW" 1 30 90 180 <<<"$n")
-  [ "$(grep -c . <<<"$del")" -ge 5 ] && [ "$(grep -c . <<<"$del")" -le 9 ]   # 30 天后每周一份
+  [ "$(grep -c . <<<"$del")" -ge 5 ]
+  [ "$(grep -c . <<<"$del")" -le 9 ]   # 30 天后每周一份
   n=$(for w in $(seq 1 20); do TZ=UTC date -d "@$((NOW - w * 7 * 86400))" '+litellm_%Y%m%d_%H%M%S.7z'; done)
   del=$(bk_gfs_select "$NOW" 1 1 90 400 <<<"$n")
-  [ "$(grep -c . <<<"$del")" -ge 3 ] && [ "$(grep -c . <<<"$del")" -le 6 ]   # 90 天后每月一份
+  [ "$(grep -c . <<<"$del")" -ge 3 ]
+  [ "$(grep -c . <<<"$del")" -le 6 ]   # 90 天后每月一份
 }
 
 @test "上传：包和 .sha256 都传到每个网盘并校验；有网盘失败就返回失败个数" {
