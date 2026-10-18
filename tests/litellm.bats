@@ -426,14 +426,14 @@ none() {  # none <正则> <文本>：文本里不能有匹配的行
   [[ "$output" == *"这个网盘报不了 sha256，只核对下载下来的最新包"* ]]
   # 缺 .sha256、旧包与 .sha256 不符（不在最新包上，只有能报 sha256 的网盘查得出）、最新包与 .sha256 不符
   rm "$L/cloud/onedrive/Backups/litellm/$old.sha256"
-  sed -i 's/^./0/' "$L/cloud/gdrive/Backups/litellm/$old.sha256"
+  sed -i 's/^0/1/; t; s/^./0/' "$L/cloud/gdrive/Backups/litellm/$old.sha256"   # 改掉首字符（本来是 0 就改成 1，否则哈希没变）
   run bash /src/ops/verify-backup-pass.sh
   echo "$output"
   [ "$status" -ne 0 ]
   [[ "$output" == *"✗ onedrive:/Backups/litellm 有 1 个包没有 .sha256"* ]]
   [[ "$output" == *"✗ gdrive:/Backups/litellm 有 1 个包和 .sha256 对不上"* ]]
   [[ "$output" == *"✓ gdrive:/Backups/litellm $n 可解开、sha256 一致"* ]]
-  sed -i 's/^./0/' "$L/cloud/onedrive/Backups/litellm/$n.sha256"
+  sed -i 's/^0/1/; t; s/^./0/' "$L/cloud/onedrive/Backups/litellm/$n.sha256"
   run bash /src/ops/verify-backup-pass.sh
   [[ "$output" == *"✗ onedrive:/Backups/litellm $n 可解开，sha256 对不上"* ]]
   # 装了 panel-backup-upload 就校验 Backups/panel（PANEL_BACKUP_REMOTE_PATH 可改），每周一次：5 天前的包不算过旧

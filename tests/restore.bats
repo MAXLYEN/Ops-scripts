@@ -757,7 +757,7 @@ SQL
   has "vault_20261010_201500.7z 旁边没有 .sha256"
   has "sha256 与旁挂的 .sha256 一致"
   has "===== 恢复计划 ====="
-  sed -i 's/^./0/' "$HK.sha256"
+  sed -i 's/^0/1/; t; s/^./0/' "$HK.sha256"   # 改掉首字符（本来是 0 就改成 1，否则哈希没变）
   restore check "$HK" "$VA"
   [ "$status" -ne 0 ]
   has "sha256 与 $HK.sha256 不符"
