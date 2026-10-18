@@ -5,6 +5,7 @@
 #   状态目录/databases.tsv        备份时 pg_database 的查询结果（库名 属主 编码 排序规则 字符分类）
 #   状态目录/globals.sql          备份时 pg_dumpall --globals-only 的输出
 #   状态目录/src/<库>             备份时 pg_dump -Fc 输出的内容（PGDMP 一行，其后是 pg_restore --list 的条目）
+#   状态目录/props-<库>           备份时「库本身的权限与设置」那条查询的结果（每行一条语句）
 #   状态目录/down                 存在时连不上；down 里写数字 N 就是前 N 次连不上
 #   状态目录/dump-fail-<库>       存在时 pg_dump 这个库失败
 #   状态目录/no-ext-<扩展>        存在时本机没有这个扩展
@@ -27,10 +28,11 @@ down() {
   [ "$n" -gt 0 ] || return 1
   echo $((n - 1)) > "$ST/down"
 }
-db="" q="" list="" file="" globals=0
+db="" q="" list="" file="" globals=0 stop=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|-p|-U|-AtF) shift 2 ;;          # -AtF 后面跟的是分隔符
+    -v) [ "$2" = ON_ERROR_STOP=1 ] && stop=1; shift 2 ;;
     -d) db=$2; shift 2 ;;
     -c|-Atc|-qc) q=$2; shift 2 ;;
     --list) list=1; shift ;;
@@ -66,7 +68,7 @@ if [ -z "$q" ]; then
     case "$l" in
       "CREATE ROLE "*) r=$(sed -E 's/^CREATE ROLE "?([^" ;]+).*/\1/' <<<"$l")
         if [ -e "$ST/role/$r" ]; then echo "ERROR:  role \"$r\" already exists" >&2; else touch "$ST/role/$r"; fi ;;
-      *BROKEN*) echo "ERROR:  syntax error at or near \"BROKEN\"" >&2 ;;
+      *BROKEN*) echo "ERROR:  syntax error at or near \"BROKEN\"" >&2; [ "$stop" = 1 ] && exit 3 ;;
     esac
   done
   exit 0
@@ -79,6 +81,7 @@ case "$q" in
   *"FROM pg_database WHERE NOT datistemplate"*) cat "$ST/databases.tsv" ;;
   *"FROM pg_database WHERE datname"*) n=$(sed -E "s/.*datname = '([^']+)'.*/\1/" <<<"$q"); [ -d "$ST/db/$n" ] && echo 1 ;;
   *pg_available_extensions*) n=$(sed -E "s/.*name = '([^']+)'.*/\1/" <<<"$q"); [ -e "$ST/no-ext-$n" ] || echo 1 ;;
+  *aclexplode*) n=$(grep -oE "datname = '[^']+'" <<<"$q" | head -1 | cut -d"'" -f2); cat "$ST/props-$n" 2>/dev/null ;;
   *information_schema.tables*) cat "$ST/db/$db/tables" 2>/dev/null || echo 0 ;;
   "CREATE DATABASE"*) n=$(sed -E 's/^CREATE DATABASE "([^"]+)".*/\1/' <<<"$q")
     [ -e "$ST/no-locale" ] && [[ $q == *LC_COLLATE* ]] && { echo 'ERROR:  invalid locale name' >&2; exit 1; }

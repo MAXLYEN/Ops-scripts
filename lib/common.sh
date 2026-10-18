@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh — 提供配置加载、日志、数据库与站点扫描等公共函数
 # VERSION: 1.5.0
-# 1.5.0: 新增 PostgreSQL 进包（bk_pg：pg_dumpall --globals-only 导角色与密码哈希、每个非模板库 pg_dump -Fc 并用 pg_restore --list 读一遍；pg_hba.conf、postgresql.auto.conf、pg_ident.conf 记为 pg-conf，postgresql.conf 只作参考），PG_BIN_DIR 没配就跳过；连不上与 MySQL 同样重试、带报错原文（共用 _bk_try）。bk_compose_projects 也收 compose 用 env_file 引用的文件。EXTRA_SNAPSHOT_EXCLUDES 给 EXTRA_SNAPSHOT_PATHS 里的目录排除子路径。系统配置多收 /etc/systemd/logind.conf.d（PostgreSQL 要的 RemoveIPC=no）。
+# 1.5.0: 新增 PostgreSQL 进包（bk_pg：库本身的权限与设置另导成 db/pg/<库>.props.sql（REVOKE / GRANT ON DATABASE、ALTER DATABASE … SET），pg_restore 不带 --create 时不恢复这些；pg_dumpall --globals-only 导角色与密码哈希、每个非模板库 pg_dump -Fc 并用 pg_restore --list 读一遍；pg_hba.conf、postgresql.auto.conf、pg_ident.conf 记为 pg-conf，postgresql.conf 只作参考），PG_BIN_DIR 没配就跳过；连不上与 MySQL 同样重试、带报错原文（共用 _bk_try）。bk_compose_projects 也收 compose 用 env_file 引用的文件。EXTRA_SNAPSHOT_EXCLUDES 给 EXTRA_SNAPSHOT_PATHS 里的目录排除子路径。系统配置多收 /etc/systemd/logind.conf.d（PostgreSQL 要的 RemoveIPC=no）。
 # 1.4.1: 新增 bk_mysql_bin：宝塔机优先用面板自带、与服务端同版本的客户端（/www/server/mysql/bin），PATH 里的 mysql 可能被别的软件包换成 MariaDB 客户端，它默认找 /run/mysqld/mysqld.sock，连不上宝塔的 MySQL（2026-10-15 生产 hk-host-backup 因此失败）。bk_mysql_ready 连不上时隔 BK_MYSQL_RETRY_WAIT 秒（默认 30）重试，共 BK_MYSQL_TRIES 次（默认 3），告警里带上客户端路径和 MySQL 的报错原文。
 # 1.4.0: 按 2026-10 备份重新规划：新增 BK_PKGS、bk_local_dir / bk_cloud_dir（本机 <BACKUP_LOCAL_ROOT>/<包名>、网盘 <BACKUP_CLOUD_ROOT>/<包名>）、bk_stamp（UTC 时间戳，不看系统时区）、bk_tiers（按包的分级档位）、bk_upload（包与 .sha256 传到每个网盘并校验）、bk_prune_all（本机与每个网盘按档位清理）；bk_init 把 BACKUP_LOCAL_ROOT 当落盘目录排除，结尾显式 return 0（只配了一个不存在的落盘目录时原先返回失败）。
 # 1.3.0: 历史数据只收表结构：bk_mysql_dbs 对清单里的历史表（Xboard 的日志、统计、机器负载曲线、管理审计、流量重置记录、失败队列，vaultwarden 的 event）只导结构不导数据，记进 rootfs-skipped；清单由 bk_history_default 给出，BACKUP_HISTORY_TABLES 可整个改写。新增 bk_history_want / bk_history_pick / bk_history_tables，以及 bk_sqlite_strip（在包里的 SQLite 副本上清空历史表）。订单、支付、佣金照导。
@@ -935,6 +935,31 @@ _bk_pg() {  # _bk_pg <程序> <参数...>
 bk_pg_list_tables() { awk '$4 == "TABLE" && $5 != "DATA"' | wc -l; }
 bk_pg_list_exts() { awk '$4 == "EXTENSION" { print $6 }'; }
 
+# bk_pg_props_sql <库>：打印一条查询，结果是重放这个库「库本身」权限与设置的语句：
+# REVOKE ALL … FROM PUBLIC（原机改过默认权限时）、逐条 GRANT … ON DATABASE、ALTER DATABASE / ALTER ROLE … IN DATABASE … SET。
+# 这些不在 pg_dump 的库内容里（pg_restore 不带 --create 不恢复），原机做过 REVOKE CONNECT FROM PUBLIC 的库会变回谁都能连
+bk_pg_props_sql() {
+  local d=${1//\'/\'\'}
+  cat <<SQL
+SELECT stmt FROM (
+  SELECT 1 AS o, format('REVOKE ALL ON DATABASE %I FROM PUBLIC;', d.datname) AS stmt
+    FROM pg_database d WHERE d.datname = '$d' AND d.datacl IS NOT NULL
+  UNION ALL
+  SELECT 2, format('GRANT %s ON DATABASE %I TO %s%s;', a.privilege_type, d.datname,
+         CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(a.grantee)) END,
+         CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END)
+    FROM pg_database d, aclexplode(d.datacl) a WHERE d.datname = '$d'
+  UNION ALL
+  SELECT 3, CASE WHEN s.setrole = 0
+           THEN format('ALTER DATABASE %I SET %s TO %L;', d.datname, split_part(c, '=', 1), substr(c, strpos(c, '=') + 1))
+           ELSE format('ALTER ROLE %I IN DATABASE %I SET %s TO %L;', pg_get_userbyid(s.setrole), d.datname,
+                       split_part(c, '=', 1), substr(c, strpos(c, '=') + 1)) END
+    FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase, unnest(s.setconfig) c
+    WHERE d.datname = '$d'
+) t ORDER BY o
+SQL
+}
+
 # bk_pg_ready：0 能连上；1 没配 PG_BIN_DIR（调用方跳过）；2 配了但用不了（已告警）
 bk_pg_ready() {
   [ -n "${PG_BIN_DIR:-}" ] || return 1
@@ -977,6 +1002,9 @@ bk_pg() {
        && list=$("${PG_BIN_DIR%/}/pg_restore" --list "$BK_ROOT/$f" 2>/dev/null) && [ -n "$list" ]; then
       n=$(bk_pg_list_tables <<<"$list"); ext=$(bk_pg_list_exts <<<"$list" | tr '\n' ' ')
       bk_row "$f" - - pg-db
+      _bk_pg psql -d postgres -At -c "$(bk_pg_props_sql "$db")" > "$BK_ROOT/db/pg/$db.props.sql" 2>/dev/null \
+        || { rm -f "$BK_ROOT/db/pg/$db.props.sql"
+             warn "PostgreSQL 库 $db 的库级权限与设置没导出来：恢复后这个库的连接权限会回到默认（PUBLIC 能连）"; }
       log "  ✓ PostgreSQL 库 $db（属主 ${owner:-?}，$(du -h "$BK_ROOT/$f" | cut -f1)，$n 张表${ext:+，扩展 ${ext% }}）"
     else
       rm -f "$BK_ROOT/$f"; warn "PostgreSQL 库 $db 导出失败（或导出的文件 pg_restore --list 读不开）"

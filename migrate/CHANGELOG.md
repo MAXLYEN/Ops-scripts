@@ -8,7 +8,7 @@
 
 | 文件 | 原版本 → 当前版本 | 变更 |
 | --- | --- | --- |
-| `restore-from-backup.sh` | 2.0.2 → 2.1.0 | 新类型 `pg-globals`（导角色，本机 `postgres` 不动）、`pg-db`（按原属主、编码、排序规则建库，`pg_restore --single-transaction`；locale 建不出来退回默认并告警；已有非空库算冲突）、`pg-conf`（本机装好 PostgreSQL 才放回，放完 `PG_RESTART_CMD` 重启）；库要的扩展本机没有就在动手前停；PostgreSQL 不可用时列进手动步骤、其余照常；ufw 放行容器网段访问 PostgreSQL 端口；logind drop-in、宝塔 Redis 配置放回后提示重启；演练 teardown 删 PostgreSQL 库与角色 |
+| `restore-from-backup.sh` | 2.0.2 → 2.1.0 | 新类型 `pg-globals`（导角色，本机 `postgres` 不动）、`pg-db`（按原属主、编码、排序规则建库，`pg_restore --single-transaction`，导完重放 `<库>.props.sql`（库级权限与设置，出错告警；旧包没有就告警连接权限是默认的）；locale 建不出来退回默认并告警；已有非空库算冲突）、`pg-conf`（本机装好 PostgreSQL 才放回，放完 `PG_RESTART_CMD` 重启）；库要的扩展本机没有就在动手前停；PostgreSQL 不可用时列进手动步骤、其余照常；ufw 放行容器网段访问 PostgreSQL 端口；宝塔 Redis 目录里的文件等装好 Redis（`REDIS_SERVER_BIN`）才放，没装列进手动步骤、check 提示，放回后提示重启；logind drop-in 放回后提示重启 systemd-logind；演练 teardown 删 PostgreSQL 库与角色 |
 
 ## 2026-10-16：MySQL 客户端优先用宝塔自带的
 

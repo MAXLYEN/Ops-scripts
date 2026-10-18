@@ -281,9 +281,9 @@ OneDrive 取不到就把 `onedrive:` 换成 `gdrive:`。这些包停在 2026-10-
 
 恢复会自动完成：文件（权限、属主跟原机一致）、数据库和全部账号、各服务数据、按原版本拉镜像并启动容器、systemd 单元（包括连落地机的隧道）、Nginx、定时任务（按新频率）。最后 MySQL 的 root 密码也会改成原机的；系统时区不是 UTC 的话改成 UTC（定时任务按 UTC 写）。
 
-包里有 PostgreSQL 时还会：先导角色（含密码哈希，新机的 `postgres` 不动），再按原机的属主、编码、排序规则建库，用 `pg_restore` 导入；放回 `pg_hba.conf`、`postgresql.auto.conf`（原文件留 `.bak`）后用 `/etc/init.d/pgsql restart` 重启（宝塔的 PostgreSQL 用 `systemctl restart` 不生效）；ufw 放行容器网段访问 5432。`postgresql.conf` 不放回，只在包里 `system/ref/pgsql/` 作参考：内存参数是按原机规格配的，按新机规格在面板里调。PostgreSQL 还没装好的话，这部分列进「还要手动做的事」，装好后重跑 `restore` 即可，其余部分不受影响。
+包里有 PostgreSQL 时还会：先导角色（含密码哈希，新机的 `postgres` 不动），再按原机的属主、编码、排序规则建库，用 `pg_restore` 导入，导完重放库本身的权限与设置（原机 `REVOKE CONNECT … FROM PUBLIC` 过的库恢复后仍然只有自己的账号能连）；放回 `pg_hba.conf`、`postgresql.auto.conf`（原文件留 `.bak`）后用 `/etc/init.d/pgsql restart` 重启（宝塔的 PostgreSQL 用 `systemctl restart` 不生效）；ufw 放行容器网段访问 5432。`postgresql.conf` 不放回，只在包里 `system/ref/pgsql/` 作参考：内存参数是按原机规格配的，按新机规格在面板里调。PostgreSQL 还没装好的话，这部分列进「还要手动做的事」，装好后重跑 `restore` 即可，其余部分不受影响。
 
-还有两件手动做的事会列出来：`systemctl restart systemd-logind`（让原机的 `RemoveIPC=no` 生效，没有它 postgres 的共享内存会被删、PostgreSQL 出错；不影响已登录的 SSH），以及重启宝塔 Redis（`redis.conf` 换成了原机的，含原机的密码）。
+还有两件手动做的事会列出来：`systemctl restart systemd-logind`（让原机的 `RemoveIPC=no` 生效，没有它 postgres 的共享内存会被删、PostgreSQL 出错；不影响已登录的 SSH），以及重启宝塔 Redis（`redis.conf` 换成了原机的，含原机的密码）。宝塔 Redis 还没装时 `redis.conf` 先不放（抢先放进去，之后在面板装 Redis 可能被覆盖或装失败），列进手动步骤，装好后重跑 `restore`。
 
 恢复放回的是原机的面板配置，面板一重启就换到**原机的面板端口**（之前经 SSH 通道开面板的，通道要改转新端口）；反代到面板的那个站点在面板换端口之前是 404。
 

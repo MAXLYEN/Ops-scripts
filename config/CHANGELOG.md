@@ -6,7 +6,7 @@
 
 | 文件 | 原版本 → 当前版本 | 变更 |
 | --- | --- | --- |
-| `env.example.conf` | 2.1.0 → 2.2.0 | 新增 `PG_BIN_DIR`、`PG_HOST`、`PG_PORT`、`PG_SUPERUSER`、`PG_OS_USER`、`PG_DATA_DIR`、`PG_SKIP_DBS`、`PG_RESTART_CMD`、`BK_PG_TRIES`、`BK_PG_RETRY_WAIT`、`EXTRA_SNAPSHOT_EXCLUDES` |
+| `env.example.conf` | 2.1.0 → 2.2.0 | 新增 `REDIS_DIR`、`REDIS_SERVER_BIN`、`PG_BIN_DIR`、`PG_HOST`、`PG_PORT`、`PG_SUPERUSER`、`PG_OS_USER`、`PG_DATA_DIR`、`PG_SKIP_DBS`、`PG_RESTART_CMD`、`BK_PG_TRIES`、`BK_PG_RETRY_WAIT`、`EXTRA_SNAPSHOT_EXCLUDES` |
 
 ## 2026-10-16：MySQL 重试与链路重探的可选键
 

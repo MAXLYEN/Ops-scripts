@@ -623,6 +623,9 @@ pg_setup() {  # 假 PostgreSQL：openwebui 带 pgvector 两张表，lobehub 空�
     "ALTER ROLE openwebui WITH LOGIN PASSWORD 'SCRAM-SHA-256\$4096:ow';" 'CREATE ROLE postgres;' \
     'ALTER ROLE postgres WITH SUPERUSER;' > "$T/pgst/globals.sql"
   pg_dump_body > "$T/pgst/src/openwebui"
+  # 原机建库时收回了 PUBLIC 的连接权限、设过库级参数
+  printf '%s\n' 'REVOKE ALL ON DATABASE openwebui FROM PUBLIC;' 'GRANT CONNECT ON DATABASE openwebui TO openwebui;' \
+    "ALTER DATABASE openwebui SET statement_timeout TO '60s';" > "$T/pgst/props-openwebui"
   mkdir -p "$T/pgdata"
   for f in pg_hba.conf postgresql.auto.conf postgresql.conf; do echo "# $f" > "$T/pgdata/$f"; done
   chmod 600 "$T/pgdata"/*
@@ -639,6 +642,11 @@ pg_setup() {  # 假 PostgreSQL：openwebui 带 pgvector 两张表，lobehub 空�
   [ "$(head -c 5 "$T/pkg/db/pg/openwebui.dump")" = PGDMP ]
   [ -f "$T/pkg/db/pg/lobehub.dump" ]
   [ ! -e "$T/pkg/db/pg/postgres.dump" ]
+  # 库本身的权限与设置另导成 SQL（pg_restore 不带 --create 不恢复这些）；默认权限的库是空文件
+  [ "$(cat "$T/pkg/db/pg/openwebui.props.sql")" = "$(cat "$T/pgst/props-openwebui")" ]
+  [ -f "$T/pkg/db/pg/lobehub.props.sql" ]
+  [ ! -s "$T/pkg/db/pg/lobehub.props.sql" ]
+  grep -q "aclexplode(d.datacl) a WHERE d.datname = 'openwebui'" "$T/pgst/log"
   grep -qP '^db/pg-globals\.sql\t-\t-\tpg-globals$' "$T/pkg/restore-manifest.tsv"
   grep -qP '^db/pg/openwebui\.dump\t-\t-\tpg-db$' "$T/pkg/restore-manifest.tsv"
   grep -qP "^$T/pgdata/pg_hba\.conf\t600\t[^\t]+\tpg-conf$" "$T/pkg/restore-manifest.tsv"

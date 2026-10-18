@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # migrate/restore-from-backup.sh — 原机已不在时，用每日加密备份包把新机恢复成原样
 # VERSION: 2.1.0
-# 2.1.0: 恢复宝塔 PostgreSQL（hk-host 1.1.0 起的包）：先导角色（pg-globals，新机的 postgres 不动），再按原属主、编码、排序规则建库并 pg_restore（pg-db），库里要的扩展（pgvector）本机没装就在动手前停下；配置（pg-conf）等本机装好 PostgreSQL（数据目录有 PG_VERSION）才放回，放完用 PG_RESTART_CMD（默认 /etc/init.d/pgsql restart）重启；ufw 放行容器网段访问 PostgreSQL 端口。PostgreSQL 没装时这些列进手动步骤，其余照常恢复。放回宝塔 Redis 配置、logind drop-in 时提示重启对应服务。演练 teardown 删掉建出来的 PostgreSQL 库与角色。
+# 2.1.0: 恢复宝塔 PostgreSQL（hk-host 1.1.0 起的包）：先导角色（pg-globals，新机的 postgres 不动），再按原属主、编码、排序规则建库并 pg_restore（pg-db），导完重放库本身的权限与设置（<库>.props.sql：如 REVOKE CONNECT FROM PUBLIC），库里要的扩展（pgvector）本机没装就在动手前停下；配置（pg-conf）等本机装好 PostgreSQL（数据目录有 PG_VERSION）才放回，放完用 PG_RESTART_CMD（默认 /etc/init.d/pgsql restart）重启；ufw 放行容器网段访问 PostgreSQL 端口。PostgreSQL 没装时这些列进手动步骤，其余照常恢复。宝塔 Redis 的目录（REDIS_DIR，默认 /www/server/redis）里的文件等本机装好 Redis（有 REDIS_SERVER_BIN）才放，没装就列进手动步骤；放回后提示重启 Redis；放回 logind drop-in 时提示重启 systemd-logind。演练 teardown 删掉建出来的 PostgreSQL 库与角色。
 # 2.0.2: 宝塔自带的 MySQL 客户端（/www/server/mysql/bin）放到 PATH 最前，原先只在 PATH 里没有 mysql 时才加：PATH 里的可能是 MariaDB 客户端，找错 socket 就会误判「连不上 MySQL」。
 # 2.0.1: 包旁边没有 .sha256 从提示改为告警（所有备份包都配 .sha256，缺了说明下载漏了或包不完整），恢复照常继续，完整性仍有 7z 的 CRC 兜底。从网盘取包时没取到 .sha256 也告警。
 # 2.0.0: 按 2026-10 备份重新规划：前置机用 hk-host 包加 vault 包恢复（两个包不重复：系统、账号、Xboard、Komari 在 hk-host，Vaultwarden 在 vault）。目标 vault / hk-host / all（默认），从 <BACKUP_CLOUD_ROOT>/<包名> 各取最新的一个，连 .sha256 一起下载核对；恢复后装 vault-backup / hk-host-backup 与新的定时任务。正式恢复与演练都把系统时区设成 UTC（文件名、日志、定时任务都按 UTC），设不了就告警。历史表只有结构是设计如此。
@@ -137,6 +137,9 @@ pg_list() { "${PG_BIN_DIR%/}/pg_restore" --list "$1" 2>/dev/null; }   # 读 dump
 pg_dump_tables() { pg_list "$1" | awk '$4 == "TABLE" && $5 != "DATA"' | wc -l; }
 pg_dump_exts() { pg_list "$1" | awk '$4 == "EXTENSION" { print $6 }'; }
 pg_installed() { [ -n "${PG_DATA_DIR:-}" ] && [ -f "$PG_DATA_DIR/PG_VERSION" ]; }   # 宝塔已经装好并初始化
+# 宝塔 Redis：目录里的文件（redis.conf）要等面板装好 Redis 才放，抢先放进去宝塔之后装 Redis 可能覆盖或装失败
+redis_dir() { local d=${REDIS_DIR:-/www/server/redis}; printf '%s' "${d%/}"; }
+redis_installed() { [ -x "${REDIS_SERVER_BIN:-$(redis_dir)/src/redis-server}" ]; }
 safe_rm() {  # 只删我们建出来的路径；浅层系统目录一律拒绝
   case "$1" in
     ''|/|/bin|/boot|/etc|/home|/lib|/opt|/root|/sbin|/srv|/tmp|/usr|/usr/local|/usr/local/bin|/var|/var/lib) warn "拒绝删除 $1"; return 1 ;;
@@ -725,6 +728,10 @@ plan() {
           PL_ACT[n]=SKIP PL_NOTE[n]="本机还没装 PostgreSQL：放进空的数据目录会让宝塔初始化失败，装好后重跑再放"
           continue
         fi
+        if redis_pending "$dst"; then
+          PL_ACT[n]=SKIP PL_NOTE[n]="本机还没装宝塔 Redis：先放进去，之后在面板装 Redis 可能被覆盖或装失败；装好后重跑再放"
+          continue
+        fi
         if [ -e "$dst" ] || [ -L "$dst" ]; then
           if cmp -s "$src" "$dst"; then PL_ACT[n]=SAME
           elif by_set PLACED "$dst"; then PL_ACT[n]=OURS
@@ -733,6 +740,10 @@ plan() {
           else PL_ACT[n]=CONFLICT PL_NOTE[n]="已存在且内容不同"; fi
         fi ;;
       dir)
+        if redis_pending "$dst"; then
+          PL_ACT[n]=SKIP PL_NOTE[n]="本机还没装宝塔 Redis：装好后重跑再放"
+          continue
+        fi
         if [ -d "$dst" ] && diff -rq "$src" "$dst" >/dev/null 2>&1; then PL_ACT[n]=SAME
         elif [ -d "$dst" ] && [ -n "$(ls -A "$dst" 2>/dev/null)" ]; then
           if by_set PLACED "$dst"; then PL_ACT[n]=OURS
@@ -1085,6 +1096,18 @@ apply_pg_db() {  # apply_pg_db <序号>
     || die "导入 PostgreSQL 库 $db 失败（重跑本脚本会删掉这次导了一半的库重来）"
   t=$(pg_tables "$db"); want=$(pg_dump_tables "$dump")
   if [ "${t:-0}" -ge "${want:-0}" ]; then ok "PostgreSQL 库 $db：$t 张表"; else warn "PostgreSQL 库 $db 只有 $t 张表，dump 里有 $want 张"; fi
+  # 库本身的权限与设置（如原机的 REVOKE CONNECT FROM PUBLIC）：pg_restore 不带 --create 不恢复，照备份时导出的语句重放
+  local props="${dump%.dump}.props.sql" out
+  if [ -s "$props" ]; then
+    if out=$(pgx psql -d postgres -v ON_ERROR_STOP=1 -q < "$props" 2>&1); then
+      ok "PostgreSQL 库 $db：库级权限与设置照原机（$(grep -c . "$props") 条）"
+    else
+      printf '%s\n' "$out" | sed 's/^/  /'
+      warn "PostgreSQL 库 $db 的库级权限与设置没恢复完整（见上）：核对 psql -c '\\l+ $db'，按 $props 手动补"
+    fi
+  elif [ ! -e "$props" ]; then
+    warn "包里没有 $(basename "$props")：PostgreSQL 库 $db 的连接权限是默认的（PUBLIC 能连），原机收紧过的话手动 REVOKE CONNECT ON DATABASE \"$db\" FROM PUBLIC"
+  fi
   st_add DBDONE "pg:$db" "$sha"
 }
 
@@ -1121,6 +1144,15 @@ pg_restart() {
     for i in 1 2 3 4 5 6 7 8 9 10; do pg_ok && { ok "PostgreSQL 已按原机配置重启"; return 0; }; sleep 3; done
   fi
   warn "PostgreSQL 重启后连不上：看 ${PG_DATA_DIR:-数据目录} 下的日志，确认放回的 pg_hba.conf / postgresql.auto.conf 适用于这台机器"
+}
+redis_pending() {  # redis_pending <目标路径>：在宝塔 Redis 的目录里、本机又还没装 Redis
+  local d; d=$(redis_dir)
+  case "$1" in "$d"|"$d"/*) ! redis_installed ;; *) return 1 ;; esac
+}
+redis_skipped() {  # 这次有没有因为 Redis 没装而没放的条目
+  local n
+  for n in "${!IT_KIND[@]}"; do [ "${PL_ACT[n]}" = SKIP ] && redis_pending "${IT_DST[n]}" && return 0; done
+  return 1
 }
 touched_kind() {  # 这次有没有放下某一类条目
   local n
@@ -1417,8 +1449,10 @@ apply_all() {
   touched_under /etc/systemd/logind.conf.d && manual "systemctl restart systemd-logind（或重启机器），让原机的 logind 设置（RemoveIPC=no）生效" \
     "没有它，postgres 用户的会话一结束共享内存就被删，PostgreSQL 出错"
   pg_restart
-  touched_under /www/server/redis/ && manual "重启宝塔 Redis：/etc/init.d/redis restart（或在面板里重启）" \
+  touched_under "$(redis_dir)/" && manual "重启宝塔 Redis：/etc/init.d/redis restart（或在面板里重启）" \
     "redis.conf 换成了原机的（含原机的密码），容器里的连接串用的是原机密码，重启后才对得上"
+  redis_skipped && manual "在面板装好 Redis 后重跑本脚本，放回原机的 redis.conf（含密码）" \
+    "本机还没装宝塔 Redis（没有 ${REDIS_SERVER_BIN:-$(redis_dir)/src/redis-server}），先放进去会被宝塔安装覆盖或让安装失败"
   ssh_2fa_check
   ufw_ssh_self_check
   touched_under /etc/sysctl && { sysctl --system >/dev/null 2>&1 && ok "内核参数已按原机生效" || warn "sysctl --system 失败"; }
@@ -1773,6 +1807,7 @@ do_check() {
     else warn "PostgreSQL 不可用（PG_BIN_DIR=${PG_BIN_DIR:-没配}）：恢复前在面板装好（原机 $(pg_orig_ver)），并把 pgvector 编译装进去"; fi
     [ -z "$PG_EXT_MISSING" ] || warn "本机 PostgreSQL 没有这些库要的扩展（库:扩展）：$PG_EXT_MISSING"
   fi
+  redis_skipped && warn "本机还没装宝塔 Redis：$(redis_dir) 下的配置先不放，在面板装好 Redis 后再 restore"
   [ -n "$(nginx_bin)" ] && ok "nginx：$(nginx_bin)" || warn "没有 nginx：站点配置会放好，但没法重载"
   docker info >/dev/null 2>&1 && ok "docker 可用" || log "docker 不可用：恢复时会从官方 apt 源安装"
   echo

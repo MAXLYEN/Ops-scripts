@@ -1104,6 +1104,10 @@ add_pg_to_hk() {
     'CREATE ROLE postgres;' "ALTER ROLE postgres WITH SUPERUSER LOGIN PASSWORD 'SCRAM-SHA-256\$4096:pg';" > "$s/db/pg-globals.sql"
   printf '%s\t%s\tUTF8\tC.UTF-8\tC.UTF-8\n' openwebui openwebui postgres postgres > "$s/db/pg-databases.tsv"
   pg_dump_body > "$s/db/pg/openwebui.dump"
+  printf '%s\n' 'REVOKE ALL ON DATABASE "openwebui" FROM PUBLIC;' 'GRANT CONNECT ON DATABASE "openwebui" TO "openwebui";' \
+    "ALTER DATABASE \"openwebui\" SET statement_timeout TO '60s';" > "$s/db/pg/openwebui.props.sql"
+  [ -z "${PG_PROPS:-}" ] || printf '%s\n' "$PG_PROPS" > "$s/db/pg/openwebui.props.sql"
+  [ "${PG_PROPS-x}" != none ] || rm -f "$s/db/pg/openwebui.props.sql"
   echo 'host openwebui openwebui 172.16.0.0/12 scram-sha-256' > "$s/rootfs$R/pgdata/pg_hba.conf"
   echo "listen_addresses = '*'" > "$s/rootfs$R/pgdata/postgresql.auto.conf"
   echo 17.11 > "$s/system/ref/pgsql/server_version"
@@ -1140,6 +1144,11 @@ pg_local() {  # 新机：宝塔已装好 PostgreSQL（数据目录有 PG_VERSION
   [ "$(grep -n '^SQL CREATE DATABASE' "$PGS/log" | cut -d: -f1)" -lt "$(grep -n '^RESTORE openwebui' "$PGS/log" | cut -d: -f1)" ]
   has "PostgreSQL 角色 1 个（含密码哈希；本机的 postgres 不动）"
   has "PostgreSQL 库 openwebui：2 张表"
+  # 库本身的权限（原机 REVOKE CONNECT FROM PUBLIC）与设置在导入之后重放
+  grep -qxF 'SQL REVOKE ALL ON DATABASE "openwebui" FROM PUBLIC;' "$PGS/log"
+  grep -qxF 'SQL GRANT CONNECT ON DATABASE "openwebui" TO "openwebui";' "$PGS/log"
+  [ "$(grep -n '^RESTORE openwebui' "$PGS/log" | cut -d: -f1)" -lt "$(grep -n '^SQL REVOKE ALL ON DATABASE' "$PGS/log" | cut -d: -f1)" ]
+  has "PostgreSQL 库 openwebui：库级权限与设置照原机（3 条）"
   # 配置：宝塔的默认 pg_hba.conf 留 .bak 再换成原机的，放完重启
   grep -q 'scram-sha-256' "$R/pgdata/pg_hba.conf"
   ls "$R/pgdata"/pg_hba.conf.bak.* >/dev/null
@@ -1212,4 +1221,53 @@ pg_local() {  # 新机：宝塔已装好 PostgreSQL（数据目录有 PG_VERSION
   [ -e "$PGS/role/postgres" ]
   has "删 PostgreSQL 库 openwebui"
   has "删 PostgreSQL 角色 openwebui"
+}
+
+@test "PostgreSQL 库级权限：重放出错就告警并说怎么补" {
+  make_split; PG_PROPS='REVOKE ALL ON DATABASE "openwebui" FROM PUBLIC;
+GRANT BROKEN;' add_pg_to_hk; v2_local; pg_local
+  restore restore "$HK" "$VA" --no-start
+  echo "$output"
+  has 'ERROR:  syntax error at or near "BROKEN"'
+  has "PostgreSQL 库 openwebui 的库级权限与设置没恢复完整"
+}
+
+@test "PostgreSQL 库级权限：旧包没有 .props.sql 时告警（连接权限回到默认）" {
+  make_split; PG_PROPS=none add_pg_to_hk; v2_local; pg_local
+  restore restore "$HK" "$VA" --no-start
+  echo "$output"
+  has "包里没有 openwebui.props.sql：PostgreSQL 库 openwebui 的连接权限是默认的（PUBLIC 能连）"
+}
+
+# 宝塔 Redis 的配置：本机没装 Redis 时不放（宝塔之后装 Redis 会覆盖或装失败），装了才放并提示重启
+add_redis_to_hk() {
+  local s=/tmp/pkgsrc/hk
+  mkdir -p "$s/rootfs$R/redis"
+  printf 'requirepass original-secret\n' > "$s/rootfs$R/redis/redis.conf"
+  printf '%s\n' "$R/redis/redis.conf	600	root:root	file" >> "$s/restore-manifest.tsv"
+  seal "$s" "$HK" tar
+  printf '%s\n' "REDIS_DIR=$R/redis" "REDIS_SERVER_BIN=$R/redis/src/redis-server" >> /etc/ops-scripts/env.conf
+}
+
+@test "宝塔 Redis 还没装：redis.conf 不放（目录都不建），check 提示、恢复列进手动步骤" {
+  make_split; add_redis_to_hk; v2_local
+  restore check "$HK" "$VA"
+  has "本机还没装宝塔 Redis：$R/redis 下的配置先不放"
+  restore restore "$HK" "$VA" --no-start
+  echo "$output"
+  [ ! -e "$R/redis" ]
+  has "在面板装好 Redis 后重跑本脚本，放回原机的 redis.conf（含密码）"
+  lacks "重启宝塔 Redis"
+}
+
+@test "宝塔 Redis 装好了：redis.conf 换成原机的（600），提示重启 Redis" {
+  make_split; add_redis_to_hk; v2_local
+  mkdir -p "$R/redis/src"; printf '#!/bin/sh\n' > "$R/redis/src/redis-server"; chmod 755 "$R/redis/src/redis-server"
+  echo 'requirepass panel-default' > "$R/redis/redis.conf"
+  restore restore "$HK" "$VA" --no-start
+  echo "$output"
+  grep -qx 'requirepass original-secret' "$R/redis/redis.conf"
+  [ "$(stat -c %a "$R/redis/redis.conf")" = 600 ]
+  has "重启宝塔 Redis：/etc/init.d/redis restart"
+  lacks "在面板装好 Redis 后重跑"
 }

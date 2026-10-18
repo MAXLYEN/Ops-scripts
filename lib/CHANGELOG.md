@@ -8,7 +8,7 @@
 
 | 文件 | 原版本 → 当前版本 | 变更 |
 | --- | --- | --- |
-| `common.sh` | 1.4.1 → 1.5.0 | 新增 `bk_pg`（角色 `pg_dumpall --globals-only`、每库 `pg_dump -Fc` 并 `pg_restore --list` 校验、`pg-databases.tsv`、配置记 `pg-conf`、`postgresql.conf` 只作参考），`PG_BIN_DIR` 没配就跳过；`_bk_try` 统一 MySQL / PostgreSQL 的重试与报错原文；`bk_compose_env_files`，`bk_compose_projects` 收 `env_file` 引用的文件；`EXTRA_SNAPSHOT_EXCLUDES`；系统配置多收 `/etc/systemd/logind.conf.d` |
+| `common.sh` | 1.4.1 → 1.5.0 | 新增 `bk_pg`（角色 `pg_dumpall --globals-only`、每库 `pg_dump -Fc` 并 `pg_restore --list` 校验、库本身的权限与设置导成 `<库>.props.sql`（`bk_pg_props_sql`，已在 PostgreSQL 17.11 上验证生成再重放前后一致）、`pg-databases.tsv`、配置记 `pg-conf`、`postgresql.conf` 只作参考），`PG_BIN_DIR` 没配就跳过；`_bk_try` 统一 MySQL / PostgreSQL 的重试与报错原文；`bk_compose_env_files`，`bk_compose_projects` 收 `env_file` 引用的文件；`EXTRA_SNAPSHOT_EXCLUDES`；系统配置多收 `/etc/systemd/logind.conf.d` |
 
 ## 2026-10-16：MySQL 客户端优先用宝塔自带的；连不上时重试
 
