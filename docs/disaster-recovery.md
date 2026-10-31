@@ -182,6 +182,20 @@ opsget init/run
 
 4. **PostgreSQL、Redis 与 pgvector**（`manifest.txt` 里有 `PostgreSQL:` 一行时）：在面板软件商店装 **PostgreSQL（同一大版本，原机是 17）**和 **Redis**。Open WebUI、LobeHub 的库要用 pgvector，宝塔商店里没有，要自己编译进宝塔的 PostgreSQL（只编译扩展，不重新编译 PostgreSQL；宝塔升级或重装 PostgreSQL 后要重做）：
 
+   **装好 PostgreSQL 马上**关掉 logind 的 RemoveIPC，再重启 PostgreSQL。宝塔建的 `postgres` 是普通用户，它的会话一结束，logind 默认会删掉它的共享内存，PostgreSQL 随后报 `could not open shared memory segment`，恢复时导库就会失败。备份包里也带着这个设置，但要等恢复放回之后才生效，太晚了：
+
+   ```bash
+   mkdir -p /etc/systemd/logind.conf.d && printf '[Login]\nRemoveIPC=no\n' > /etc/systemd/logind.conf.d/10-postgres-removeipc.conf
+   ```
+
+   ```bash
+   systemctl restart systemd-logind && /etc/init.d/pgsql restart
+   ```
+
+   重启 `systemd-logind` 不影响已登录的 SSH。宝塔的 PostgreSQL 要用 `/etc/init.d/pgsql restart` 重启，`systemctl restart` 不生效。
+
+   然后编译 pgvector：
+
    ```bash
    DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential
    ```
@@ -200,7 +214,11 @@ opsget init/run
 
    `OPTFLAGS=""` 不按本机 CPU 优化，换机器也能用。没装 pgvector 的话恢复脚本会在动手前停下，告诉你哪个库缺哪个扩展。
 
-   原机的 PostgreSQL 库用 `en_US.UTF-8` 排序规则（包里 `db/pg-databases.tsv` 第 4 列）。新机没生成这个 locale 的话，恢复时会退回默认的排序规则并告警，所以先确认，没有就生成（不用重启 PostgreSQL）：
+   原机的 PostgreSQL 库用 `en_US.UTF-8` 排序规则（包里 `db/pg-databases.tsv` 第 4 列）。新机没生成这个 locale 的话，恢复时会退回默认的排序规则并告警，所以先确认，没有就生成（不用重启 PostgreSQL）。有的云镜像没装 `locales` 包，先补上：
+
+   ```bash
+   command -v locale-gen >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q locales
+   ```
 
    ```bash
    locale -a | grep -qi '^en_US\.utf8$' || { sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && locale-gen; }
