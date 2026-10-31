@@ -1,6 +1,7 @@
 #!/bin/bash
 # init/03-ssh-firewall.sh — 加固 SSH、启用 ufw 并配置 fail2ban
-# VERSION: 1.4.1
+# VERSION: 1.5.0
+# 1.5.0: 默认只对任意来源放行 80/tcp、443/tcp（加上 SSH），不再放行 10001:11000、50000:60000 和任何 UDP。2026-10-30 机群整 IP 被封，风险特征之一就是 ufw 对任意来源放行大段端口；机群已按此收紧，3x-ui 停用后也不再需要 10001:11000。代理节点的端口写进 env.conf 的 SVC_TCP_RANGES / SVC_UDP_RANGES，只写在用的端口。
 # 1.4.1: 确认提示改用 is_yes：前后空格、大小写、全角字符不再让 yes 被当成取消。
 # 1.4.0: fail2ban 写入 ignoreip：本机、当前 SSH 客户端 IP 与 env.conf 的 ADMIN_IPS，避免把管理员自己封掉。
 # 用法: 以 root 执行；先打开第二个 SSH 窗口并确认带外控制台可用。
@@ -25,9 +26,11 @@ set -e
 TS=$(date +%Y%m%d-%H%M%S)
 export DEBIAN_FRONTEND=noninteractive
 
-# 已有 env.conf 时从中读取 TCP/UDP 端口段和容器网段。
-EXTRA_TCP="80 443 10001:11000 50000:60000"
-EXTRA_UDP="443 50000:60000"
+# 对任意来源放行的端口。默认只有 80、443；代理节点在 env.conf 的 SVC_TCP_RANGES /
+# SVC_UDP_RANGES 里写实际在用的端口，不写大段端口（对外大段放行是被整 IP 封锁的风险特征）。
+# 已有 env.conf 时从中读取这两项和容器网段。UDP 默认为空：不放行任何 UDP。
+EXTRA_TCP="80 443"
+EXTRA_UDP=""
 DOCKER_CIDR=""
 [ -f /etc/ops-scripts/env.conf ] && . /etc/ops-scripts/env.conf 2>/dev/null || true
 EXTRA_TCP="${SVC_TCP_RANGES:-$EXTRA_TCP}"
