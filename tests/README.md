@@ -5,7 +5,7 @@
 | 文件 | 版本 | 作用 |
 | --- | --- | --- |
 | `run.sh` | 1.0.0 | 入口：`--lint` 只跑静态检查，`--e2e` 只跑端到端，第二个参数按用例名过滤 |
-| `lint.sh` | 1.0.0 | 换行符、语法、shellcheck、VERSION 头、MANIFEST、菜单归类、ENV-REQUIRED 键 |
+| `lint.sh` | 1.1.0 | 换行符、语法、shellcheck、VERSION 头（含脚本里的版本常量与头部一致）、MANIFEST、菜单归类、ENV-REQUIRED 键 |
 | `Dockerfile` | — | 端到端用的一次性 Debian 12 环境 |
 | `helpers.bash` | — | 模拟仓库、本地 HTTP 服务、脚本桩、断言 |
 | `drive.py` | — | 在伪终端里运行交互命令并逐行送入按键（菜单读 `/dev/tty`，管道喂不进去） |

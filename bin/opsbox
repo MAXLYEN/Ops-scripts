@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # bin/opsbox — ops-scripts 中文菜单：按场景挑功能，常用组合自动串联
-# VERSION: 1.6.0
+# VERSION: 1.6.1
+# 1.6.1: 横幅显示的版本跟上头部（OPSBOX_VERSION 从 1.5.1 起升级都没改它，横幅还写着 opsbox 1.5.0）；tests/lint.sh 从此检查两者一致。菜单行为不变。
 # 1.6.0: 按 2026-10 备份重新规划：「立即备份」「备份时间表」「Vaultwarden 升级前备份」改用 vault-backup / hk-host-backup（旧的 vw / xboard 不再列出）；从备份恢复默认取 hk-host 与 vault 两个包；比对备份包默认看 /box/backup/hk-host。
 # 1.5.2: 登记表注明 ops/ssh-allowlist 不进菜单（要两个窗口配合确认）；菜单行为不变。
 # 1.5.1: 登记表注明 ops/panel-backup-create 不进菜单（每周定时任务调用）；菜单行为不变。
@@ -11,7 +12,7 @@
 
 set -o pipefail
 
-OPSBOX_VERSION=1.5.0
+OPSBOX_VERSION=1.6.1
 BIN_DIR=/usr/local/bin
 ENV_FILE=/etc/ops-scripts/env.conf
 REF_FILE=/etc/ops-scripts/ref

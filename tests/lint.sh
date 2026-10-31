@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tests/lint.sh — 静态检查：换行符、语法、shellcheck、版本头，以及几处「要人记得同步」的清单
-# VERSION: 1.0.0
+# VERSION: 1.1.0
+# 1.1.0: 新增「版本常量与头部一致」：opsbox 的 OPSBOX_VERSION、common.sh 的 OPS_COMMON_VERSION 都曾在升级时漏改，横幅显示的是旧版本。
 # 1.0.0: 从 CI 工作流里搬出来，本地与 CI 跑同一份，检查项不再两处维护。
 # 只读检查，不执行任何脚本。在仓库任意位置运行均可；有问题时以 1 退出。
 
@@ -59,6 +60,18 @@ version_head() {
   local f
   while read -r f; do
     grep -q '^# VERSION:' "$f" || err "$f" "缺少 # VERSION: 头"
+  done < "$TMP/scripts"
+}
+
+# 脚本里另写一份自身版本的常量（OPSBOX_VERSION、OPS_COMMON_VERSION 之类）必须等于头部：
+# 升级只改头部、漏改常量，界面和调用方看到的就是旧版本。只认 x.y.z 形式，PG_VERSION=17 这类不算
+version_const() {
+  local f h c
+  while read -r f; do
+    h=$(sed -n 's/^# VERSION:[[:space:]]*//p' "$f" | head -1)
+    for c in $(sed -nE 's/^[A-Z_]+_VERSION="?([0-9]+\.[0-9]+\.[0-9]+)"?[[:space:]]*(#.*)?$/\1/p' "$f"); do
+      [ "$c" = "$h" ] || err "$f" "版本常量 $c 与 # VERSION: 头 $h 不一致"
+    done
   done < "$TMP/scripts"
 }
 
@@ -130,6 +143,7 @@ check "换行符都是 LF" lf_only
 check "语法" syntax
 check "shellcheck" shellcheck_all
 check "每个脚本都有 VERSION 头" version_head
+check "版本常量与头部一致" version_const
 check "MANIFEST 与文件一致" manifest
 check "opsbox 菜单与 MANIFEST 一致" menu
 check "ENV-REQUIRED 的键都在配置模板里" env_keys

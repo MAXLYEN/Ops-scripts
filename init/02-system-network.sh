@@ -1,16 +1,18 @@
 #!/bin/bash
 # init/02-system-network.sh — 配置时区、网络、磁盘和内核参数
-# VERSION: 1.2.0
+# VERSION: 1.2.1
+# 1.2.1: 服务端口默认值改为 "80 443"，与 init/03 1.5.0 对任意来源放行的端口一致（原先是 10000:11000 50000:60000，机群已不再放行这些端口段）。临时端口重叠检查对单个端口同样成立（区间两端取到同一个数），逻辑未改。
 # 1.2.0: 新增 /proc hidepid：普通用户看不到其他用户的进程与命令行（7z 在命令行传备份密码），写入 fstab 并立即生效。
-# 用法: 以 root 执行；已存在的 env.conf 可覆盖服务端口段。
+# 用法: 以 root 执行；已存在的 env.conf 可覆盖服务端口（SVC_TCP_RANGES）。
 
 set -e
 [ "$(id -u)" -eq 0 ] || { echo "❌ 需要 root"; exit 1; }
 TS=$(date +%Y%m%d-%H%M%S)
 export DEBIAN_FRONTEND=noninteractive
 
-# 已有 env.conf 时沿用其中的服务端口段，避免与防火墙规划不一致。
-SVC_RANGES="10000:11000 50000:60000"
+# 已有 env.conf 时沿用其中的服务端口，避免与防火墙规划不一致；默认值与 init/03 相同。
+# 可以是单个端口或 起:止 端口段，下面的临时端口重叠检查两种都认（单个端口两端是同一个数）。
+SVC_RANGES="80 443"
 [ -f /etc/ops-scripts/env.conf ] && . /etc/ops-scripts/env.conf 2>/dev/null || true
 SVC_RANGES="${SVC_TCP_RANGES:-$SVC_RANGES}"
 
