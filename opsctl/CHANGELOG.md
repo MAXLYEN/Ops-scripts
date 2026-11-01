@@ -1,5 +1,11 @@
 # opsctl 版本迭代记录
 
+## 2026-11-01 — 2.1.0
+
+- 对齐真实中转落地机与直连机 8 步上线流程：新增 `landing_node` 角色模板（只开 SSH、仅对中转入口放行 `30xxx`、Komari 禁用 WebSSH + `xboard-node`）。
+- `security.scan` / `security.fix` 新增 `bookworm-security` 官方安全源检查与 `komari-agent` `AGENT_DISABLE_WEB_SSH=true` 策略检查及自动加固。
+- `node.configure` 支持内置中转入口标识、`subdomain_prefix`（如 `zchk1` / `zcjp1`）、Xboard `machine_id`、内部落地节点名（`落地-xxx-L`）与 `30xxx` 端口映射列表。
+
 ## 2026-10-31 — 2.0.0
 
 - 扩展任务执行闭环协议：`plan` / `apply`（带幂等 `job_id`） / `status`（带 `after_seq` 断线续读） / `verify`（独立验收） / `jobs.list`。

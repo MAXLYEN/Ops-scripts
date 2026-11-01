@@ -4,8 +4,8 @@
 
 | 文件 | 版本 | 用途 |
 | --- | --- | --- |
-| `bootstrap.py` | 2.0.0 | root 首次安装、受限 SSH 入口、白名单 JSON 动作（含任务闭环、安全扫描修复、新机模板与节点绑定） |
-| `SHA256SUMS` | 2.0.0 | 发布文件的 SHA-256 校验值 |
+| `bootstrap.py` | 2.1.0 | root 首次安装、受限 SSH 入口、白名单 JSON 动作（含任务闭环、安全扫描修复、新机模板与节点绑定） |
+| `SHA256SUMS` | 2.1.0 | 发布文件的 SHA-256 校验值 |
 
 依赖：Debian 12 或兼容的 Linux，`/usr/bin/python3`、OpenSSH server、`sudo`，以及运行中的 systemd journald。安装器依赖 `useradd`、`chpasswd`、`userdel`、`visudo`、`sshd`、`systemctl`。没有 systemd 的测试容器可在装好后启动 sshd；正常服务器会在配置校验后 reload `ssh`。本阶段没有跳转账号安装器，目标机 `opsdeck` 始终禁止转发；需要跳转时由独立项目另行配置只准登记目标的 `direct-tcpip` 账号。
 

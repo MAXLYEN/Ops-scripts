@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # opsctl/bootstrap.py — OpsDeck 受控运维的首次安装器和受限服务端
-# VERSION: 2.0.0
-# 2.0.0: 扩展任务执行闭环（plan/apply/status/verify/jobs.list）、安全基线与修复复测、新机角色模板与节点联动、批量复检与升級支持。
+# VERSION: 2.1.0
+# 2.1.0: 对齐真实新机上线流程（安全源/内核检查、UTC/ufw/fail2ban 基线、Komari WebSSH 禁用、落地机中转端口与 Xboard 关联绑定）。
 
 """Run as root from a verified artifact; installed copies dispatch by argv[0]."""
 
@@ -23,7 +23,7 @@ import sys
 import tempfile
 import uuid
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 API_VERSION = 1
 MAX_REQUEST = 65536
 ETC = pathlib.Path("/etc/opsctl")
@@ -47,6 +47,7 @@ LOCK = ETC / "lock"
 READY = ETC / "ready"
 FP_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+ENTRY_ID_RE = re.compile(r"^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|builtin-relay-[0-9-]+)$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 CAPABILITIES = [
@@ -64,10 +65,15 @@ CAPABILITIES = [
     "key.revoke",
 ]
 TEMPLATES = {
-    "base_node": {
-        "title": "基础节点模板",
+    "landing_node": {
+        "title": "中转落地机模板（只开 SSH + 仅对中转入口 IP 放行 30xxx + Komari/xboard-node）",
         "packages": ["openssh-server", "sudo", "curl", "ca-certificates", "fail2ban", "ufw"],
-        "services": ["ssh"],
+        "services": ["ssh", "fail2ban", "ufw", "komari-agent", "xboard-node"],
+    },
+    "base_node": {
+        "title": "直连/中转入口模板（SSH/UFW/Fail2ban + Reality 偷自己回源）",
+        "packages": ["openssh-server", "sudo", "curl", "ca-certificates", "fail2ban", "ufw", "nginx"],
+        "services": ["ssh", "fail2ban", "ufw", "komari-agent", "xboard-node"],
     },
     "docker_app": {
         "title": "Docker 应用机模板",
@@ -339,6 +345,16 @@ def read_optional_json(path):
     return json.loads(read_owned(path, 0o600).decode("utf-8"))
 
 
+def check_security_repo():
+    for p in [pathlib.Path("/etc/apt/sources.list"), *pathlib.Path("/etc/apt/sources.list.d").glob("*")]:
+        try:
+            if p.is_file() and "-security" in p.read_text(encoding="utf-8", errors="ignore"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def scan_security(asset):
     running_kernel = platform.release()
     installed_kernels = []
@@ -370,6 +386,17 @@ def scan_security(asset):
     except Rejected:
         sudo_ok = False
 
+    sec_repo_ok = check_security_repo()
+    komari_override = pathlib.Path("/etc/systemd/system/komari-agent.service.d/override.conf")
+    komari_unit_exists = any(
+        (b / "komari-agent.service").is_file()
+        for b in (pathlib.Path("/etc/systemd/system"), pathlib.Path("/lib/systemd/system"), pathlib.Path("/usr/lib/systemd/system"))
+    )
+    komari_webssh_disabled = (
+        not komari_unit_exists
+        or (komari_override.is_file() and "AGENT_DISABLE_WEB_SSH=true" in komari_override.read_text(encoding="utf-8", errors="ignore"))
+    )
+
     findings = []
     if not sshd_ok:
         findings.append({
@@ -390,6 +417,16 @@ def scan_security(asset):
             "status": "open",
             "fixable": True,
             "evidence": "/etc/sudoers.d/opsctl does not match enforced policy",
+        })
+    if not komari_webssh_disabled:
+        findings.append({
+            "id": "SEC-KOMARI-WEBSSH",
+            "severity": "medium",
+            "category": "service",
+            "title": "Komari 探针尚未写入 AGENT_DISABLE_WEB_SSH=true 加固项",
+            "status": "open",
+            "fixable": True,
+            "evidence": "missing override.conf for komari-agent.service",
         })
     if reboot_required:
         findings.append({
@@ -420,12 +457,14 @@ def scan_security(asset):
         "running_kernel": running_kernel,
         "installed_kernels": installed_kernels,
         "reboot_required": reboot_required,
+        "security_repo_present": sec_repo_ok,
+        "komari_webssh_disabled": komari_webssh_disabled,
         "sshd_hardened": sshd_ok,
         "sudo_hardened": sudo_ok,
         "findings": findings,
         "diff": diff,
         "gate_passed": gate_passed,
-        "coverage": ["os_packages", "kernel_state", "ssh_policy", "sudo_policy"],
+        "coverage": ["os_packages", "kernel_state", "security_repo", "ssh_policy", "sudo_policy", "komari_policy"],
     }
 
 
@@ -473,6 +512,8 @@ def discover(asset):
         "security_summary": {
             "gate_passed": security["gate_passed"],
             "reboot_required": security["reboot_required"],
+            "security_repo_present": security["security_repo_present"],
+            "komari_webssh_disabled": security["komari_webssh_disabled"],
             "open_findings": len(security["findings"]),
             "has_baseline": security["diff"]["has_baseline"],
         },
@@ -491,7 +532,7 @@ def validate_plan_action(action, target_params, keys):
     if action == "security.fix":
         fields(target_params, ("save_baseline",), optional=("fix_ids",))
         save_b = target_params["save_baseline"]
-        fix_ids = target_params.get("fix_ids", ["SEC-SSH-RESTRICT", "SEC-SUDO-WHITELIST"])
+        fix_ids = target_params.get("fix_ids", ["SEC-SSH-RESTRICT", "SEC-SUDO-WHITELIST", "SEC-KOMARI-WEBSSH"])
         if not isinstance(save_b, bool) or not isinstance(fix_ids, list) or not all(isinstance(x, str) and SAFE_NAME_RE.fullmatch(x) for x in fix_ids):
             raise Rejected("INVALID_REQUEST", "安全修复参数无效")
         norm = {"fix_ids": sorted(set(fix_ids)), "save_baseline": save_b}
@@ -506,8 +547,21 @@ def validate_plan_action(action, target_params, keys):
         spec = TEMPLATES[tpl]
         return norm, {"template": tpl, "title": spec["title"], "packages": spec["packages"], "services": spec["services"]}
     if action == "node.configure":
-        fields(target_params, ("server_name", "role", "protocol", "listen_port"),
-               optional=("komari_uuid", "xboard_machine_id", "xboard_node_id", "entry_asset_ids", "subscription_names", "domain"))
+        fields(
+            target_params,
+            ("server_name", "role", "protocol", "listen_port"),
+            optional=(
+                "subdomain_prefix",
+                "komari_uuid",
+                "xboard_machine_id",
+                "xboard_node_id",
+                "entry_asset_ids",
+                "subscription_names",
+                "internal_names",
+                "relay_bindings",
+                "domain",
+            ),
+        )
         sname = target_params["server_name"]
         role = target_params["role"]
         proto = target_params["protocol"]
@@ -519,13 +573,19 @@ def validate_plan_action(action, target_params, keys):
             raise Rejected("INVALID_REQUEST", "节点联动配置参数无效")
         entries = target_params.get("entry_asset_ids", [])
         subs = target_params.get("subscription_names", [])
+        inames = target_params.get("internal_names", [])
+        rbindings = target_params.get("relay_bindings", [])
         domain = target_params.get("domain", "")
+        sub_prefix = target_params.get("subdomain_prefix", "")
         komari_uuid = target_params.get("komari_uuid", "")
         xb_machine = target_params.get("xboard_machine_id", "")
         xb_node = target_params.get("xboard_node_id", "")
-        if (not isinstance(entries, list) or not all(isinstance(x, str) and ID_RE.fullmatch(x) for x in entries)
+        if (not isinstance(entries, list) or not all(isinstance(x, str) and ENTRY_ID_RE.fullmatch(x) for x in entries)
                 or not isinstance(subs, list) or not all(isinstance(x, str) and len(x) <= 80 for x in subs)
+                or not isinstance(inames, list) or not all(isinstance(x, str) and len(x) <= 80 for x in inames)
+                or not isinstance(rbindings, list)
                 or not isinstance(domain, str) or len(domain) > 253
+                or not isinstance(sub_prefix, str) or len(sub_prefix) > 64
                 or not isinstance(komari_uuid, str) or len(komari_uuid) > 64
                 or not isinstance(xb_machine, str) or len(xb_machine) > 64
                 or not isinstance(xb_node, str) or len(xb_node) > 64):
@@ -533,16 +593,29 @@ def validate_plan_action(action, target_params, keys):
         norm = {
             "domain": domain,
             "entry_asset_ids": sorted(set(entries)),
+            "internal_names": inames,
             "komari_uuid": komari_uuid,
             "listen_port": port,
             "protocol": proto,
+            "relay_bindings": rbindings,
             "role": role,
             "server_name": sname,
+            "subdomain_prefix": sub_prefix,
             "subscription_names": subs,
             "xboard_machine_id": xb_machine,
             "xboard_node_id": xb_node,
         }
-        return norm, {"server_name": sname, "role": role, "protocol": proto, "listen_port": port, "subscription_names": subs}
+        return norm, {
+            "server_name": sname,
+            "role": role,
+            "protocol": proto,
+            "domain": domain,
+            "listen_port": port,
+            "xboard_machine_id": xb_machine,
+            "internal_names": inames,
+            "subscription_names": subs,
+            "relay_bindings": rbindings,
+        }
     if action == "service.control":
         fields(target_params, ("service", "operation"))
         svc = target_params["service"]
@@ -616,9 +689,14 @@ def execute_apply(asset, keys, actor, params):
     if target_action == "security.fix":
         atomic_write(SUDOERS, SUDO_TEXT.encode("ascii"), 0o440)
         atomic_write(SSHD, SSHD_TEXT.encode("ascii"), 0o644)
+        komari_dir = pathlib.Path("/etc/systemd/system/komari-agent.service.d")
+        if not komari_dir.exists():
+            komari_dir.mkdir(parents=True, mode=0o755)
+        if safe_dir(komari_dir):
+            atomic_write(komari_dir / "override.conf", b"[Service]\nEnvironment=AGENT_DISABLE_WEB_SSH=true\n", 0o644)
         if not safe_file(SUDOERS, 0o440) or not safe_file(SSHD, 0o644):
             raise Rejected("UNTRUSTED_STATE", "权限策略文件写回校验失败")
-        events.append({"seq": 2, "time": utc_now(), "step": "hardening.applied", "message": "已校验并同步 sshd 与 sudoers 受限策略"})
+        events.append({"seq": 2, "time": utc_now(), "step": "hardening.applied", "message": "已校验并同步 sshd、sudoers 与 Komari WebSSH 禁用策略"})
         scan_after = scan_security(asset)
         if norm_params["save_baseline"]:
             baseline_doc = {
@@ -655,7 +733,7 @@ def execute_apply(asset, keys, actor, params):
             "configured_at": utc_now(),
         }
         atomic_write(NODE_CONF, canonical(node_doc) + b"\n", 0o600)
-        events.append({"seq": 2, "time": utc_now(), "step": "node.bound", "message": f"已写入节点绑定：{norm_params['server_name']} ({norm_params['role']})"})
+        events.append({"seq": 2, "time": utc_now(), "step": "node.bound", "message": f"已写入节点与中转绑定：{norm_params['server_name']} ({norm_params['role']})"})
         result_data = node_doc
     elif target_action == "service.control":
         svc = norm_params["service"]
@@ -696,8 +774,9 @@ def execute_verify(asset, params):
         sec = scan_security(asset)
         checks.append({"name": "sshd_hardened", "ok": sec["sshd_hardened"]})
         checks.append({"name": "sudo_hardened", "ok": sec["sudo_hardened"]})
+        checks.append({"name": "komari_webssh_disabled", "ok": sec["komari_webssh_disabled"]})
         checks.append({"name": "baseline_present", "ok": BASELINE.exists()})
-        passed = sec["sshd_hardened"] and sec["sudo_hardened"]
+        passed = sec["sshd_hardened"] and sec["sudo_hardened"] and sec["komari_webssh_disabled"]
     elif target_action == "template.apply":
         prof = read_optional_json(PROFILE)
         ok = isinstance(prof, dict) and prof.get("asset_id") == asset["asset_id"]
