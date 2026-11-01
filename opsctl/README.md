@@ -4,8 +4,8 @@
 
 | 文件 | 版本 | 用途 |
 | --- | --- | --- |
-| `bootstrap.py` | 1.0.0 | root 首次安装、受限 SSH 入口、白名单 JSON 动作 |
-| `SHA256SUMS` | 1.0.0 | 发布文件的 SHA-256 校验值 |
+| `bootstrap.py` | 2.0.0 | root 首次安装、受限 SSH 入口、白名单 JSON 动作（含任务闭环、安全扫描修复、新机模板与节点绑定） |
+| `SHA256SUMS` | 2.0.0 | 发布文件的 SHA-256 校验值 |
 
 依赖：Debian 12 或兼容的 Linux，`/usr/bin/python3`、OpenSSH server、`sudo`，以及运行中的 systemd journald。安装器依赖 `useradd`、`chpasswd`、`userdel`、`visudo`、`sshd`、`systemctl`。没有 systemd 的测试容器可在装好后启动 sshd；正常服务器会在配置校验后 reload `ssh`。本阶段没有跳转账号安装器，目标机 `opsdeck` 始终禁止转发；需要跳转时由独立项目另行配置只准登记目标的 `direct-tcpip` 账号。
 
@@ -37,8 +37,13 @@
 
 | 动作 | `params` | 结果 |
 | --- | --- | --- |
-| `host.discover` | `{}` | `asset_id`、主机名、OS、内核、架构、已知服务和软件包、可用动作；只读 |
-| `plan` | `{"action":"key.revoke","fingerprint":"SHA256:..."}` | `plan_id` 与资产、目标指纹摘要 |
+| `host.discover` | `{}` | `asset_id`、主机名、OS、内核、架构、已知服务和软件包、可用动作、安全摘要与角色/节点绑定；只读 |
+| `security.scan` | `{}` | 内核重启状态、sshd/sudo 策略状态、风险项、与上次基线的差异（新增/持续/已修复）、上线门槛结果 |
+| `plan` | `{"action":"...","params":{...}}` | 支持 `key.revoke`、`security.fix`、`template.apply`、`node.configure`、`service.control`；返回环境绑定的 `plan_id` |
+| `apply` | `{"job_id":"<UUID>","action":"...","plan_id":"<64 位十六进制>","params":{...}}` | 校验 `plan_id` 后幂等执行计划并持久化任务记录与事件流 |
+| `status` | `{"job_id":"<UUID>","after_seq":0}` | 断线后查询原任务状态并续读增量事件 |
+| `verify` | `{"job_id":"<UUID>"}` | 对已完成任务做独立运行/落盘验收并记录 `verification` |
+| `jobs.list` | `{"limit":20}` | 列出本机历史任务记录 |
 | `key.revoke` | `{"fingerprint":"SHA256:...","plan_id":"<64 位十六进制>"}` | 吊销目标公钥，允许紧急撤销最后一把 |
 
 `plan_id` 是资产 ID、规范化参数、当前授权文件 SHA-256 与 `opsctl` 版本的摘要。执行时重新计算，不一致即拒绝；它用于阻止状态变化后的旧计划执行，客户端的高危操作仍需按 OpsDeck 设计重新验证主密码。可以吊销最后一把密钥以紧急收回访问：之后所有 `opsdeck` 新连接均被拒绝，只能用带外 root 会话重新接入。没有任意命令、任意脚本或泛用 sudo 动作。

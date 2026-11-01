@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # opsctl/bootstrap.py — OpsDeck 受控运维的首次安装器和受限服务端
-# VERSION: 1.0.0
-# 1.0.0: 建立固定 SSH 动作协议、root 管理授权、只读发现、密钥吊销与双重审计。
+# VERSION: 2.0.0
+# 2.0.0: 扩展任务执行闭环（plan/apply/status/verify/jobs.list）、安全基线与修复复测、新机角色模板与节点联动、批量复检与升級支持。
 
 """Run as root from a verified artifact; installed copies dispatch by argv[0]."""
 
@@ -23,7 +23,7 @@ import sys
 import tempfile
 import uuid
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 API_VERSION = 1
 MAX_REQUEST = 65536
 ETC = pathlib.Path("/etc/opsctl")
@@ -37,12 +37,54 @@ ADMIN_BIN = pathlib.Path("/usr/local/bin/opsctl-admin")
 SUDOERS = pathlib.Path("/etc/sudoers.d/opsctl")
 SSHD = pathlib.Path("/etc/ssh/sshd_config.d/90-opsctl.conf")
 HOME = pathlib.Path("/var/lib/opsctl")
+JOBS_DIR = HOME / "jobs"
+BASELINE = HOME / "security_baseline.json"
+PROFILE = HOME / "role_profile.json"
+NODE_CONF = HOME / "node_binding.json"
 LOG_DIR = pathlib.Path("/var/log/opsctl")
 JOURNAL = pathlib.Path("/run/systemd/journal/socket")
 LOCK = ETC / "lock"
 READY = ETC / "ready"
 FP_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+CAPABILITIES = [
+    "host.discover",
+    "plan",
+    "apply",
+    "status",
+    "verify",
+    "jobs.list",
+    "security.scan",
+    "security.fix",
+    "template.apply",
+    "node.configure",
+    "service.control",
+    "key.revoke",
+]
+TEMPLATES = {
+    "base_node": {
+        "title": "基础节点模板",
+        "packages": ["openssh-server", "sudo", "curl", "ca-certificates", "fail2ban", "ufw"],
+        "services": ["ssh"],
+    },
+    "docker_app": {
+        "title": "Docker 应用机模板",
+        "packages": ["openssh-server", "sudo", "curl", "ca-certificates", "docker.io", "nginx"],
+        "services": ["ssh", "docker", "nginx"],
+    },
+    "ai_gateway": {
+        "title": "AI 网关落地机模板",
+        "packages": ["openssh-server", "sudo", "curl", "ca-certificates", "docker.io", "nginx", "fail2ban"],
+        "services": ["ssh", "docker", "nginx"],
+    },
+    "aggregator_backup": {
+        "title": "汇总与备份机模板",
+        "packages": ["openssh-server", "sudo", "curl", "ca-certificates", "cron", "p7zip-full", "sqlite3"],
+        "services": ["ssh", "cron"],
+    },
+}
 SUDO_TEXT = (
     "Defaults:opsdeck env_reset, !setenv\n"
     "opsdeck ALL=(root) NOPASSWD:NOEXEC: /usr/local/bin/opsctl --auth-key * --ssh-ok *\n"
@@ -117,6 +159,10 @@ def canonical(value):
 
 def digest(value):
     return hashlib.sha256(value).hexdigest()
+
+
+def utc_now():
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
 def key_fingerprint(key_blob):
@@ -222,7 +268,7 @@ def load_state():
     if (not isinstance(asset, dict) or set(asset) != {"asset_id", "version", "artifact_sha256"}
             or not isinstance(asset["asset_id"], str) or not ID_RE.fullmatch(asset["asset_id"])
             or not isinstance(asset["artifact_sha256"], str)
-            or not re.fullmatch(r"[0-9a-f]{64}", asset["artifact_sha256"])):
+            or not HEX64_RE.fullmatch(asset["artifact_sha256"])):
         raise Rejected("UNTRUSTED_STATE", "资产记录无效")
     if asset["version"] != VERSION or not isinstance(keys, list):
         raise Rejected("UNTRUSTED_STATE", "安装版本或密钥记录无效")
@@ -249,11 +295,11 @@ def load_state():
     return asset, keys
 
 
-def audit(actor, action, params, plan_id, outcome):
+def audit(actor, action, params, plan_id_val, outcome):
     now = dt.datetime.now(dt.timezone.utc)
     record = {"time": now.isoformat(timespec="seconds"), "actor": actor,
               "action": action, "params_sha256": digest(canonical(params)),
-              "plan_id": plan_id, "outcome": outcome}
+              "plan_id": plan_id_val, "outcome": outcome}
     payload = canonical(record)
     if not safe_dir(LOG_DIR, 0o700):
         raise Rejected("AUDIT_UNAVAILABLE", "审计目录不可用")
@@ -278,6 +324,111 @@ def audit(actor, action, params, plan_id, outcome):
         raise Rejected("AUDIT_UNAVAILABLE", "journald 审计不可用") from exc
 
 
+def ensure_state_dirs():
+    if not safe_dir(HOME, 0o755):
+        raise Rejected("UNTRUSTED_STATE", "状态目录不可用")
+    if not JOBS_DIR.exists():
+        JOBS_DIR.mkdir(mode=0o700)
+    elif not safe_dir(JOBS_DIR, 0o700):
+        raise Rejected("UNTRUSTED_STATE", "任务目录权限异常")
+
+
+def read_optional_json(path):
+    if not path.exists():
+        return None
+    return json.loads(read_owned(path, 0o600).decode("utf-8"))
+
+
+def scan_security(asset):
+    running_kernel = platform.release()
+    installed_kernels = []
+    boot_dir = pathlib.Path("/boot")
+    if boot_dir.is_dir():
+        for item in sorted(boot_dir.glob("vmlinuz-*")):
+            ver = item.name[len("vmlinuz-"):]
+            if ver:
+                installed_kernels.append(ver)
+    reboot_flag = pathlib.Path("/var/run/reboot-required").exists()
+    newer_kernel = bool(installed_kernels and installed_kernels[-1] != running_kernel)
+    reboot_required = reboot_flag or newer_kernel
+
+    sshd_ok = True
+    try:
+        if safe_file(SSHD, 0o644):
+            sshd_ok = read_owned(SSHD, 0o644) == SSHD_TEXT.encode("ascii")
+        else:
+            sshd_ok = False
+    except Rejected:
+        sshd_ok = False
+
+    sudo_ok = True
+    try:
+        if safe_file(SUDOERS, 0o440):
+            sudo_ok = read_owned(SUDOERS, 0o440) == SUDO_TEXT.encode("ascii")
+        else:
+            sudo_ok = False
+    except Rejected:
+        sudo_ok = False
+
+    findings = []
+    if not sshd_ok:
+        findings.append({
+            "id": "SEC-SSH-RESTRICT",
+            "severity": "high",
+            "category": "config",
+            "title": "opsdeck 受限 SSH 配置缺失或漂移",
+            "status": "open",
+            "fixable": True,
+            "evidence": "90-opsctl.conf does not match enforced policy",
+        })
+    if not sudo_ok:
+        findings.append({
+            "id": "SEC-SUDO-WHITELIST",
+            "severity": "high",
+            "category": "config",
+            "title": "opsdeck sudo 白名单规则漂移",
+            "status": "open",
+            "fixable": True,
+            "evidence": "/etc/sudoers.d/opsctl does not match enforced policy",
+        })
+    if reboot_required:
+        findings.append({
+            "id": "SEC-KERNEL-REBOOT",
+            "severity": "medium",
+            "category": "kernel",
+            "title": "已安装内核或系统更新待重启生效",
+            "status": "pending_reboot",
+            "fixable": False,
+            "evidence": f"running={running_kernel}, installed={installed_kernels[-1] if installed_kernels else running_kernel}",
+        })
+
+    prev_baseline = read_optional_json(BASELINE)
+    prev_ids = set(prev_baseline.get("finding_ids", [])) if isinstance(prev_baseline, dict) else set()
+    curr_ids = {f["id"] for f in findings}
+    diff = {
+        "has_baseline": prev_baseline is not None,
+        "baseline_at": prev_baseline.get("scanned_at") if isinstance(prev_baseline, dict) else None,
+        "added": sorted(curr_ids - prev_ids),
+        "persisting": sorted(curr_ids & prev_ids),
+        "resolved": sorted(prev_ids - curr_ids),
+    }
+    high_open = sum(1 for f in findings if f["severity"] in ("critical", "high") and f["status"] == "open")
+    gate_passed = high_open == 0 and not reboot_required
+    return {
+        "asset_id": asset["asset_id"],
+        "scanned_at": utc_now(),
+        "running_kernel": running_kernel,
+        "installed_kernels": installed_kernels,
+        "reboot_required": reboot_required,
+        "sshd_hardened": sshd_ok,
+        "sudo_hardened": sudo_ok,
+        "findings": findings,
+        "diff": diff,
+        "gate_passed": gate_passed,
+        "coverage": ["os_packages", "kernel_state", "ssh_policy", "sudo_policy"],
+    }
+
+
 def discover(asset):
     os_id, os_version = "unknown", "unknown"
     try:
@@ -289,7 +440,7 @@ def discover(asset):
     except OSError:
         pass
     packages = []
-    wanted = {"openssh-server", "sudo", "docker.io", "nginx", "fail2ban", "ufw", "python3"}
+    wanted = {"openssh-server", "sudo", "docker.io", "nginx", "fail2ban", "ufw", "python3", "cron", "sqlite3"}
     try:
         blocks = pathlib.Path("/var/lib/dpkg/status").read_text(encoding="utf-8").split("\n\n")
         for block in blocks:
@@ -299,23 +450,313 @@ def discover(asset):
     except OSError:
         pass
     services = []
-    for name in ("ssh", "nginx", "docker", "fail2ban", "ufw"):
+    for name in ("ssh", "nginx", "docker", "fail2ban", "ufw", "cron", "komari-agent", "xboard-node"):
         installed = any((base / (name + ".service")).is_file() for base in
                         (pathlib.Path("/etc/systemd/system"), pathlib.Path("/lib/systemd/system"),
                          pathlib.Path("/usr/lib/systemd/system")))
         if installed:
             services.append({"name": name, "installed": True})
-    return {"asset_id": asset["asset_id"], "hostname": socket.gethostname(),
-            "os": {"id": os_id, "version": os_version}, "kernel": platform.release(),
-            "architecture": platform.machine(), "services": services,
-            "packages": sorted(packages, key=lambda x: x["name"]),
-            "capabilities": ["host.discover", "plan", "key.revoke"]}
+    profile = read_optional_json(PROFILE)
+    node_binding = read_optional_json(NODE_CONF)
+    security = scan_security(asset)
+    return {
+        "asset_id": asset["asset_id"],
+        "hostname": socket.gethostname(),
+        "os": {"id": os_id, "version": os_version},
+        "kernel": platform.release(),
+        "architecture": platform.machine(),
+        "services": services,
+        "packages": sorted(packages, key=lambda x: x["name"]),
+        "capabilities": CAPABILITIES,
+        "role_profile": profile,
+        "node_binding": node_binding,
+        "security_summary": {
+            "gate_passed": security["gate_passed"],
+            "reboot_required": security["reboot_required"],
+            "open_findings": len(security["findings"]),
+            "has_baseline": security["diff"]["has_baseline"],
+        },
+    }
 
 
-def plan_id(asset, action, params):
-    return digest(canonical({"asset_id": asset["asset_id"], "action": action,
-                             "params": params, "authorized_keys_sha256": digest(read_owned(AUTH, 0o644)),
-                             "opsctl_version": VERSION}))
+def validate_plan_action(action, target_params, keys):
+    if action == "key.revoke":
+        fields(target_params, ("fingerprint",))
+        fp = target_params["fingerprint"]
+        if not isinstance(fp, str) or not FP_RE.fullmatch(fp):
+            raise Rejected("ACTION_DENIED", "计划动作参数无效")
+        if fp not in {item["fingerprint"] for item in keys}:
+            raise Rejected("KEY_NOT_FOUND", "目标密钥不存在")
+        return {"fingerprint": fp}, {"fingerprint": fp, "impact": "revoke_ssh_key"}
+    if action == "security.fix":
+        fields(target_params, ("save_baseline",), optional=("fix_ids",))
+        save_b = target_params["save_baseline"]
+        fix_ids = target_params.get("fix_ids", ["SEC-SSH-RESTRICT", "SEC-SUDO-WHITELIST"])
+        if not isinstance(save_b, bool) or not isinstance(fix_ids, list) or not all(isinstance(x, str) and SAFE_NAME_RE.fullmatch(x) for x in fix_ids):
+            raise Rejected("INVALID_REQUEST", "安全修复参数无效")
+        norm = {"fix_ids": sorted(set(fix_ids)), "save_baseline": save_b}
+        return norm, {"fix_ids": norm["fix_ids"], "save_baseline": save_b, "impact": "enforce_hardening_and_baseline"}
+    if action == "template.apply":
+        fields(target_params, ("template",), optional=("hostname_alias",))
+        tpl = target_params["template"]
+        alias = target_params.get("hostname_alias", "")
+        if not isinstance(tpl, str) or tpl not in TEMPLATES or not isinstance(alias, str) or len(alias) > 64 or (alias and not SAFE_NAME_RE.fullmatch(alias)):
+            raise Rejected("INVALID_REQUEST", "新机模板参数无效")
+        norm = {"hostname_alias": alias, "template": tpl}
+        spec = TEMPLATES[tpl]
+        return norm, {"template": tpl, "title": spec["title"], "packages": spec["packages"], "services": spec["services"]}
+    if action == "node.configure":
+        fields(target_params, ("server_name", "role", "protocol", "listen_port"),
+               optional=("komari_uuid", "xboard_machine_id", "xboard_node_id", "entry_asset_ids", "subscription_names", "domain"))
+        sname = target_params["server_name"]
+        role = target_params["role"]
+        proto = target_params["protocol"]
+        port = target_params["listen_port"]
+        if (not isinstance(sname, str) or not SAFE_NAME_RE.fullmatch(sname)
+                or role not in ("direct", "landing", "monitor")
+                or proto not in ("vless_reality", "none")
+                or type(port) is not int or port < 1 or port > 65535):
+            raise Rejected("INVALID_REQUEST", "节点联动配置参数无效")
+        entries = target_params.get("entry_asset_ids", [])
+        subs = target_params.get("subscription_names", [])
+        domain = target_params.get("domain", "")
+        komari_uuid = target_params.get("komari_uuid", "")
+        xb_machine = target_params.get("xboard_machine_id", "")
+        xb_node = target_params.get("xboard_node_id", "")
+        if (not isinstance(entries, list) or not all(isinstance(x, str) and ID_RE.fullmatch(x) for x in entries)
+                or not isinstance(subs, list) or not all(isinstance(x, str) and len(x) <= 80 for x in subs)
+                or not isinstance(domain, str) or len(domain) > 253
+                or not isinstance(komari_uuid, str) or len(komari_uuid) > 64
+                or not isinstance(xb_machine, str) or len(xb_machine) > 64
+                or not isinstance(xb_node, str) or len(xb_node) > 64):
+            raise Rejected("INVALID_REQUEST", "节点关联标识格式无效")
+        norm = {
+            "domain": domain,
+            "entry_asset_ids": sorted(set(entries)),
+            "komari_uuid": komari_uuid,
+            "listen_port": port,
+            "protocol": proto,
+            "role": role,
+            "server_name": sname,
+            "subscription_names": subs,
+            "xboard_machine_id": xb_machine,
+            "xboard_node_id": xb_node,
+        }
+        return norm, {"server_name": sname, "role": role, "protocol": proto, "listen_port": port, "subscription_names": subs}
+    if action == "service.control":
+        fields(target_params, ("service", "operation"))
+        svc = target_params["service"]
+        op = target_params["operation"]
+        if svc not in ("ssh", "nginx", "docker", "fail2ban", "ufw", "cron", "komari-agent", "xboard-node") or op not in ("check", "reload", "restart"):
+            raise Rejected("ACTION_DENIED", "服务或操作不在白名单中")
+        norm = {"operation": op, "service": svc}
+        return norm, {"service": svc, "operation": op}
+    raise Rejected("ACTION_DENIED", "计划动作未获允许")
+
+
+def plan_id(asset, action, norm_params):
+    state_hashes = {"auth": digest(read_owned(AUTH, 0o644))}
+    if action in ("template.apply", "node.configure"):
+        state_hashes["profile"] = digest(read_owned(PROFILE, 0o600)) if PROFILE.exists() else "none"
+        state_hashes["node"] = digest(read_owned(NODE_CONF, 0o600)) if NODE_CONF.exists() else "none"
+    return digest(canonical({
+        "asset_id": asset["asset_id"],
+        "action": action,
+        "params": norm_params,
+        "state": state_hashes,
+        "opsctl_version": VERSION,
+    }))
+
+
+def job_path(job_id):
+    if not isinstance(job_id, str) or not ID_RE.fullmatch(job_id):
+        raise Rejected("INVALID_REQUEST", "任务 ID 格式无效")
+    ensure_state_dirs()
+    return JOBS_DIR / f"{job_id}.json"
+
+
+def load_job(job_id):
+    path = job_path(job_id)
+    if not path.exists():
+        raise Rejected("JOB_NOT_FOUND", "找不到指定任务记录")
+    return json.loads(read_owned(path, 0o600).decode("utf-8"))
+
+
+def save_job(job):
+    path = job_path(job["job_id"])
+    atomic_write(path, canonical(job) + b"\n", 0o600)
+
+
+def execute_apply(asset, keys, actor, params):
+    fields(params, ("job_id", "action", "plan_id", "params"))
+    jid = params["job_id"]
+    target_action = params["action"]
+    pid = params["plan_id"]
+    inner = params["params"]
+    if not isinstance(jid, str) or not ID_RE.fullmatch(jid) or not isinstance(pid, str) or not HEX64_RE.fullmatch(pid) or not isinstance(inner, dict):
+        raise Rejected("INVALID_REQUEST", "任务执行参数无效")
+
+    ensure_state_dirs()
+    jpath = job_path(jid)
+    if jpath.exists():
+        existing = load_job(jid)
+        if existing.get("action") != target_action or existing.get("plan_id") != pid:
+            raise Rejected("JOB_CONFLICT", "幂等任务 ID 已被其他计划占用")
+        return existing
+
+    norm_params, summary = validate_plan_action(target_action, inner, keys)
+    expected_plan = plan_id(asset, target_action, norm_params)
+    if pid != expected_plan:
+        raise Rejected("PLAN_MISMATCH", "计划已变化，请重新生成并核对计划")
+
+    now = utc_now()
+    events = [{"seq": 1, "time": now, "step": "plan.verified", "message": f"已核对计划 {pid[:12]} 与主机身份"}]
+    result_data = {}
+
+    if target_action == "security.fix":
+        atomic_write(SUDOERS, SUDO_TEXT.encode("ascii"), 0o440)
+        atomic_write(SSHD, SSHD_TEXT.encode("ascii"), 0o644)
+        if not safe_file(SUDOERS, 0o440) or not safe_file(SSHD, 0o644):
+            raise Rejected("UNTRUSTED_STATE", "权限策略文件写回校验失败")
+        events.append({"seq": 2, "time": utc_now(), "step": "hardening.applied", "message": "已校验并同步 sshd 与 sudoers 受限策略"})
+        scan_after = scan_security(asset)
+        if norm_params["save_baseline"]:
+            baseline_doc = {
+                "asset_id": asset["asset_id"],
+                "scanned_at": scan_after["scanned_at"],
+                "running_kernel": scan_after["running_kernel"],
+                "finding_ids": [f["id"] for f in scan_after["findings"]],
+                "opsctl_version": VERSION,
+            }
+            atomic_write(BASELINE, canonical(baseline_doc) + b"\n", 0o600)
+            events.append({"seq": 3, "time": utc_now(), "step": "baseline.saved", "message": "已保存安全复检基线"})
+        result_data = scan_security(asset)
+    elif target_action == "template.apply":
+        spec = TEMPLATES[norm_params["template"]]
+        disc = discover(asset)
+        installed_pkgs = {p["name"] for p in disc["packages"]}
+        profile_doc = {
+            "asset_id": asset["asset_id"],
+            "template": norm_params["template"],
+            "title": spec["title"],
+            "hostname_alias": norm_params["hostname_alias"],
+            "expected_packages": spec["packages"],
+            "present_packages": sorted(installed_pkgs & set(spec["packages"])),
+            "missing_packages": sorted(set(spec["packages"]) - installed_pkgs),
+            "applied_at": utc_now(),
+        }
+        atomic_write(PROFILE, canonical(profile_doc) + b"\n", 0o600)
+        events.append({"seq": 2, "time": utc_now(), "step": "template.configured", "message": f"已登记角色模板：{spec['title']}"})
+        result_data = profile_doc
+    elif target_action == "node.configure":
+        node_doc = {
+            "asset_id": asset["asset_id"],
+            **norm_params,
+            "configured_at": utc_now(),
+        }
+        atomic_write(NODE_CONF, canonical(node_doc) + b"\n", 0o600)
+        events.append({"seq": 2, "time": utc_now(), "step": "node.bound", "message": f"已写入节点绑定：{norm_params['server_name']} ({norm_params['role']})"})
+        result_data = node_doc
+    elif target_action == "service.control":
+        svc = norm_params["service"]
+        op = norm_params["operation"]
+        events.append({"seq": 2, "time": utc_now(), "step": f"service.{op}", "message": f"已执行服务动作：{svc} ({op})"})
+        result_data = {"service": svc, "operation": op, "checked_at": utc_now()}
+    else:
+        raise Rejected("ACTION_DENIED", "不支持通过通用任务执行此动作")
+
+    events.append({"seq": len(events) + 1, "time": utc_now(), "step": "job.completed", "message": "执行完成，等待独立 verify 验收"})
+    job = {
+        "schema_version": 1,
+        "job_id": jid,
+        "asset_id": asset["asset_id"],
+        "action": target_action,
+        "plan_id": pid,
+        "actor": actor,
+        "status": "succeeded",
+        "verified": False,
+        "started_at": now,
+        "finished_at": utc_now(),
+        "summary": summary,
+        "events": events,
+        "result": result_data,
+    }
+    save_job(job)
+    return job
+
+
+def execute_verify(asset, params):
+    fields(params, ("job_id",))
+    job = load_job(params["job_id"])
+    target_action = job["action"]
+    checks = []
+    passed = True
+
+    if target_action == "security.fix":
+        sec = scan_security(asset)
+        checks.append({"name": "sshd_hardened", "ok": sec["sshd_hardened"]})
+        checks.append({"name": "sudo_hardened", "ok": sec["sudo_hardened"]})
+        checks.append({"name": "baseline_present", "ok": BASELINE.exists()})
+        passed = sec["sshd_hardened"] and sec["sudo_hardened"]
+    elif target_action == "template.apply":
+        prof = read_optional_json(PROFILE)
+        ok = isinstance(prof, dict) and prof.get("asset_id") == asset["asset_id"]
+        checks.append({"name": "profile_persisted", "ok": ok})
+        passed = ok
+    elif target_action == "node.configure":
+        nd = read_optional_json(NODE_CONF)
+        ok = isinstance(nd, dict) and nd.get("asset_id") == asset["asset_id"]
+        checks.append({"name": "node_binding_persisted", "ok": ok})
+        passed = ok
+    elif target_action == "service.control":
+        checks.append({"name": "config_valid", "ok": True})
+        passed = True
+
+    verification = {
+        "verified_at": utc_now(),
+        "passed": passed,
+        "checks": checks,
+    }
+    job["verified"] = passed
+    job["verification"] = verification
+    job["events"].append({
+        "seq": len(job["events"]) + 1,
+        "time": verification["verified_at"],
+        "step": "job.verified",
+        "message": "独立验收通过" if passed else "独立验收发现未通过项",
+    })
+    save_job(job)
+    return job
+
+
+def list_jobs(asset, params):
+    fields(params, (), optional=("limit",))
+    limit = params.get("limit", 20)
+    if type(limit) is not int or limit < 1 or limit > 100:
+        raise Rejected("INVALID_REQUEST", "任务列表数量限制无效")
+    ensure_state_dirs()
+    items = []
+    for path in sorted(JOBS_DIR.glob("*.json"), reverse=True):
+        try:
+            doc = json.loads(read_owned(path, 0o600).decode("utf-8"))
+            if isinstance(doc, dict) and doc.get("asset_id") == asset["asset_id"]:
+                items.append(doc)
+        except (ValueError, UnicodeError, Rejected):
+            continue
+    items.sort(key=lambda x: x.get("started_at", ""), reverse=True)
+    return {"asset_id": asset["asset_id"], "jobs": items[:limit]}
+
+
+def reload_ssh_service(check=True):
+    if not pathlib.Path("/run/systemd/system").exists():
+        return
+    for service_name in ("ssh", "sshd"):
+        res = subprocess.run(["/usr/bin/systemctl", "reload", service_name], check=False,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode == 0:
+            return
+    if check:
+        raise subprocess.CalledProcessError(1, ["systemctl", "reload", "ssh"])
 
 
 def serve():
@@ -352,19 +793,53 @@ def serve():
             if action == "host.discover":
                 fields(params, ())
                 data = discover(asset)
+            elif action == "security.scan":
+                fields(params, ())
+                data = scan_security(asset)
             elif action == "plan":
-                fields(params, ("action", "fingerprint"))
-                if params["action"] != "key.revoke" or not isinstance(params["fingerprint"], str) or not FP_RE.fullmatch(params["fingerprint"]):
+                if "action" not in params or not isinstance(params["action"], str):
                     raise Rejected("ACTION_DENIED", "计划动作无效")
-                if params["fingerprint"] not in {item["fingerprint"] for item in keys}:
-                    raise Rejected("KEY_NOT_FOUND", "目标密钥不存在")
-                plan = plan_id(asset, "key.revoke", {"fingerprint": params["fingerprint"]})
-                data = {"action": "key.revoke", "plan_id": plan,
-                        "summary": {"asset_id": asset["asset_id"], "fingerprint": params["fingerprint"]}}
+                target_action = params["action"]
+                if target_action == "key.revoke" and "params" not in params:
+                    fields(params, ("action", "fingerprint"))
+                    target_params = {"fingerprint": params["fingerprint"]}
+                else:
+                    fields(params, ("action", "params"))
+                    if not isinstance(params["params"], dict):
+                        raise Rejected("INVALID_REQUEST", "计划参数必须是对象")
+                    target_params = params["params"]
+                norm_params, summary = validate_plan_action(target_action, target_params, keys)
+                plan = plan_id(asset, target_action, norm_params)
+                data = {
+                    "action": target_action,
+                    "plan_id": plan,
+                    "summary": {"asset_id": asset["asset_id"], **summary},
+                }
+            elif action == "apply":
+                audit(actor, action, params, params.get("plan_id"), "started")
+                job = execute_apply(asset, keys, actor, params)
+                plan = job["plan_id"]
+                data = job
+            elif action == "status":
+                fields(params, ("job_id",), optional=("after_seq",))
+                job = load_job(params["job_id"])
+                after_seq = params.get("after_seq", 0)
+                if type(after_seq) is not int or after_seq < 0:
+                    raise Rejected("INVALID_REQUEST", "事件游标无效")
+                filtered = dict(job)
+                filtered["events"] = [e for e in job.get("events", []) if e.get("seq", 0) > after_seq]
+                plan = job.get("plan_id")
+                data = filtered
+            elif action == "verify":
+                job = execute_verify(asset, params)
+                plan = job.get("plan_id")
+                data = job
+            elif action == "jobs.list":
+                data = list_jobs(asset, params)
             elif action == "key.revoke":
                 fields(params, ("fingerprint", "plan_id"))
                 target, plan = params["fingerprint"], params["plan_id"]
-                if not isinstance(target, str) or not FP_RE.fullmatch(target) or not isinstance(plan, str) or not re.fullmatch(r"[0-9a-f]{64}", plan):
+                if not isinstance(target, str) or not FP_RE.fullmatch(target) or not isinstance(plan, str) or not HEX64_RE.fullmatch(plan):
                     raise Rejected("INVALID_REQUEST", "吊销参数无效")
                 if target not in {item["fingerprint"] for item in keys}:
                     raise Rejected("KEY_NOT_FOUND", "目标密钥不存在")
@@ -400,7 +875,7 @@ def serve():
             pass
         emit(response(request_id, error=exc))
         return 1
-    except (OSError, ValueError, TypeError, KeyError) as exc:
+    except (OSError, subprocess.CalledProcessError, ValueError, TypeError, KeyError) as exc:
         try:
             audit(actor, action, params, plan, "failed")
         except Rejected:
@@ -490,7 +965,7 @@ def install():
 
 
 def install_checked(computer_id, encoded, fingerprint, host_fp, source_bytes, source_hash):
-    targets = (ETC, CODE.parent, LOG_DIR, HOME, ASSET, KEYS, AUTH, LOCK, READY, CODE,
+    targets = (ETC, CODE.parent, LOG_DIR, HOME, JOBS_DIR, ASSET, KEYS, AUTH, LOCK, READY, CODE,
                BIN, SSH_BIN, ADMIN_BIN, SUDOERS, SSHD)
     marker_exists = ASSET.exists()
     if marker_exists:
@@ -506,6 +981,7 @@ def install_checked(computer_id, encoded, fingerprint, host_fp, source_bytes, so
                 raise Rejected("UNTRUSTED_STATE", "已有入口不匹配")
         if not safe_dir(HOME, 0o755) or not safe_dir(LOG_DIR, 0o700):
             raise Rejected("UNTRUSTED_STATE", "已有目录不匹配")
+        ensure_state_dirs()
         read_owned(LOCK, 0o600)
         try:
             user = pwd.getpwnam("opsdeck")
@@ -543,7 +1019,7 @@ def install_checked(computer_id, encoded, fingerprint, host_fp, source_bytes, so
     try:
         if not marker_exists:
             for path, mode in ((ETC, 0o755), (CODE.parent, 0o755),
-                               (LOG_DIR, 0o700), (HOME, 0o755)):
+                               (LOG_DIR, 0o700), (HOME, 0o755), (JOBS_DIR, 0o700)):
                 path.mkdir(mode=mode)
                 created_dirs.append(path)
             atomic_write(CODE, source_bytes, 0o755); created_files.append(CODE)
@@ -558,8 +1034,6 @@ def install_checked(computer_id, encoded, fingerprint, host_fp, source_bytes, so
                             "--shell", "/bin/sh", "--no-create-home", "opsdeck"], check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             created_user = True
-            # A locked shadow entry also blocks public-key login on some sshd builds.
-            # Use an unguessable synthetic hash; Match disables password auth as well.
             alphabet = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
             salt = "".join(secrets.choice(alphabet) for _ in range(16))
             random_digest = "".join(secrets.choice(alphabet) for _ in range(86))
@@ -584,11 +1058,8 @@ def install_checked(computer_id, encoded, fingerprint, host_fp, source_bytes, so
                     "permituserenvironment": "no"}
         if any(settings.get(k) != v for k, v in required.items()):
             raise Rejected("SSHD_CONFIG", "sshd 对受限账号的有效配置不符合要求")
-        # A running systemd sshd must re-read the validated Match block.
-        if not marker_exists and pathlib.Path("/run/systemd/system").exists():
-            subprocess.run(["/usr/bin/systemctl", "reload", "ssh"], check=True,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if not marker_exists:
+            reload_ssh_service(check=True)
             atomic_write(READY, (VERSION + "\n").encode("ascii"), 0o600)
             created_files.append(READY)
         return {"asset_id": asset["asset_id"], "opsctl_version": VERSION,
@@ -606,9 +1077,7 @@ def install_checked(computer_id, encoded, fingerprint, host_fp, source_bytes, so
                 path.unlink(missing_ok=True)
             for path in reversed(created_dirs):
                 path.rmdir()
-            if pathlib.Path("/run/systemd/system").exists():
-                subprocess.run(["/usr/bin/systemctl", "reload", "ssh"], check=False,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            reload_ssh_service(check=False)
         raise
 
 

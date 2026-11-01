@@ -260,6 +260,38 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "opsctl：任务执行闭环（plan/apply/status/verify/jobs.list）、安全基线与角色模板" {
+  run remote "$KEY1" "$(request security.scan '{}')"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == true and .data.gate_passed == true' >/dev/null
+
+  plan_reply=$(remote "$KEY1" "$(request plan '{"action":"security.fix","params":{"save_baseline":true}}')")
+  plan=$(echo "$plan_reply" | jq -r .data.plan_id)
+  job_id="55555555-5555-4555-8555-555555555555"
+
+  run remote "$KEY1" "$(request apply "$(jq -nc --arg jid "$job_id" --arg pid "$plan" '{job_id:$jid,action:"security.fix",plan_id:$pid,params:{save_baseline:true}}')")"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == true and .data.status == "succeeded" and .data.verified == false' >/dev/null
+
+  # 相同 job_id 幂等重放不报错且返回原任务
+  run remote "$KEY1" "$(request apply "$(jq -nc --arg jid "$job_id" --arg pid "$plan" '{job_id:$jid,action:"security.fix",plan_id:$pid,params:{save_baseline:true}}')")"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg jid "$job_id" '.data.job_id == $jid' >/dev/null
+
+  # 断线续读 status 与独立验收 verify
+  run remote "$KEY1" "$(request status "$(jq -nc --arg jid "$job_id" '{job_id:$jid,after_seq:1}')")"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '(.data.events | length) >= 2' >/dev/null
+
+  run remote "$KEY1" "$(request verify "$(jq -nc --arg jid "$job_id" '{job_id:$jid}')")"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.data.verified == true and .data.verification.passed == true' >/dev/null
+
+  run remote "$KEY1" "$(request jobs.list '{"limit":10}')"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '(.data.jobs | length) >= 1' >/dev/null
+}
+
 @test "opsctl：root 手工吊销最后一把密钥有审计" {
   run install_request "$ID3" "$(cat "$KEY3.pub")"
   [ "$status" -eq 0 ]
