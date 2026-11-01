@@ -4,6 +4,7 @@
 FROM debian:12
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      bash bats ca-certificates cron curl git locales p7zip-full procps python3 sqlite3 util-linux \
+      bash bats ca-certificates cron curl git jq locales openssh-client openssh-server \
+      p7zip-full procps python3 sshpass sqlite3 sudo util-linux \
  && rm -rf /var/lib/apt/lists/*
 ENV LANG=C.UTF-8

@@ -1,5 +1,7 @@
 # 测试
 
+`opsctl.bats` 在一次性 Debian 12 容器里启动真实 sshd，覆盖 OpsDeck 受限账号、主机指纹、JSON 动作、审计和密钥吊销。它只使用容器内生成的测试密钥、密码与回环地址，不连接生产机。
+
 `tests/run.sh` 一次跑完静态检查和端到端测试。需要 Linux 与 docker；Windows 开发机上在 WSL 里运行，命令见仓库根目录的 `CLAUDE.md`。CI 跑的是同一份。
 
 | 文件 | 版本 | 作用 |
@@ -11,6 +13,9 @@
 | `drive.py` | — | 在伪终端里运行交互命令并逐行送入按键（菜单读 `/dev/tty`，管道喂不进去） |
 | `opsget.bats` | — | 引导器：安装、`-u`、固定旧版本、配置预检、菜单入口 |
 | `opsbox.bats` | — | 菜单：界面、说明卡片、两段式与主机名确认、缺配置引导、各联动流程、向导进度 |
+| `opsctl.bats` | — | 真实 sshd 隔离测试：安装、受限账号、动作协议、审计与密钥吊销 |
+| `opsctl-journal.py` | — | 测试容器内接收 journald 格式消息，供审计断言使用 |
+| `opsctl-dev-server.py` | — | 启动一次性 SSH 联调容器及仅限回环端口的测试跳板 |
 | `backup.bats` | — | 备份包公共函数（`lib/common.sh` 的 `bk_*`）：GFS 分级保留逐档校验与 60 天滚动、各包的档位与 UTC 包名、上传（含 `.sha256`）与按包清理、历史表只导结构（MySQL 与 SQLite）、rootfs 权限属主、解密密码排除、SQLite 在线备份、systemd 单元归类、MySQL 账号 SQL 格式、连不上 MySQL 时重试与告警原文、PostgreSQL 角色与库导出（没配跳过、重试、单库失败）、compose 的 `env_file`、`EXTRA_SNAPSHOT_EXCLUDES`、优先用宝塔自带的 MySQL 客户端、`set -u` 兼容 |
 | `live-migrate.bats` | — | 真跑 `migrate/live-migrate` 与 `vault-backup`、`hk-host-backup` 的 `--local-only`（包里只有自己该收的东西、历史表只有结构）：旧机是这台容器（真 crontab、真出加密包），新机由假 ssh 扮演（只读与改防火墙的动作真跑，恢复、验收、停服只记录）；覆盖预检拒绝、演练不动旧机、切换暂停备份任务并停容器、回滚复原、放行名单的增删、DNS 复核 |
 | `restore.bats` | — | 真跑 `migrate/restore-from-backup` 与 `ops/install-backup-cron`：现场打加密包，MySQL、PostgreSQL 换成记录语句的假实现，恢复一律 `--no-start`（PostgreSQL 重启那条用假 docker、假 nginx 走完整启动） |

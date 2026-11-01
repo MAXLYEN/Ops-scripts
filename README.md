@@ -52,6 +52,7 @@ opsget --pin v2026.09.24 && opsget -u
 | `vpsscore/` | VPS 质量采集与评分 | [介绍](vpsscore/README.md) · [版本记录](vpsscore/CHANGELOG.md) |
 | `openclash/` | OpenClash DNS 分流 | [介绍](openclash/README.md) · [版本记录](openclash/CHANGELOG.md) |
 | `tests/` | 静态检查与端到端测试 | [介绍](tests/README.md) |
+| `opsctl/` | OpsDeck 受控运维服务端与首次安装器 | [介绍](opsctl/README.md) · [版本记录](opsctl/CHANGELOG.md) |
 | `docs/` | 灾难恢复手册：原机已不在时从零恢复、唯一要手动保存的密码、演练 | [灾难恢复](docs/disaster-recovery.md) |
 
 `init/` 与 `vpsscore/` 不依赖 `lib/common.sh`，方便在新机上单独运行，也不强制要求 `env.conf`。`ops/decommission-archive` 同样自包含，以适应机器即将退役的场景。
