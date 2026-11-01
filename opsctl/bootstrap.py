@@ -1,7 +1,9 @@
 #!/usr/bin/python3
 # opsctl/bootstrap.py — OpsDeck 受控运维的首次安装器和受限服务端
-# VERSION: 2.1.0
+# VERSION: 2.1.1
 # 2.1.0: 对齐真实新机上线流程（安全源/内核检查、UTC/ufw/fail2ban 基线、Komari WebSSH 禁用、落地机中转端口与 Xboard 关联绑定）。
+# 2.1.1: 不再冒充成功——service.control 停用；verify 默认失败、未知动作拒绝；模板/节点只做「记录一致性」校验并比对任务期望结果；
+#        Komari WebSSH 按运行中进程的环境判断；sshd 配置写回后需重载才算生效；relay_bindings 严格校验。
 
 """Run as root from a verified artifact; installed copies dispatch by argv[0]."""
 
@@ -23,7 +25,7 @@ import sys
 import tempfile
 import uuid
 
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 API_VERSION = 1
 MAX_REQUEST = 65536
 ETC = pathlib.Path("/etc/opsctl")
@@ -47,7 +49,24 @@ LOCK = ETC / "lock"
 READY = ETC / "ready"
 FP_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-ENTRY_ID_RE = re.compile(r"^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|builtin-relay-[0-9-]+)$")
+# 中转入口只认稳定资产 UUID；2.1.0 曾接受的 builtin-relay-<IP> 会把地址写进标识，已停用。
+ENTRY_ID_RE = ID_RE
+# 节点显示名允许中文（如「落地-xxx-L」），但不允许控制字符。
+LABEL_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,80}$")
+HOST_RE = re.compile(r"^[A-Za-z0-9.:_-]{1,253}$")
+PROC = pathlib.Path("/proc")
+KOMARI_OVERRIDE = pathlib.Path("/etc/systemd/system/komari-agent.service.d/override.conf")
+KOMARI_UNIT_DIRS = (pathlib.Path("/etc/systemd/system"), pathlib.Path("/lib/systemd/system"), pathlib.Path("/usr/lib/systemd/system"))
+RELAY_BINDING_KEYS = (
+    "entry_port",
+    "internal_node",
+    "landing_port",
+    "relay_asset_id",
+    "relay_host",
+    "relay_name",
+    "relay_prefix",
+    "subscription_name",
+)
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 CAPABILITIES = [
@@ -61,7 +80,6 @@ CAPABILITIES = [
     "security.fix",
     "template.apply",
     "node.configure",
-    "service.control",
     "key.revoke",
 ]
 TEMPLATES = {
@@ -355,6 +373,28 @@ def check_security_repo():
     return False
 
 
+def komari_runtime_state():
+    """读运行中 komari-agent 进程的环境变量（纯 Python，sudo NOEXEC 下也能用）。"""
+    try:
+        entries = list(PROC.iterdir())
+    except OSError:
+        return "running_unknown"
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            if (entry / "comm").read_text(encoding="utf-8", errors="ignore").strip() != "komari-agent":
+                continue
+        except OSError:
+            continue
+        try:
+            env = (entry / "environ").read_bytes().split(b"\0")
+        except OSError:
+            return "running_unknown"
+        return "running_disabled" if b"AGENT_DISABLE_WEB_SSH=true" in env else "running_enabled"
+    return "not_running"
+
+
 def scan_security(asset):
     running_kernel = platform.release()
     installed_kernels = []
@@ -387,15 +427,14 @@ def scan_security(asset):
         sudo_ok = False
 
     sec_repo_ok = check_security_repo()
-    komari_override = pathlib.Path("/etc/systemd/system/komari-agent.service.d/override.conf")
-    komari_unit_exists = any(
-        (b / "komari-agent.service").is_file()
-        for b in (pathlib.Path("/etc/systemd/system"), pathlib.Path("/lib/systemd/system"), pathlib.Path("/usr/lib/systemd/system"))
-    )
-    komari_webssh_disabled = (
-        not komari_unit_exists
-        or (komari_override.is_file() and "AGENT_DISABLE_WEB_SSH=true" in komari_override.read_text(encoding="utf-8", errors="ignore"))
-    )
+    komari_unit_exists = any((b / "komari-agent.service").is_file() for b in KOMARI_UNIT_DIRS)
+    komari_override_written = KOMARI_OVERRIDE.is_file() and (
+        "AGENT_DISABLE_WEB_SSH=true" in KOMARI_OVERRIDE.read_text(encoding="utf-8", errors="ignore"))
+    komari_runtime = komari_runtime_state() if komari_unit_exists else "not_installed"
+    # 只有「运行中的进程确实带着禁用变量」或「探针没装 / 没在跑」才算禁用；
+    # 只写了 override 但进程没重启，WebSSH 实际仍开着。
+    komari_webssh_disabled = komari_runtime in ("not_installed", "running_disabled") or (
+        komari_runtime == "not_running" and komari_override_written)
 
     findings = []
     if not sshd_ok:
@@ -418,7 +457,7 @@ def scan_security(asset):
             "fixable": True,
             "evidence": "/etc/sudoers.d/opsctl does not match enforced policy",
         })
-    if not komari_webssh_disabled:
+    if komari_unit_exists and not komari_override_written:
         findings.append({
             "id": "SEC-KOMARI-WEBSSH",
             "severity": "medium",
@@ -427,6 +466,16 @@ def scan_security(asset):
             "status": "open",
             "fixable": True,
             "evidence": "missing override.conf for komari-agent.service",
+        })
+    elif not komari_webssh_disabled:
+        findings.append({
+            "id": "SEC-KOMARI-WEBSSH-RESTART",
+            "severity": "medium",
+            "category": "service",
+            "title": "Komari 加固已写入文件，但运行中的探针仍未带禁用变量（需 daemon-reload 并重启 komari-agent）",
+            "status": "pending_restart",
+            "fixable": False,
+            "evidence": f"runtime={komari_runtime}",
         })
     if reboot_required:
         findings.append({
@@ -459,6 +508,8 @@ def scan_security(asset):
         "reboot_required": reboot_required,
         "security_repo_present": sec_repo_ok,
         "komari_webssh_disabled": komari_webssh_disabled,
+        "komari_override_written": komari_override_written,
+        "komari_runtime": komari_runtime,
         "sshd_hardened": sshd_ok,
         "sudo_hardened": sudo_ok,
         "findings": findings,
@@ -518,6 +569,28 @@ def discover(asset):
             "has_baseline": security["diff"]["has_baseline"],
         },
     }
+
+
+def validate_relay_bindings(value, entry_ids):
+    """中转绑定逐项白名单校验：字段固定、端口合法、落地端口在本机不重复、入口必须是已选入口。"""
+    if not isinstance(value, list) or len(value) > 32:
+        raise Rejected("INVALID_REQUEST", "中转绑定格式无效")
+    result, landing_ports, relays = [], set(), set()
+    for item in value:
+        fields(item, RELAY_BINDING_KEYS)
+        rid = item["relay_asset_id"]
+        lport, eport = item["landing_port"], item["entry_port"]
+        if (not isinstance(rid, str) or not ID_RE.fullmatch(rid) or rid not in entry_ids or rid in relays
+                or not isinstance(item["relay_host"], str) or not HOST_RE.fullmatch(item["relay_host"])
+                or any(not isinstance(item[k], str) or not LABEL_RE.fullmatch(item[k])
+                       for k in ("relay_name", "relay_prefix", "internal_node", "subscription_name"))
+                or type(lport) is not int or not 1 <= lport <= 65535 or lport in landing_ports
+                or type(eport) is not int or not 1 <= eport <= 65535):
+            raise Rejected("INVALID_REQUEST", "中转绑定字段无效或落地端口重复")
+        relays.add(rid)
+        landing_ports.add(lport)
+        result.append({k: item[k] for k in RELAY_BINDING_KEYS})
+    return sorted(result, key=lambda x: x["relay_asset_id"])
 
 
 def validate_plan_action(action, target_params, keys):
@@ -590,6 +663,7 @@ def validate_plan_action(action, target_params, keys):
                 or not isinstance(xb_machine, str) or len(xb_machine) > 64
                 or not isinstance(xb_node, str) or len(xb_node) > 64):
             raise Rejected("INVALID_REQUEST", "节点关联标识格式无效")
+        rbindings = validate_relay_bindings(rbindings, set(entries))
         norm = {
             "domain": domain,
             "entry_asset_ids": sorted(set(entries)),
@@ -617,13 +691,7 @@ def validate_plan_action(action, target_params, keys):
             "relay_bindings": rbindings,
         }
     if action == "service.control":
-        fields(target_params, ("service", "operation"))
-        svc = target_params["service"]
-        op = target_params["operation"]
-        if svc not in ("ssh", "nginx", "docker", "fail2ban", "ufw", "cron", "komari-agent", "xboard-node") or op not in ("check", "reload", "restart"):
-            raise Rejected("ACTION_DENIED", "服务或操作不在白名单中")
-        norm = {"operation": op, "service": svc}
-        return norm, {"service": svc, "operation": op}
+        raise Rejected("ACTION_DENIED", "服务控制尚未实现真实执行与验收，拒绝生成计划")
     raise Rejected("ACTION_DENIED", "计划动作未获允许")
 
 
@@ -669,6 +737,10 @@ def execute_apply(asset, keys, actor, params):
     if not isinstance(jid, str) or not ID_RE.fullmatch(jid) or not isinstance(pid, str) or not HEX64_RE.fullmatch(pid) or not isinstance(inner, dict):
         raise Rejected("INVALID_REQUEST", "任务执行参数无效")
 
+    # Reject even replays of historical fake-success service jobs.
+    if target_action == "service.control":
+        raise Rejected("ACTION_DENIED", "服务控制尚未实现真实执行与验收，拒绝执行")
+
     ensure_state_dirs()
     jpath = job_path(jid)
     if jpath.exists():
@@ -687,16 +759,36 @@ def execute_apply(asset, keys, actor, params):
     result_data = {}
 
     if target_action == "security.fix":
+        # 写回的是安装时已经过 visudo -cf / sshd -t 校验的固定文本；opsctl 在 sudo NOEXEC 下
+        # 不能派生进程，所以这里不能重载 sshd、不能重启探针，只记录「需重载」交给人工。
+        def same(path, text, mode):
+            try:
+                return safe_file(path, mode) and path.read_bytes() == text
+            except Rejected:
+                return False
+
+        sshd_changed = not same(SSHD, SSHD_TEXT.encode("ascii"), 0o644)
+        komari_text = b"[Service]\nEnvironment=AGENT_DISABLE_WEB_SSH=true\n"
+        komari_installed = any((b / "komari-agent.service").is_file() for b in KOMARI_UNIT_DIRS)
+        komari_changed = komari_installed and not same(KOMARI_OVERRIDE, komari_text, 0o644)
         atomic_write(SUDOERS, SUDO_TEXT.encode("ascii"), 0o440)
         atomic_write(SSHD, SSHD_TEXT.encode("ascii"), 0o644)
-        komari_dir = pathlib.Path("/etc/systemd/system/komari-agent.service.d")
-        if not komari_dir.exists():
-            komari_dir.mkdir(parents=True, mode=0o755)
-        if safe_dir(komari_dir):
-            atomic_write(komari_dir / "override.conf", b"[Service]\nEnvironment=AGENT_DISABLE_WEB_SSH=true\n", 0o644)
+        if komari_installed:
+            komari_dir = KOMARI_OVERRIDE.parent
+            if not komari_dir.exists():
+                komari_dir.mkdir(parents=True, mode=0o755)
+            if safe_dir(komari_dir):
+                atomic_write(KOMARI_OVERRIDE, komari_text, 0o644)
         if not safe_file(SUDOERS, 0o440) or not safe_file(SSHD, 0o644):
             raise Rejected("UNTRUSTED_STATE", "权限策略文件写回校验失败")
-        events.append({"seq": 2, "time": utc_now(), "step": "hardening.applied", "message": "已校验并同步 sshd、sudoers 与 Komari WebSSH 禁用策略"})
+        pending = []
+        if sshd_changed:
+            pending.append("ssh")
+        if komari_changed:
+            pending.append("komari-agent")
+        events.append({"seq": 2, "time": utc_now(), "step": "hardening.files_written",
+                       "message": "已写回 sshd、sudoers 与 Komari 策略文件" +
+                       (f"；以下服务需在服务器上重载后才生效（opsctl 未执行）：{', '.join(pending)}" if pending else "")})
         scan_after = scan_security(asset)
         if norm_params["save_baseline"]:
             baseline_doc = {
@@ -707,8 +799,8 @@ def execute_apply(asset, keys, actor, params):
                 "opsctl_version": VERSION,
             }
             atomic_write(BASELINE, canonical(baseline_doc) + b"\n", 0o600)
-            events.append({"seq": 3, "time": utc_now(), "step": "baseline.saved", "message": "已保存安全复检基线"})
-        result_data = scan_security(asset)
+            events.append({"seq": len(events) + 1, "time": utc_now(), "step": "baseline.saved", "message": "已保存安全复检基线"})
+        result_data = {**scan_security(asset), "pending_reload": pending}
     elif target_action == "template.apply":
         spec = TEMPLATES[norm_params["template"]]
         disc = discover(asset)
@@ -722,28 +814,27 @@ def execute_apply(asset, keys, actor, params):
             "present_packages": sorted(installed_pkgs & set(spec["packages"])),
             "missing_packages": sorted(set(spec["packages"]) - installed_pkgs),
             "applied_at": utc_now(),
+            "metadata_only": True,
+            "deployment_verified": False,
         }
         atomic_write(PROFILE, canonical(profile_doc) + b"\n", 0o600)
-        events.append({"seq": 2, "time": utc_now(), "step": "template.configured", "message": f"已登记角色模板：{spec['title']}"})
+        events.append({"seq": 2, "time": utc_now(), "step": "template.recorded", "message": f"已登记角色模板（只写记录，未安装软件包或改防火墙）：{spec['title']}"})
         result_data = profile_doc
     elif target_action == "node.configure":
         node_doc = {
             "asset_id": asset["asset_id"],
             **norm_params,
             "configured_at": utc_now(),
+            "metadata_only": True,
+            "deployment_verified": False,
         }
         atomic_write(NODE_CONF, canonical(node_doc) + b"\n", 0o600)
-        events.append({"seq": 2, "time": utc_now(), "step": "node.bound", "message": f"已写入节点与中转绑定：{norm_params['server_name']} ({norm_params['role']})"})
+        events.append({"seq": 2, "time": utc_now(), "step": "node.recorded", "message": f"已写入节点与中转绑定记录（未调用 Xboard/Komari/DNS，未部署 xboard-node）：{norm_params['server_name']} ({norm_params['role']})"})
         result_data = node_doc
-    elif target_action == "service.control":
-        svc = norm_params["service"]
-        op = norm_params["operation"]
-        events.append({"seq": 2, "time": utc_now(), "step": f"service.{op}", "message": f"已执行服务动作：{svc} ({op})"})
-        result_data = {"service": svc, "operation": op, "checked_at": utc_now()}
     else:
         raise Rejected("ACTION_DENIED", "不支持通过通用任务执行此动作")
 
-    events.append({"seq": len(events) + 1, "time": utc_now(), "step": "job.completed", "message": "执行完成，等待独立 verify 验收"})
+    events.append({"seq": len(events) + 1, "time": utc_now(), "step": "job.completed", "message": "本任务步骤已结束，等待独立 verify"})
     job = {
         "schema_version": 1,
         "job_id": jid,
@@ -766,34 +857,47 @@ def execute_apply(asset, keys, actor, params):
 def execute_verify(asset, params):
     fields(params, ("job_id",))
     job = load_job(params["job_id"])
-    target_action = job["action"]
+    target_action = job.get("action")
+    if target_action not in ("security.fix", "template.apply", "node.configure", "service.control"):
+        raise Rejected("ACTION_DENIED", "该任务类型没有独立验收器")
     checks = []
-    passed = True
+    # 默认失败：只有拿到属于本资产、本任务的正面证据才通过。
+    passed = False
+    scope = "none"
+    eligible = job.get("asset_id") == asset["asset_id"] and job.get("status") == "succeeded"
+    checks.append({"name": "job_eligible", "ok": eligible})
 
-    if target_action == "security.fix":
+    if target_action == "service.control":
+        # 2.1.0 留下的旧任务只写了「已执行」的事件，从未真正控制服务，一律判失败。
+        checks.append({"name": "service_control_unsupported", "ok": False})
+    elif target_action == "security.fix" and eligible:
+        scope = "file_policy_and_komari_runtime"
         sec = scan_security(asset)
-        checks.append({"name": "sshd_hardened", "ok": sec["sshd_hardened"]})
-        checks.append({"name": "sudo_hardened", "ok": sec["sudo_hardened"]})
-        checks.append({"name": "komari_webssh_disabled", "ok": sec["komari_webssh_disabled"]})
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        pending = result.get("pending_reload", ["unknown"])
+        reloaded = isinstance(pending, list) and "ssh" not in pending and "unknown" not in pending
+        checks.append({"name": "sshd_file_hardened", "ok": sec["sshd_hardened"]})
+        checks.append({"name": "sshd_runtime_reloaded", "ok": reloaded})
+        checks.append({"name": "sudo_file_hardened", "ok": sec["sudo_hardened"]})
+        checks.append({"name": "komari_webssh_disabled_runtime", "ok": sec["komari_webssh_disabled"]})
         checks.append({"name": "baseline_present", "ok": BASELINE.exists()})
-        passed = sec["sshd_hardened"] and sec["sudo_hardened"] and sec["komari_webssh_disabled"]
-    elif target_action == "template.apply":
-        prof = read_optional_json(PROFILE)
-        ok = isinstance(prof, dict) and prof.get("asset_id") == asset["asset_id"]
-        checks.append({"name": "profile_persisted", "ok": ok})
+        passed = sec["sshd_hardened"] and reloaded and sec["sudo_hardened"] and sec["komari_webssh_disabled"]
+    elif target_action in ("template.apply", "node.configure") and eligible:
+        # 只能证明「服务器上的记录文件仍是本任务写入的那份」；被后来的任务覆盖就不再通过。
+        scope = "record_consistency"
+        current = read_optional_json(PROFILE if target_action == "template.apply" else NODE_CONF)
+        expected = job.get("result")
+        ok = (isinstance(current, dict) and isinstance(expected, dict)
+              and current.get("asset_id") == asset["asset_id"]
+              and canonical(current) == canonical(expected))
+        checks.append({"name": "record_matches_job", "ok": ok})
         passed = ok
-    elif target_action == "node.configure":
-        nd = read_optional_json(NODE_CONF)
-        ok = isinstance(nd, dict) and nd.get("asset_id") == asset["asset_id"]
-        checks.append({"name": "node_binding_persisted", "ok": ok})
-        passed = ok
-    elif target_action == "service.control":
-        checks.append({"name": "config_valid", "ok": True})
-        passed = True
 
     verification = {
         "verified_at": utc_now(),
         "passed": passed,
+        "scope": scope,
+        "deployment_verified": False,
         "checks": checks,
     }
     job["verified"] = passed
@@ -802,7 +906,7 @@ def execute_verify(asset, params):
         "seq": len(job["events"]) + 1,
         "time": verification["verified_at"],
         "step": "job.verified",
-        "message": "独立验收通过" if passed else "独立验收发现未通过项",
+        "message": ("记录一致性校验通过（不代表已部署）" if scope == "record_consistency" else "独立验收通过") if passed else "独立验收发现未通过项",
     })
     save_job(job)
     return job

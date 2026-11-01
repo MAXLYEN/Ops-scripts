@@ -13,7 +13,7 @@
 | `drive.py` | — | 在伪终端里运行交互命令并逐行送入按键（菜单读 `/dev/tty`，管道喂不进去） |
 | `opsget.bats` | — | 引导器：安装、`-u`、固定旧版本、配置预检、菜单入口 |
 | `opsbox.bats` | — | 菜单：界面、说明卡片、两段式与主机名确认、缺配置引导、各联动流程、向导进度 |
-| `opsctl.bats` | — | 真实 sshd 隔离测试：安装、受限账号、动作协议、审计与密钥吊销 |
+| `opsctl.bats` | — | 真实 sshd 隔离测试：安装、受限账号、动作协议、任务验收语义（service.control 停用、只写记录的模板做记录一致性验收）、审计与密钥吊销 |
 | `opsctl-journal.py` | — | 测试容器内接收 journald 格式消息，供审计断言使用 |
 | `opsctl-dev-server.py` | — | 启动一次性 SSH 联调容器及仅限回环端口的测试跳板 |
 | `backup.bats` | — | 备份包公共函数（`lib/common.sh` 的 `bk_*`）：GFS 分级保留逐档校验与 60 天滚动、各包的档位与 UTC 包名、上传（含 `.sha256`）与按包清理、历史表只导结构（MySQL 与 SQLite）、rootfs 权限属主、解密密码排除、SQLite 在线备份、systemd 单元归类、MySQL 账号 SQL 格式、连不上 MySQL 时重试与告警原文、PostgreSQL 角色与库导出（没配跳过、重试、单库失败）、compose 的 `env_file`、`EXTRA_SNAPSHOT_EXCLUDES`、优先用宝塔自带的 MySQL 客户端、`set -u` 兼容 |

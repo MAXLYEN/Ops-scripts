@@ -286,10 +286,40 @@ PY
   run remote "$KEY1" "$(request verify "$(jq -nc --arg jid "$job_id" '{job_id:$jid}')")"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.data.verified == true and .data.verification.passed == true' >/dev/null
+  echo "$output" | jq -e '.data.verification.scope == "file_policy_and_komari_runtime" and .data.verification.deployment_verified == false' >/dev/null
 
   run remote "$KEY1" "$(request jobs.list '{"limit":10}')"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '(.data.jobs | length) >= 1' >/dev/null
+}
+
+@test "opsctl 2.1.1：service.control 停用；只写记录的模板任务只做记录一致性验收，被后续任务覆盖后旧任务不再通过" {
+  # 服务控制没有真实执行与验收：计划、执行都拒绝，可用动作里也没有它
+  run remote "$KEY1" "$(request plan '{"action":"service.control","params":{"service":"ssh","op":"restart"}}')"
+  echo "$output" | jq -e '.ok == false and .error.code == "ACTION_DENIED"' >/dev/null
+  run remote "$KEY1" "$(request host.discover '{}')"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '[.. | strings] | index("service.control") == null' >/dev/null
+
+  # template.apply 只写记录：metadata_only、deployment_verified 恒为 false
+  p1=$(remote "$KEY1" "$(request plan '{"action":"template.apply","params":{"template":"docker_app","hostname_alias":"app-a"}}')" | jq -r .data.plan_id)
+  j1="66666666-6666-4666-8666-666666666666"
+  run remote "$KEY1" "$(request apply "$(jq -nc --arg jid "$j1" --arg pid "$p1" '{job_id:$jid,action:"template.apply",plan_id:$pid,params:{template:"docker_app",hostname_alias:"app-a"}}')")"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.data.status == "succeeded" and .data.result.metadata_only == true and .data.result.deployment_verified == false' >/dev/null
+  run remote "$KEY1" "$(request verify "$(jq -nc --arg jid "$j1" '{job_id:$jid}')")"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.data.verification.passed == true and .data.verification.scope == "record_consistency" and .data.verification.deployment_verified == false' >/dev/null
+
+  # 另一个模板任务覆盖了记录：第一个任务再验收就不通过
+  p2=$(remote "$KEY1" "$(request plan '{"action":"template.apply","params":{"template":"docker_app","hostname_alias":"app-b"}}')" | jq -r .data.plan_id)
+  j2="77777777-7777-4777-8777-777777777777"
+  run remote "$KEY1" "$(request apply "$(jq -nc --arg jid "$j2" --arg pid "$p2" '{job_id:$jid,action:"template.apply",plan_id:$pid,params:{template:"docker_app",hostname_alias:"app-b"}}')")"
+  [ "$status" -eq 0 ]
+  run remote "$KEY1" "$(request verify "$(jq -nc --arg jid "$j1" '{job_id:$jid}')")"
+  echo "$output" | jq -e '.data.verification.passed == false and .data.verified == false' >/dev/null
+  run remote "$KEY1" "$(request verify "$(jq -nc --arg jid "$j2" '{job_id:$jid}')")"
+  echo "$output" | jq -e '.data.verification.passed == true' >/dev/null
 }
 
 @test "opsctl：root 手工吊销最后一把密钥有审计" {
