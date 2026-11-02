@@ -1,5 +1,14 @@
 # opsctl 版本迭代记录
 
+## 2026-11-01 — 3.0.0
+
+新增真实部署与分步进度协议（`deployment.plan` / `deployment.apply` / `deployment.resume` / `deployment.rollback` / `deployment.worker`）与独立 systemd 守护进程 `opsctl-runner`。
+
+- 保留受限 SSH 入口 `opsctl` 的 `sudo NOEXEC` 边界；真实系统动作由独立 systemd 守护进程 `opsctl-runner`（`/usr/local/lib/opsctl/deployment.py --daemon`）按白名单执行，启动前校验内嵌固定 `DEPLOYMENT_SHA256`。
+- `host.discover` 新增纯 Python `/proc/net/tcp` 与 `/proc/net/tcp6` 监听端口表扫描（`scan_listening_ports`）及多站点 Nginx 识别（`shared_service`），监听表不可读时抛 `PORT_SCAN_FAILED`。
+- 支持已安装旧版本 `opsctl` 的资产通过核对指纹后的 root 会话平滑升级至 `3.0.0`（保留原 `asset_id` 与已登记设备密钥；存在运行中部署任务时拒绝覆盖）。
+- 实现 13 步协调器与工作机固定动作（`preflight`、`initialize`、`hardening`、`registration`、`dns`、`certificate`、`reality`、`panel`、`firewall`、`agents`、`relay:*`、`verify`、`publish`）及 WAL 资源登记与安全回滚。
+
 ## 2026-11-01 — 2.1.1
 
 界面和接口只宣称真正做到的事。
