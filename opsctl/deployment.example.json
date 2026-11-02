@@ -3,6 +3,7 @@
   "mode": "coordinator",
   "domain_suffix": "example.net",
   "entry_ports": [443, 8443, 2053, 2083, 2087, 2096],
+  "allow_custom_ports": true,
   "coordinator_fingerprints": [],
   "ssh_key_file": "/etc/opsctl/coordinator-key",
   "acme_email": "admin@example.net",

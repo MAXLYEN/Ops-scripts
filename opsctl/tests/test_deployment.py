@@ -185,6 +185,20 @@ class Deployment(base.Base):
             with self.subTest(params=params), self.assertRaises(self.m.Rejected):
                 self.d.normalize(self.policy, params)
 
+    def test_custom_ports_are_supported_without_bypassing_protected_ports(self):
+        norm = self.d.normalize(self.policy, {**self.params, 'node_ports': [12345]})
+        self.assertEqual(norm['node_ports'], [12345])
+        worker = {**self.policy, 'mode': 'worker'}
+        self.d.valid_worker(worker, {'asset_id': TARGET}, WORKER,
+            {'job_id': str(uuid.uuid4()), 'operation': 'probe',
+             'params': {'domain': 'test.example.net', 'ports': [12345]}})
+        for port in (22, 8444):
+            with self.assertRaises(self.m.Rejected):
+                self.d.normalize(self.policy, {**self.params, 'node_ports': [port]})
+        with self.assertRaises(self.m.Rejected):
+            self.d.normalize({**self.policy, 'allow_custom_ports': False},
+                             {**self.params, 'node_ports': [12345]})
+
     def test_port_scan_keeps_loopback_conflicts_and_real_inode_unit(self):
         proc = self.proc / '1234'
         (proc / 'fd').mkdir(parents=True)

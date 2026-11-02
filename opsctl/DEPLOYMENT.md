@@ -24,6 +24,7 @@ Windows 只提交受限 JSON 计划。汇总机保管服务凭据与独立编排
 ### 资产与软件
 
 - 所有服务地址、IP、域名、主机公钥都在服务端策略；客户端请求不能覆盖它们。
+- `entry_ports` 是默认快捷端口。默认允许表单「其他」输入的合法端口；SSH、回源和其他落地机流量仍受硬性保护。管理员如需额外限制，可设置 `allow_custom_ports: false`，此时入口仅允许该列表。
 - `assets[UUID].name/domain/ip/ssh_port/host_key/runner_version` 必填。入口 role=direct，另登记 machine_id 和经核对的中转 template_node_id。
 - 新目标没有 Xboard machine_id 时通过管理 API 建机器；已有机器必须登记准确 ID。已有 xboard-node 配置必须额外登记 xboard_config_sha256，且其 machine_id 一致；否则保留原服务并拒绝覆盖。原有 service 单元保持不变。
 - 软件 artifacts 固定 url/version/sha256，可指定 tar 包内固定 member。只取该普通成员，拒绝链接、路径遍历式解包及非 ELF 文件。

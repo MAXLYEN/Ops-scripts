@@ -164,6 +164,8 @@ def load_policy():
     ports = policy.get('entry_ports', [443, 8443, 2053, 2083, 2087, 2096])
     if not isinstance(ports, list) or len(ports) > 128 or any(type(p) is not int or not 1 <= p <= 65535 for p in ports):
         fail('POLICY_INVALID', '入口端口策略不合法')
+    if type(policy.get('allow_custom_ports', True)) is not bool:
+        fail('POLICY_INVALID', '自定义端口策略必须为布尔值')
     return policy
 
 
@@ -180,6 +182,12 @@ def asset(policy, aid):
         fail('POLICY_INVALID', '资产缺少 SSH 端口或已独立核对的 Ed25519 主机公钥')
     CORE.public_key(value['host_key'])
     return value
+
+
+def entry_port_allowed(policy, port):
+    return (type(port) is int and 1 <= port <= 65535 and
+            (policy.get('allow_custom_ports', True) or
+             port in policy.get('entry_ports', [443, 8443, 2053, 2083, 2087, 2096])))
 
 
 def normalize(policy, params):
@@ -210,7 +218,7 @@ def normalize(policy, params):
         relay = asset(policy, b['relay_asset_id'])
         if (b['relay_asset_id'] in seen or b['relay_asset_id'] == params['target_asset_id']
                 or relay.get('role') != 'direct'
-                or type(b['entry_port']) is not int or b['entry_port'] not in policy.get('entry_ports', [443, 8443, 2053, 2083, 2087, 2096])
+                or not entry_port_allowed(policy, b['entry_port'])
                 or type(b['landing_port']) is not int or not 30000 <= b['landing_port'] <= 30999
                 or b['landing_port'] in landing_ports
                 or b['entry_port'] == relay['ssh_port']
@@ -221,8 +229,7 @@ def normalize(policy, params):
         landing_ports.add(b['landing_port'])
         normalized.append(dict(b))
     if params['role'] == 'direct':
-        allowed = policy.get('entry_ports', [443, 8443, 2053, 2083, 2087, 2096])
-        if not ports or any(p not in allowed for p in ports) or bindings:
+        if not ports or any(not entry_port_allowed(policy, p) for p in ports) or bindings:
             fail('INVALID_DEPLOYMENT', '直连节点端口不在服务端允许列表，或包含落地绑定')
     elif not bindings or ports:
         fail('INVALID_DEPLOYMENT', '落地机必须选择中转入口，节点端口由落地绑定生成')
@@ -484,10 +491,9 @@ def valid_worker(policy, core_asset, actor, params):
         fail('PROTECTED_PORT', '初始化只允许保留已登记的 SSH 端口')
     if op in ('firewall', 'probe'):
         ports = inner['ports']
-        allowed = policy.get('entry_ports', [443, 8443, 2053, 2083, 2087, 2096])
         if (not isinstance(ports, list) or not 1 <= len(ports) <= 32
                 or any(type(p) is not int or p == me['ssh_port'] or p == 8444
-                       or not (p in allowed or 30000 <= p <= 30999) for p in ports)):
+                       or not (entry_port_allowed(policy, p) or 30000 <= p <= 30999) for p in ports)):
             fail('PROTECTED_PORT', '远程端口不符合工作机策略或碰到受保护端口')
     if op == 'firewall':
         sources = inner['source_ips']
