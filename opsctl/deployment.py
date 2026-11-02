@@ -166,6 +166,8 @@ def load_policy():
         fail('POLICY_INVALID', '入口端口策略不合法')
     if type(policy.get('allow_custom_ports', True)) is not bool:
         fail('POLICY_INVALID', '自定义端口策略必须为布尔值')
+    if policy.get('nginx_provider', 'system') not in ('system', 'bt'):
+        fail('POLICY_INVALID', 'Nginx 提供方只能是 system 或 bt')
     return policy
 
 
@@ -1033,6 +1035,18 @@ def coordinator_preflight(ctx, remote):
     return '所有目标稳定身份、工作机能力及 Xboard 入口端口复检通过'
 
 
+def reload_nginx(policy):
+    provider = policy.get('nginx_provider', 'system')
+    if provider == 'bt':
+        command(['/www/server/nginx/sbin/nginx', '-t'])
+        command(['/etc/init.d/nginx', 'reload'])
+    elif provider == 'system':
+        command(['/usr/sbin/nginx', '-t'])
+        command(['/usr/bin/systemctl', 'reload', 'nginx'])
+    else:
+        fail('POLICY_INVALID', 'Nginx 提供方不在固定动作允许列表中')
+
+
 def coordinator_registration(ctx):
     p = ctx.secret['params']
     target = asset(ctx.policy, p['target_asset_id'])
@@ -1064,8 +1078,7 @@ def coordinator_registration(ctx):
             if not any(r['kind'] == 'ufw' and r['args'] == args for r in ctx.secret['resources']):
                 ctx.resource({'kind': 'ufw', 'args': args, 'marker': marker, 'confirmed': True})
             command(['/usr/sbin/ufw', *args, 'comment', marker])
-    command(['/usr/sbin/nginx', '-t'])
-    command(['/usr/bin/systemctl', 'reload', 'nginx'])
+    reload_nginx(ctx.policy)
     return '汇总机主机清单与来源白名单已登记，Nginx 配置检查及重载通过'
 
 

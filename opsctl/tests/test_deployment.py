@@ -185,6 +185,24 @@ class Deployment(base.Base):
             with self.subTest(params=params), self.assertRaises(self.m.Rejected):
                 self.d.normalize(self.policy, params)
 
+    def test_nginx_provider_checks_configuration_before_reload(self):
+        expected = {
+            'bt': [['/www/server/nginx/sbin/nginx', '-t'], ['/etc/init.d/nginx', 'reload']],
+            'system': [['/usr/sbin/nginx', '-t'], ['/usr/bin/systemctl', 'reload', 'nginx']],
+        }
+        for provider, argv in expected.items():
+            with self.subTest(provider=provider), patch.object(self.d, 'command', return_value=b'') as cmd:
+                self.d.reload_nginx({'nginx_provider': provider})
+                self.assertEqual([c.args[0] for c in cmd.call_args_list], argv)
+        with patch.object(self.d, 'command', side_effect=self.m.Rejected('COMMAND_FAILED', 'invalid config')) as cmd:
+            with self.assertRaises(self.m.Rejected):
+                self.d.reload_nginx({'nginx_provider': 'bt'})
+            self.assertEqual(cmd.call_count, 1)
+        with patch.object(self.d, 'command') as cmd:
+            with self.assertRaises(self.m.Rejected):
+                self.d.reload_nginx({'nginx_provider': 'bt; sh'})
+            cmd.assert_not_called()
+
     def test_custom_ports_are_supported_without_bypassing_protected_ports(self):
         norm = self.d.normalize(self.policy, {**self.params, 'node_ports': [12345]})
         self.assertEqual(norm['node_ports'], [12345])

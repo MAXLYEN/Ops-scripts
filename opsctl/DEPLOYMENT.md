@@ -29,6 +29,7 @@ Windows 只提交受限 JSON 计划。汇总机保管服务凭据与独立编排
 - 新目标没有 Xboard machine_id 时通过管理 API 建机器；已有机器必须登记准确 ID。已有 xboard-node 配置必须额外登记 xboard_config_sha256，且其 machine_id 一致；否则保留原服务并拒绝覆盖。原有 service 单元保持不变。
 - 软件 artifacts 固定 url/version/sha256，可指定 tar 包内固定 member。只取该普通成员，拒绝链接、路径遍历式解包及非 ELF 文件。
 - `probe_binary` 是中心现有 sing-box 的绝对路径，必须填写其 SHA-256。`probe_uuid_file` 使用已有且有权访问测试链路的验收账号 UUID。程序不创建用户、不扩大用户授权分组，不把该账号代入业务出站。
+- 汇总机使用宝塔 Nginx 时设置 `nginx_provider: "bt"`，按固定路径检查配置后调用 `/etc/init.d/nginx reload`；默认 `system` 使用系统 Nginx。配置检查失败不会重载。工作机 Reality 回源仍要求系统 Nginx。
 - `registration` 指定现有主机清单和 Nginx 来源白名单文件。可选 ingress_port 只为新登记目标 IP 增加指定端口来源规则，不修改 SSH 监听或防火墙默认策略。
 
 ### 面板契约
