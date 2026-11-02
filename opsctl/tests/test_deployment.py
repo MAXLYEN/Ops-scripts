@@ -212,6 +212,14 @@ class Deployment(base.Base):
             self.make_plan()
         self.assertEqual(err.exception.code, 'RUNNER_NOT_RUNNING')
 
+    def test_restart_waits_after_enqueue_and_verifies_active_service(self):
+        with patch.object(self.d.time, 'sleep') as sleep, patch.object(self.d, 'command', return_value=b'') as cmd:
+            result = self.d.worker_restart(None, {})
+        sleep.assert_called_once_with(5)
+        self.assertEqual(cmd.call_args_list[0].args[0], ['/usr/bin/systemctl', 'restart', 'xboard-node'])
+        self.assertEqual(cmd.call_args_list[1].args[0], ['/usr/bin/systemctl', 'is-active', 'xboard-node'])
+        self.assertIn('active', result['evidence'])
+
     def test_plan_binds_actor_job_policy_and_snapshot(self):
         plan = self.make_plan()
         request = {'job_id': plan['job_id'], 'plan_id': plan['plan_id']}
@@ -368,6 +376,37 @@ class Deployment(base.Base):
         with self.assertRaises(self.m.Rejected) as err:
             self.d.coordinator_publish(ctx)
         self.assertEqual(err.exception.code, 'VERIFY_REQUIRED')
+
+    def test_resume_write_preserves_external_changes(self):
+        ctx = self.d.Context(self.queued(), self.policy)
+        path = self.tmp / 'resume-config'
+        path.write_bytes(b'original')
+        path.chmod(0o600)
+        ctx.write(path, b'owned')
+        path.write_bytes(b'external')
+        with self.assertRaises(self.m.Rejected):
+            ctx.write(path, b'owned')
+        self.assertEqual(path.read_bytes(), b'external')
+
+    def test_rollback_reconciles_crash_after_file_restored(self):
+        ctx = self.d.Context(self.queued(), self.policy)
+        path = self.tmp / 'restore-config'
+        path.write_bytes(b'original')
+        path.chmod(0o600)
+        ctx.write(path, b'owned')
+        path.write_bytes(b'original')  # Killed between restoration and checkpoint.
+        with patch.object(self.d, 'command', return_value=b''):
+            self.d.rollback_files(ctx.secret)
+            self.d.rollback_files(ctx.secret)
+        self.assertEqual(path.read_bytes(), b'original')
+        self.assertTrue(ctx.secret['resources'][0]['reverted'])
+
+    def test_task_list_does_not_disclose_another_device_deployment(self):
+        job = self.queued()
+        own = self.m.list_jobs(self.asset, {'limit': 100}, ACTOR)
+        foreign = self.m.list_jobs(self.asset, {'limit': 100}, WORKER)
+        self.assertEqual([j['job_id'] for j in own['jobs']], [job['job_id']])
+        self.assertEqual(foreign['jobs'], [])
 
     def test_center_cannot_use_worker_initialization_api(self):
         with self.assertRaises(self.m.Rejected) as err:

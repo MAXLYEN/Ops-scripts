@@ -1,6 +1,6 @@
 # opsctl：OpsDeck 受控运维服务端
 
-本目录交付第一阶段的 Linux 服务端和首次接入安装器。它不是 `opsget` 菜单脚本；OpsDeck 只打包已确认提交中的单文件 `bootstrap.py`，在用户核对目标 SSH 主机指纹后，通过一次性 root 会话安装。日常连接只使用专用 `opsdeck` 账号。
+本目录交付 Linux 受限服务端、单文件首次接入安装器及独立真实部署 runner。它不是 `opsget` 菜单脚本；OpsDeck 只打包已确认提交中的单文件 `bootstrap.py`，在用户核对目标 SSH 主机指纹后，通过一次性 root 会话安装。日常连接只使用专用 `opsdeck` 账号。真实部署、固定哈希 payload、服务端策略与恢复边界见 [部署说明](DEPLOYMENT.md)。
 
 | 文件 | 版本 | 用途 |
 | --- | --- | --- |
@@ -24,7 +24,7 @@
 {"version":1,"ok":true,"data":{"asset_id":"<稳定 UUID>","opsctl_version":"1.0.0","artifact_sha256":"<64 位十六进制>","authorized_key_fingerprint":"SHA256:...","host_fingerprint":"SHA256:..."}}
 ```
 
-失败响应为 `{"version":1,"ok":false,"error":{"code":"...","message":"..."}}`，不包含口令、环境变量或私钥。客户端收到成功响应后关闭 root 连接，删除上传的临时目录，并用新密钥单独调用 `host.discover` 验收。重复安装同一版本和同一电脑密钥不改变权限、资产 ID 或授权文件；新电脑可用相同安装器加入新公钥。同一电脑换钥匙、不同版本覆盖、已有同名账号或来源不受信的配置会被拒绝。本阶段不提供在线升级或密钥轮换。
+失败响应为 `{"version":1,"ok":false,"error":{"code":"...","message":"..."}}`，不包含口令、环境变量或私钥。客户端收到成功响应后关闭 root 连接，删除上传的临时目录，并用新密钥单独调用 `host.discover` 验收。重复安装同一版本和同一电脑密钥不改变权限、资产 ID 或授权文件；新电脑可用相同安装器加入新公钥。同一电脑换钥匙、已有同名账号或来源不受信的配置会被拒绝。3.0.0 支持经独立 root 会话授权升级，保留稳定资产和现有授权；运行中任务会阻止升级，不开放日常受限通道替换代码。
 
 安装结果在服务器端由 root 管理：`/etc/opsctl/asset.json` 保存稳定资产 ID，`keys.json` 保存电脑 ID 与公钥，`authorized_keys` 只给 sshd 读取而不允许 `opsdeck` 写入；代码在 `/usr/local/lib/opsctl/opsctl.py`，`/usr/local/bin/opsctl`、`opsctl-ssh`、`opsctl-admin` 是 root 管理入口。安装器检查现有对象及权限，校验 sudoers 和 sshd 的有效设置，失败则回滚本轮创建的账号、文件和目录。
 

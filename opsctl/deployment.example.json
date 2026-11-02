@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "mode": "coordinator",
+  "domain_suffix": "example.net",
+  "entry_ports": [443, 8443, 2053, 2083, 2087, 2096],
+  "coordinator_fingerprints": [],
+  "ssh_key_file": "/etc/opsctl/coordinator-key",
+  "acme_email": "admin@example.net",
+  "assets": {
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": {
+      "name": "Center", "ip": "192.0.2.30", "ssh_port": 22,
+      "domain": "center.example.net", "runner_version": "3.0.0",
+      "host_key": "ssh-ed25519 REPLACE_WITH_INDEPENDENTLY_VERIFIED_PUBLIC_KEY"
+    },
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb": {
+      "name": "Test-HK2", "ip": "192.0.2.10", "ssh_port": 22,
+      "domain": "test.example.net", "runner_version": "3.0.0",
+      "host_key": "ssh-ed25519 REPLACE_WITH_INDEPENDENTLY_VERIFIED_PUBLIC_KEY"
+    }
+  },
+  "xboard": {
+    "url": "https://panel.example.net", "admin_path": "REPLACE_WITH_SECURE_PATH",
+    "token_file": "/etc/opsctl/secrets/xboard.token", "template_node_id": 1,
+    "public_group_ids": ["1"], "internal_group_ids": ["3"]
+  },
+  "cloudflare": {
+    "zone_id": "00000000000000000000000000000000",
+    "token_file": "/etc/opsctl/secrets/cloudflare.token"
+  },
+  "komari": {"url": "https://monitor.example.net", "token_file": "/etc/opsctl/secrets/komari.token"},
+  "artifacts": {
+    "xboard-node": {"url": "https://downloads.example.net/xboard-node-FIXED_VERSION.tar.gz",
+      "version": "REPLACE_WITH_FIXED_VERSION", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "member": "xboard-node"},
+    "komari-agent": {"url": "https://downloads.example.net/komari-agent-FIXED_VERSION",
+      "version": "REPLACE_WITH_FIXED_VERSION", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}
+  },
+  "registration": {"inventory_file": "/root/.vps-hosts.txt", "allowlist_file": "/etc/nginx/source-allowlist.conf"},
+  "probe_binary": "/usr/local/lib/opsctl/sing-box",
+  "probe_binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "probe_uuid_file": "/etc/opsctl/secrets/probe.uuid",
+  "exit_check_url": "https://api.ipify.org"
+}

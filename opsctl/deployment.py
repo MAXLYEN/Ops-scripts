@@ -52,7 +52,6 @@ RestartSec=3
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=read-only
 [Install]
 WantedBy=multi-user.target
 '''
@@ -114,6 +113,17 @@ def endpoint(url, test=False):
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         fail('HTTP_REDIRECT_DENIED', '接口重定向已拒绝，避免向其他地址发送凭据')
+
+
+class ArtifactRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old, new = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        hosts = {old.hostname}
+        if old.hostname == 'github.com':
+            hosts.update(('release-assets.githubusercontent.com', 'objects.githubusercontent.com'))
+        if new.scheme != 'https' or new.hostname not in hosts or new.username or new.password:
+            fail('ARTIFACT_REDIRECT_DENIED', '软件包重定向超出固定下载源范围')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def http(url, method='GET', body=None, bearer=None, *, test=False):
@@ -569,6 +579,9 @@ class Context:
                 fail('RESOURCE_CONFLICT', '同一任务试图用不同内容覆盖同一配置')
             if path.exists() and CORE.digest(CORE.read_owned(path, mode)) == new_hash:
                 return
+            if (not path.exists() and prior['old'] is not None) or (path.exists() and
+                    (prior['old'] is None or path.read_bytes() != base64.b64decode(prior['old']))):
+                fail('RESOURCE_CONFLICT', '恢复时配置已被外部修改，保留现场并停止覆盖')
         else:
             old, old_mode = None, None
             if path.exists() or path.is_symlink():
@@ -595,7 +608,7 @@ def verified_download(spec, *, test=False):
     if not CORE.HEX64_RE.fullmatch(spec['sha256']) or not re.fullmatch(r'[A-Za-z0-9._-]{1,64}', spec['version']):
         fail('ARTIFACT_INVALID', '软件包必须固定版本和 SHA-256')
     url = endpoint(spec['url'], test)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), ArtifactRedirect())
     try:
         with opener.open(url, timeout=90) as reply:
             data = reply.read(128 * 1024 * 1024 + 1)
@@ -622,7 +635,7 @@ def worker_initialize(ctx, p):
     if not ctx.value('initialized'):
         command(['/usr/bin/apt-get', 'update'], timeout=600)
         command(['/usr/bin/apt-get', '-y', 'upgrade'], timeout=3600)
-        command(['/usr/bin/apt-get', '-y', 'install', 'ufw', 'fail2ban', 'ca-certificates', 'nginx'], timeout=900)
+        command(['/usr/bin/apt-get', '-y', 'install', 'ufw', 'fail2ban', 'ca-certificates'], timeout=900)
         command(['/usr/bin/timedatectl', 'set-timezone', 'UTC'])
         # Preserve the registered management port before enabling a fresh firewall.
         command(['/usr/sbin/ufw', 'allow', str(p['ssh_port']) + '/tcp'])
@@ -682,6 +695,10 @@ def worker_reality(ctx, p):
     if not pathlib.Path('/usr/sbin/nginx').exists():
         command(['/usr/bin/apt-get', 'update'], timeout=600)
         command(['/usr/bin/apt-get', '-y', 'install', 'nginx', 'ca-certificates'], timeout=900)
+        default = pathlib.Path('/etc/nginx/sites-enabled/default')
+        if default.is_symlink() and default.lstat().st_uid == 0 and default.resolve() == pathlib.Path('/etc/nginx/sites-available/default'):
+            ctx.resource({'kind': 'removed_symlink', 'path': str(default), 'target': os.readlink(default)})
+            default.unlink()
     config = ('server {\n listen 127.0.0.1:8444 ssl;\n server_name ' + domain + ';\n'
               ' ssl_certificate ' + root + '/fullchain.pem;\n ssl_certificate_key ' + root + '/privkey.pem;\n'
               ' ssl_protocols TLSv1.2 TLSv1.3;\n location / { return 200 "Welcome\\n"; }\n}\n')
@@ -796,6 +813,8 @@ def worker_confirm_firewall(ctx, p):
 
 
 def worker_restart(_ctx, _p):
+    # The SSH request has already persisted/acknowledged this worker task.
+    time.sleep(5)
     command(['/usr/bin/systemctl', 'restart', 'xboard-node'])
     command(['/usr/bin/systemctl', 'is-active', 'xboard-node'])
     return {'evidence': 'xboard-node 已重启并处于 active；任务由独立 runner 持续保存'}
@@ -812,14 +831,15 @@ def worker_probe(ctx, p):
     return {'certificates': certs, 'evidence': '各节点端口 TLS 证书域名与信任链握手通过'}
 
 
-def rollback_files(state):
+def rollback_files(state, persist=lambda: None):
     # Validate drift before stopping any service or changing any resource.
     for resource in state['resources']:
         if resource.get('kind') == 'file' and not resource.get('reverted'):
             path = pathlib.Path(resource['path'])
             if path.exists():
                 CORE.safe_file(path)
-                if CORE.digest(path.read_bytes()) != resource['new_sha256']:
+                if (CORE.digest(path.read_bytes()) != resource['new_sha256'] and
+                        (resource['old'] is None or path.read_bytes() != base64.b64decode(resource['old']))):
                     fail('ROLLBACK_DRIFT', '配置被其他操作修改，停止覆盖：' + str(path))
             elif resource['old'] is not None:
                 fail('ROLLBACK_DRIFT', '原配置被外部删除，停止自动恢复：' + str(path))
@@ -836,6 +856,10 @@ def rollback_files(state):
             path = pathlib.Path(resource['path'])
             if path.exists():
                 CORE.safe_file(path)
+                if resource['old'] is not None and path.read_bytes() == base64.b64decode(resource['old']):
+                    resource['reverted'] = True
+                    persist()
+                    continue
                 if CORE.digest(path.read_bytes()) != resource['new_sha256']:
                     fail('ROLLBACK_DRIFT', '配置被其他操作修改，停止覆盖：' + str(path))
                 if resource['old'] is None:
@@ -850,7 +874,15 @@ def rollback_files(state):
             if resource['enabled']:
                 command(['/usr/bin/systemctl', 'enable', resource['unit']])
             command(['/usr/bin/systemctl', 'start', resource['unit']])
+        elif kind == 'removed_symlink':
+            path = pathlib.Path(resource['path'])
+            if path.exists() or path.is_symlink():
+                if not path.is_symlink() or os.readlink(path) != resource['target']:
+                    fail('ROLLBACK_DRIFT', '原默认站点路径已变化，停止恢复')
+            else:
+                path.symlink_to(resource['target'])
         resource['reverted'] = True
+        persist()
     command(['/usr/bin/systemctl', 'daemon-reload'])
     for resource in state['resources']:
         if resource.get('kind') != 'service_state':
@@ -860,7 +892,7 @@ def rollback_files(state):
             continue
         if resource['enabled'] == 'enabled':
             command(['/usr/bin/systemctl', 'enable', unit])
-        elif resource['enabled'] == 'disabled':
+        elif resource['enabled'] in ('disabled', '', 'not-found'):
             command(['/usr/bin/systemctl', 'disable', unit])
         command(['/usr/bin/systemctl', 'restart' if resource['active'] else 'stop', unit])
 
@@ -872,7 +904,7 @@ def worker_rollback(ctx, p):
     if original.get('status') in ('queued', 'running'):
         fail('JOB_RUNNING', '原工作任务仍在执行，不能同时回滚')
     state = owned_json(private_path(original['job_id']))
-    rollback_files(state)
+    rollback_files(state, lambda: save(private_path(original['job_id']), state))
     save(private_path(original['job_id']), state)
     return {'evidence': '本工作任务可恢复资源已撤销；系统更新与已有共享服务保留'}
 
@@ -933,7 +965,10 @@ class Remote:
         request = {'job_id': child, 'operation': operation, 'params': params}
         if marker not in requests:
             requests[marker] = request
-            ctx.resource({'kind': 'worker', 'asset_id': aid, 'job_id': child})
+            if operation == 'rollback':
+                ctx.persist()  # Do not add cleanup tasks to the resources being cleaned.
+            else:
+                ctx.resource({'kind': 'worker', 'asset_id': aid, 'job_id': child})
         elif requests[marker] != request:
             fail('PLAN_MISMATCH', '恢复时固定动作参数变化，已停止重复执行')
         self.call(aid, 'deployment.worker', request)

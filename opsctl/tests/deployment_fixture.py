@@ -4,6 +4,7 @@ import http.server
 import json
 import os
 import pathlib
+import signal
 import ssl
 import subprocess
 import sys
@@ -45,6 +46,16 @@ def main():
     if policy_path.exists() and json.loads(policy_path.read_text()).get('test_mode') is not True:
         raise SystemExit('Refusing to replace a non-test deployment policy')
     ROOT.mkdir(mode=0o700, exist_ok=True)
+    for pid_name in ('tls.pid', 'runner.pid'):
+        pid_file = ROOT / pid_name
+        if pid_file.exists():
+            pid = int(pid_file.read_text())
+            cmdline = pathlib.Path('/proc') / str(pid) / 'cmdline'
+            if cmdline.exists():
+                value = cmdline.read_bytes()
+                if b'deployment_fixture.py' in value or b'/usr/local/lib/opsctl/deployment.py' in value:
+                    os.kill(pid, signal.SIGTERM)
+    time.sleep(.3)
     run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
          '-subj', '/CN=OpsDeck Disposable Test CA', '-keyout', str(ROOT / 'ca.key'), '-out', str(ROOT / 'ca.crt')])
     run(['openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=' + DOMAIN,
